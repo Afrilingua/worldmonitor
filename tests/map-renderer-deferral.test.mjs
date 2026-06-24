@@ -128,4 +128,39 @@ describe('map renderer deferral boundary', () => {
       );
     }
   });
+
+  it('gates desktop DeckGL startup behind viewport idle or first interaction', () => {
+    const mapContainer = parseSource('src/components/MapContainer.ts');
+    const cls = mapContainerClass(mapContainer);
+    const members = classMemberNames(cls);
+
+    assert.ok(
+      members.has('rendererDemandCleanup'),
+      'MapContainer should keep a cleanup handle for pending renderer demand listeners',
+    );
+
+    const initBody = methodBodyText(cls, 'init');
+    assert.match(
+      initBody,
+      /await\s+this\.waitForDeckRendererDemand\(token\)[\s\S]*await\s+this\.createDeckGLMap\(token\)/,
+      'DeckGL renderer creation should wait for the demand gate before importing maplibre/deck',
+    );
+
+    const demandBody = methodBodyText(cls, 'waitForDeckRendererDemand');
+    assert.match(demandBody, /IntersectionObserver/, 'demand gate should observe map viewport visibility');
+    assert.match(demandBody, /requestIdleCallback/, 'visible maps should wait for browser idle before loading DeckGL');
+    assert.match(demandBody, /pointerdown/, 'first map pointer interaction should release the demand gate');
+    assert.match(demandBody, /wheel/, 'first map wheel interaction should release the demand gate');
+    assert.match(demandBody, /touchstart/, 'first touch interaction should release the demand gate');
+    assert.match(
+      demandBody,
+      /idleFallbackDelayId[\s\S]*window\.clearTimeout\(idleFallbackDelayId\)/,
+      'requestIdleCallback fallback timers should be canceled when the demand wait is cleaned up',
+    );
+    assert.match(
+      demandBody,
+      /fallbackDelayId\s*=\s*window\.setTimeout\([\s\S]*DECK_RENDERER_MAX_WAIT_MS/,
+      'demand gate must arm a universal backstop timer (not only when IntersectionObserver is absent) so an off-screen / partially-visible / deferred-mounted map always loads instead of hanging on the shell',
+    );
+  });
 });
