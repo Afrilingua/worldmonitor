@@ -78,8 +78,11 @@ function readConfig(env: Record<string, string | undefined> = process.env as Rec
     invalidPrimaryRaw = rawPrimary;
   }
 
-  // SHADOW: default-on kill switch. Only exactly '0' disables.
-  const shadowEnabled = env.BRIEF_WHY_MATTERS_SHADOW !== '0';
+  // SHADOW: opt-in. Only exactly '1' enables. The original default-on
+  // rollout ran BOTH the analyst and gemini paths on every cache miss and
+  // silently kept doubling gemini spend after the comparison window ended
+  // (#4893) — a fresh deploy must never pay 2× unless someone asked for it.
+  const shadowEnabled = env.BRIEF_WHY_MATTERS_SHADOW === '1';
 
   // SAMPLE_PCT: default 100. Invalid/out-of-range → 100 + warn.
   const rawSample = env.BRIEF_WHY_MATTERS_SHADOW_SAMPLE_PCT;
