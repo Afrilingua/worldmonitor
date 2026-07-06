@@ -920,8 +920,8 @@ function makePrediction(domain, region, title, probability, confidence, timeHori
     title,
     scenario: '',
     feedSummary: '',
-    probability: Math.round(Math.max(0, Math.min(1, probability)) * 1000) / 1000,
-    confidence: Math.round(Math.max(0, Math.min(1, confidence)) * 1000) / 1000,
+    probability: Math.round(Math.max(0, Math.min(1, Number.isFinite(probability) ? probability : 0)) * 1000) / 1000,
+    confidence: Math.round(Math.max(0, Math.min(1, Number.isFinite(confidence) ? confidence : 0)) * 1000) / 1000,
     timeHorizon,
     signals,
     cascades: [],
@@ -2189,7 +2189,8 @@ function detectFromPredictionMarkets(inputs) {
   const markets = inputs.predictionMarkets?.geopolitical || [];
 
   for (const m of markets) {
-    const yesPrice = (m.yesPrice || 50) / 100;
+    if (!Number.isFinite(m?.yesPrice)) continue;
+    const yesPrice = m.yesPrice / 100;
     if (yesPrice < 0.6 || yesPrice > 0.9) continue;
     const tags = tagRegions(m.title);
     if (tags.length === 0) continue;
@@ -2360,6 +2361,7 @@ function calibrateWithMarkets(predictions, markets) {
         return { market: m, sameMacroRegion, ...match };
       })
       .filter(item => {
+        if (!Number.isFinite(item.market.yesPrice)) return false; // a price-less anchor would blend toward a fabricated 50%
         if (item.tagMismatch && item.regionHits === 0) return false;
         const hasSpecificRegionSignal = item.regionHits > 0 || item.tagOverlap;
         const hasSemanticOverlap = item.titleHits > 0 || item.domainHits > 0;
@@ -2375,7 +2377,7 @@ function calibrateWithMarkets(predictions, markets) {
     const best = candidates[0];
     const match = best?.market || null;
     if (match) {
-      const marketProb = (match.yesPrice || 50) / 100;
+      const marketProb = match.yesPrice / 100;
       pred.calibration = {
         marketTitle: match.title,
         marketPrice: +marketProb.toFixed(3),

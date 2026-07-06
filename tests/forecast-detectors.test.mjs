@@ -542,6 +542,48 @@ describe('word-boundary term matching: no substring false positives (#4933)', ()
   });
 });
 
+describe('non-finite probability guards (#4933)', () => {
+  it('makePrediction: NaN probability is coerced to a finite value, never serialized as null', () => {
+    const pred = makePrediction('conflict', 'Middle East', 'Test', NaN, 0.5, '7d', []);
+    assert.ok(Number.isFinite(pred.probability), `probability is ${pred.probability}`);
+    assert.equal(JSON.parse(JSON.stringify(pred)).probability, pred.probability);
+  });
+
+  it('makePrediction: undefined probability and NaN confidence are coerced to finite values', () => {
+    const pred = makePrediction('conflict', 'Middle East', 'Test', undefined, NaN, '7d', []);
+    assert.ok(Number.isFinite(pred.probability));
+    assert.ok(Number.isFinite(pred.confidence));
+  });
+
+  it('detectFromPredictionMarkets: non-numeric yesPrice row is skipped, not published with NaN', () => {
+    const preds = detectFromPredictionMarkets({
+      predictionMarkets: {
+        geopolitical: [{ title: 'Will Iran attack escalate in 2026?', yesPrice: 'oops', source: 'polymarket' }],
+      },
+    });
+    assert.equal(preds.length, 0);
+  });
+
+  it('detectFromPredictionMarkets: finite yesPrice in band still emits (positive control)', () => {
+    const preds = detectFromPredictionMarkets({
+      predictionMarkets: {
+        geopolitical: [{ title: 'Will Iran attack escalate in 2026?', yesPrice: 75, source: 'polymarket' }],
+      },
+    });
+    assert.equal(preds.length, 1);
+    assert.equal(preds[0].probability, 0.75);
+  });
+
+  it('calibrateWithMarkets: matching market with a non-finite price is skipped, not anchored at 50%', () => {
+    const pred = makePrediction('conflict', 'Middle East', 'Escalation', 0.7, 0.6, '7d', []);
+    calibrateWithMarkets([pred], {
+      geopolitical: [{ title: 'Will Iran conflict escalate in MENA?', source: 'polymarket', volume: 50000 }],
+    });
+    assert.equal(pred.calibration, null);
+    assert.equal(pred.probability, 0.7);
+  });
+});
+
 describe('computeTrends', () => {
   it('no prior: all trends set to stable', () => {
     const pred = makePrediction('conflict', 'Iran', 'Test', 0.6, 0.5, '7d', []);
