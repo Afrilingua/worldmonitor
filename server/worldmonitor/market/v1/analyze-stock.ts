@@ -1394,9 +1394,14 @@ function buildEmptyAnalysisResponse(symbol: string, name: string, includeNews: b
   };
 }
 
+export type AnalyzeStockOptions = {
+  now?: Date;
+};
+
 export async function analyzeStock(
   _ctx: ServerContext,
   req: AnalyzeStockRequest,
+  options: AnalyzeStockOptions = {},
 ): Promise<AnalyzeStockResponse> {
   const symbol = sanitizeSymbol(req.symbol || '');
   if (!symbol) {
@@ -1410,7 +1415,7 @@ export async function analyzeStock(
   // v3 rows carry old-model output and must age out at cutover.
   const cacheKey = `market:analyze-stock:v4:${symbol}:${includeNews ? 'news' : 'no-news'}${nameSuffix}`;
 
-  const cached = await cachedFetchJson<AnalyzeStockResponse>(cacheKey, CACHE_TTL_SECONDS, async () => {
+  const fetchFreshAnalysis = async (): Promise<AnalyzeStockResponse | null> => {
     const [history, analystData] = await Promise.all([
       fetchYahooHistory(symbol),
       fetchYahooAnalystData(symbol),
@@ -1424,7 +1429,7 @@ export async function analyzeStock(
     // regular session the current price is already live, and while closed
     // there is no extended tape.
     const marketSession = usEquityHoursApply(symbol, history.currency || 'USD')
-      ? getUsEquitySessionAt()
+      ? getUsEquitySessionAt(options.now)
       : '';
     const [headlines, dividend, extendedQuote] = await Promise.all([
       includeNews ? searchRecentStockHeadlines(symbol, name, NEWS_LIMIT).then((r) => r.headlines) : Promise.resolve([]),
@@ -1452,13 +1457,17 @@ export async function analyzeStock(
     });
     await storeStockAnalysisSnapshot(response, includeNews);
     return response;
-  }, undefined, {
-    // Worst-case fetcher budget: 2× UPSTREAM_TIMEOUT_MS sequenced (10s+10s for
-    // history/analyst then headlines/dividend) + 20s LLM overlay + small
-    // overhead. 60s safely sits above this so the cache safety net (#3539)
-    // doesn't pre-empt the caller's own per-stage timeouts.
-    timeoutMs: 60_000,
-  });
+  };
+
+  const cached = options.now
+    ? await fetchFreshAnalysis()
+    : await cachedFetchJson<AnalyzeStockResponse>(cacheKey, CACHE_TTL_SECONDS, fetchFreshAnalysis, undefined, {
+        // Worst-case fetcher budget: 2× UPSTREAM_TIMEOUT_MS sequenced (10s+10s for
+        // history/analyst then headlines/dividend) + 20s LLM overlay + small
+        // overhead. 60s safely sits above this so the cache safety net (#3539)
+        // doesn't pre-empt the caller's own per-stage timeouts.
+        timeoutMs: 60_000,
+      });
 
   if (cached) return cached;
 
