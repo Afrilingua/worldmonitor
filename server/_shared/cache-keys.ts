@@ -83,6 +83,8 @@ export const CLIMATE_OCEAN_ICE_KEY = 'climate:ocean-ice:v1';
 export const CLIMATE_NEWS_KEY = 'climate:news-intelligence:v1';
 export const HEALTH_AIR_QUALITY_KEY = 'health:air-quality:v1';
 export const CHINA_COVERAGE_HEALTH_KEY = 'health:china-coverage:v1';
+export const CHINA_MACRO_KEY = 'economic:china:macro:v1';
+export const CHINA_RELEASE_CALENDAR_KEY = 'economic:china:release-calendar:v1';
 
 export const ENERGY_MIX_KEY_PREFIX = 'energy:mix:v1:';
 export const ENERGY_EXPOSURE_INDEX_KEY = 'energy:exposure:v1:index';
@@ -173,6 +175,8 @@ export const BOOTSTRAP_CACHE_KEYS: Record<string, string> = {
   imfGrowth:        'economic:imf:growth:v1',
   imfLabor:         'economic:imf:labor:v1',
   imfExternal:      'economic:imf:external:v1',
+  chinaMacro:       'economic:china:macro:v1',
+  chinaReleaseCalendar: 'economic:china:release-calendar:v1',
   shippingRates:    'supply_chain:shipping:v2',
   chokepoints:      'supply_chain:chokepoints:v4',
   minerals:         'supply_chain:minerals:v2',
@@ -271,6 +275,7 @@ export const BOOTSTRAP_TIERS: Record<string, 'slow' | 'fast'> = {
   bisPolicy: 'slow', bisExchange: 'slow', bisCredit: 'slow',
   bisDsr: 'slow', bisPropertyResidential: 'slow', bisPropertyCommercial: 'slow',
   imfMacro: 'slow', imfGrowth: 'slow', imfLabor: 'slow', imfExternal: 'slow',
+  chinaMacro: 'slow', chinaReleaseCalendar: 'slow',
   minerals: 'slow', giving: 'slow', sectors: 'slow',
   progressData: 'slow', renewableEnergy: 'slow',
   etfFlows: 'slow', shippingRates: 'fast', wildfires: 'slow',
