@@ -262,11 +262,17 @@ test('POST fail-closed limiter receives Vercel ctx for degraded telemetry', () =
   const src = readFileSync(new URL('./wm-session.js', import.meta.url), 'utf8');
 
   assert.match(src, /export\s+default\s+async\s+function\s+handler\s*\(\s*req\s*,\s*ctx\s*\)/);
-  assert.match(
-    src,
-    /checkRateLimit\(req,\s*cors,\s*\{[\s\S]*?failClosed:\s*true,[\s\S]*?ctx,/,
-    'wm-session must pass Vercel ctx to the fail-closed rate limiter so Sentry delivery can use waitUntil',
-  );
+  // Extract the wm-session checkRateLimit options block and assert every
+  // required property lives inside it. This avoids the overmatch bug where a
+  // later `ctx,` in the source file satisfied a looser regex.
+  const match = src.match(/checkRateLimit\(req,\s*cors,\s*\{([\s\S]*?)\}\);/);
+  assert.ok(match, 'expected one checkRateLimit(req, cors, {...}) call');
+  const opts = match[1];
+  assert.match(opts, /failClosed:\s*true/, 'rate limiter must be fail-closed');
+  assert.match(opts, /ctx,/, 'must pass Vercel ctx for waitUntil/Sentry telemetry');
+  assert.match(opts, /scope:\s*SESSION_RATE_LIMIT_SCOPE/, 'must scope to wm-session');
+  assert.match(opts, /limit:\s*SESSION_RATE_LIMIT_PER_MINUTE/, 'must use production limit constant');
+  assert.match(opts, /window:\s*SESSION_RATE_LIMIT_WINDOW/, 'must use production window constant');
 });
 
 test('GET method is rejected with 405', async () => {
@@ -519,6 +525,37 @@ test('legacy widget/pro secret checks reject prefix and length mismatches', asyn
   } finally {
     process.env.WIDGET_AGENT_KEY = previousWidget;
     process.env.PRO_WIDGET_KEY = previousPro;
+    process.env.WORLDMONITOR_VALID_KEYS = previousEnterprise;
+  }
+});
+
+test('legacy key length boundary: 512 accepted, 513 rejected', async () => {
+  const previousEnterprise = process.env.WORLDMONITOR_VALID_KEYS;
+  const key512 = 'a'.repeat(512);
+  const key513 = 'b'.repeat(513);
+  process.env.WORLDMONITOR_VALID_KEYS = `${key512}`;
+
+  try {
+    const accepted = await handler(new Request('https://api.worldmonitor.app/api/wm-session', {
+      method: 'POST',
+      headers: {
+        origin: 'https://worldmonitor.app',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ proKey: key512 }),
+    }));
+    assert.equal(accepted.status, 200);
+
+    const rejected = await handler(new Request('https://api.worldmonitor.app/api/wm-session', {
+      method: 'POST',
+      headers: {
+        origin: 'https://worldmonitor.app',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ proKey: key513 }),
+    }));
+    assert.equal(rejected.status, 401);
+  } finally {
     process.env.WORLDMONITOR_VALID_KEYS = previousEnterprise;
   }
 });

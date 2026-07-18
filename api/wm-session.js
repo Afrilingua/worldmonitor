@@ -87,11 +87,21 @@ async function isValidProKey(key) {
   return (await matchesEnvSecret(key, 'PRO_WIDGET_KEY')) || await isValidEnterpriseKey(key);
 }
 
+const BODY_READ_TIMEOUT_MS = Number(process.env.WM_SESSION_BODY_TIMEOUT_MS) || 5_000;
+
 async function readBody(req) {
   const contentType = req.headers.get('content-type') || '';
   if (!contentType.toLowerCase().includes('application/json')) return {};
   try {
-    const parsed = await req.json();
+    // Adversarial DoS guard: a request body stream that never ends must not
+    // hold the edge function open forever. Race json() against a tight budget.
+    const parsed = await Promise.race([
+      req.json(),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error('request body read timeout')),
+        BODY_READ_TIMEOUT_MS,
+      )),
+    ]);
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
     return {};

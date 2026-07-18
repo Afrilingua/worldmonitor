@@ -20,6 +20,9 @@ import { enqueueSentryCall } from '@/bootstrap/sentry-defer';
 const STORAGE_KEY = 'wm-session-exp';
 // Refresh well before expiry so a half-loaded page doesn't fail mid-flight.
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+// Abort a session mint that stalls. Without this, a hung /api/wm-session response
+// strands every concurrent caller on the shared `inflight` promise forever.
+let fetchNewSessionTimeoutMs = 10_000;
 // Periodic refresh cadence — wake every 30 minutes to renew before the
 // 12-hour token expires. Long-lived tabs (overnight, multi-day) lose the
 // token without this; the original implementation had no auto-refresh.
@@ -112,6 +115,7 @@ async function fetchNewSession(body?: { widgetKey?: string; proKey?: string }): 
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(fetchNewSessionTimeoutMs),
     });
     if (!resp.ok) return null;
     const data = await resp.json() as { exp?: unknown };
@@ -185,6 +189,12 @@ export function __resetWmSessionForTests(): void {
   interceptorInstalled = false;
   sessionDeadUntil = 0;
   sentryEnqueue = enqueueSentryCall;
+}
+
+// Test-only: shrink the mint timeout so adversarial repros for hung fetches
+// don't need to wait the production 10s budget.
+export function __setWmSessionFetchTimeoutForTests(ms: number): void {
+  fetchNewSessionTimeoutMs = ms;
 }
 
 // Test-only: observe the once-per-episode dead-session Sentry capture without

@@ -32,6 +32,19 @@ const WORLDMONITOR_VALID_KEYS = (process.env.WORLDMONITOR_VALID_KEYS ?? '')
   .map((v) => v.trim())
   .filter(Boolean);
 
+const WIDGET_AGENT_BODY_TIMEOUT_MS = Number(process.env.WIDGET_AGENT_BODY_TIMEOUT_MS) || 5_000;
+
+async function readRequestBody(req: Request): Promise<string> {
+  // Adversarial DoS guard: a POST body stream that never ends must not hold the
+  // edge function open forever. Race text() against a tight budget.
+  return Promise.race([
+    req.text(),
+    new Promise<string>((_, reject) =>
+      setTimeout(() => reject(new Error('widget-agent body read timeout')), WIDGET_AGENT_BODY_TIMEOUT_MS),
+    ),
+  ]);
+}
+
 async function hasValidWorldMonitorKey(key: string): Promise<boolean> {
   return timingSafeIncludes(key, WORLDMONITOR_VALID_KEYS);
 }
@@ -188,7 +201,12 @@ export default async function handler(req: Request): Promise<Response> {
   }
 
   // ── Agent call (POST, SSE stream) ─────────────────────────────────────────
-  let rawBody = await req.text();
+  let rawBody: string;
+  try {
+    rawBody = await readRequestBody(req);
+  } catch {
+    return json({ error: 'Request body read timeout' }, 408, corsHeaders);
+  }
 
   // Normalise tier in body to match the server-validated isPro flag.
   // Prevents the relay from seeing tier:pro without the matching X-Pro-Key.

@@ -28,7 +28,7 @@ export interface CreateApiKeyResult {
 }
 
 /** Generate a random key: wm_<40 hex chars> (20 bytes = 160 bits). */
-function generateKey(): string {
+export function generateKey(): string {
   const raw = new Uint8Array(20);
   crypto.getRandomValues(raw);
   const hex = Array.from(raw, (b) => b.toString(16).padStart(2, '0')).join('');

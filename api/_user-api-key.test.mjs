@@ -85,7 +85,8 @@ async function withMockedConvex(fn, options = {}) {
     if (url.endsWith('/api/internal-validate-api-key')) {
       const value = Object.hasOwn(options, 'validateResponse')
         ? options.validateResponse
-        : { keyId: 'key_1', userId: 'user_api_owner', name: 'pipeline' };
+        // Convex validateKeyByHash returns `id`, not `keyId`; bootstrap maps it.
+        : { id: 'key_1', userId: 'user_api_owner', name: 'pipeline' };
       return new Response(JSON.stringify(value), {
         status: options.validateStatus ?? 200,
         headers: { 'Content-Type': 'application/json' },
@@ -486,6 +487,17 @@ test('user-key validation rate limit fails closed when Redis counter has no expi
     assert.equal(result.headers['X-RateLimit-Mode'], 'degraded');
     assert.equal(result.headers['Cache-Control'], 'no-store');
   }, { redisResults: [{ result: 2 }, { result: 0 }, { result: -1 }] });
+});
+
+test('user-key validation rate limit accepts exactly the configured maximum (600)', async () => {
+  await withMockedConvex(async () => {
+    const req = new Request('https://api.worldmonitor.app/api/bootstrap', {
+      headers: { 'cf-connecting-ip': '203.0.113.7' },
+    });
+    const result = await checkBootstrapUserApiKeyRateLimit(req);
+
+    assert.equal(result.ok, true);
+  }, { redisResults: [{ result: 600 }, { result: 0 }, { result: 17 }] });
 });
 
 test('user-key validation rate limit uses current TTL for Retry-After when over limit', async () => {

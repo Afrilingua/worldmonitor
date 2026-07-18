@@ -242,10 +242,10 @@ async function validateBootstrapUserApiKeyHash(keyHash) {
   // gateway's validateUserApiKey (server/_shared/user-api-key.ts) — which reads
   // and writes the same `user-api-key:<hash>` key typed as UserKeyResult — never
   // reads back a value with keyId/name undefined when bootstrap won the cache
-  // race. keyId/name come straight from internal-validate-api-key.
+  // race. Convex validateKeyByHash returns `id`, so map it to `keyId` here.
   await writeCachedJson(
     cacheKey,
-    { userId: value.userId, keyId: value.keyId, name: value.name },
+    { userId: value.userId, keyId: value.id, name: value.name },
     USER_KEY_CACHE_TTL_SECONDS,
   );
   return {
