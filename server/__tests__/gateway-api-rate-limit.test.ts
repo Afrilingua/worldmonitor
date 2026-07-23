@@ -28,11 +28,13 @@ vi.mock("../_shared/api-key-rate-limit", () => ({
 
 // --- Stub the per-IP layer: spy whether checkRateLimit runs ------------------
 const checkRateLimit = vi.fn().mockResolvedValue(null);
+const checkFailClosedScopedIpRateLimit = vi.fn().mockResolvedValue(null);
 vi.mock("../_shared/rate-limit", async (importActual) => {
   const actual = await importActual<typeof import("../_shared/rate-limit")>();
   return {
     ...actual,
     checkRateLimit: (...a: unknown[]) => checkRateLimit(...a),
+    checkFailClosedScopedIpRateLimit: (...a: unknown[]) => checkFailClosedScopedIpRateLimit(...a),
     checkEndpointRateLimit: vi.fn().mockResolvedValue(null),
     hasEndpointRatePolicy: () => false,
   };
@@ -107,6 +109,7 @@ beforeEach(() => {
     rollback: async () => {},
   });
   checkRateLimit.mockClear().mockResolvedValue(null);
+  checkFailClosedScopedIpRateLimit.mockReset().mockResolvedValue(null);
   delete process.env.UPSTASH_REDIS_REST_URL;
   delete process.env.UPSTASH_REDIS_REST_TOKEN;
 });

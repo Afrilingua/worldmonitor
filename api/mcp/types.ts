@@ -271,6 +271,10 @@ export interface McpHandlerDeps {
   // production impl fail-softs to null internally; a THROW from a dep is
   // treated as auth-backend-transient (503), mirroring resolveBearerToContext.
   validateUserApiKey: (key: string) => Promise<{ userId: string } | null>;
+  // Fail-closed per-IP guard that runs before the unattributed Convex lookup.
+  // Kept injectable so auth ordering and backpressure are testable without
+  // contacting Redis.
+  guardUserApiKeyValidation: (request: Request, corsHeaders: Record<string, string>) => Promise<Response | null>;
   redisPipeline: PipelineFn;
 }
 
