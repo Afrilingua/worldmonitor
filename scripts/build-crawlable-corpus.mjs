@@ -108,8 +108,8 @@ export const CHOKEPOINT_PAGE_LASTMOD_PATHS = Object.freeze([
 // families take the later of this version and their own committed source date,
 // so template changes are reflected without pretending every deploy is fresh.
 export const CORPUS_GENERATOR_CONTENT_VERSION = '2026-09-01';
-const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-01';
-const CII_COUNTRY_PAGE_CONTENT_VERSION = '2026-09-01';
+export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-01';
+export const CII_COUNTRY_PAGE_CONTENT_VERSION = '2026-09-01';
 const COUNTRIES_INDEX_CONTENT_VERSION = '2026-09-01';
 const CII_RANKING_PAGE_CONTENT_VERSION = '2026-09-01';
 // Public ranking / confidence gates. Keep aligned with
@@ -124,7 +124,7 @@ export const RANKING_ELIGIBILITY_CLAUSE = `Ranking requires coverage of at least
 const RETIRED_DIMENSION_IDS = new Set(['fuelStockDays', 'reserveAdequacy']);
 const UNRANKED_INVENTORY_LIMIT = 12;
 const AVAILABLE_EVIDENCE_LIMIT = 6;
-const CHOKEPOINT_PAGE_CONTENT_VERSION = '2026-09-01';
+export const CHOKEPOINT_PAGE_CONTENT_VERSION = '2026-09-01';
 const SOURCES_PAGE_CONTENT_VERSION = '2026-08-20';
 // Dataset schema versions stamp Dataset JSON-LD shape changes, per family. They
 // must NOT fold into every family's sitemap/page lastmod — that made ~90% of main
@@ -134,12 +134,12 @@ const SOURCES_PAGE_CONTENT_VERSION = '2026-08-20';
 // chokepoint dataset as modified. Country pages are absent by design — their
 // dateModified is pinned to the snapshot capturedAt as a truthful freshness
 // contract (#7391), so their recrawl signal is COUNTRY_PAGE_CONTENT_VERSION.
-const DATASET_SCHEMA_CONTENT_VERSION = {
+export const DATASET_SCHEMA_CONTENT_VERSION = {
   chokepoint: '2026-08-31',
   crisis: '2026-09-01',
   tools: '2026-09-01',
 };
-const CRISIS_PAGE_CONTENT_VERSION = '2026-09-01';
+export const CRISIS_PAGE_CONTENT_VERSION = '2026-09-01';
 const TOOLS_PAGE_CONTENT_VERSION = '2026-09-01';
 const DATASET_LICENSE = {
   '@type': 'CreativeWork',
@@ -423,7 +423,7 @@ function liveUpdatedMarkup({ asOf, fallbackLabel, prefix = 'Published pulse' }) 
   return `<span data-live-updated>${escapeHtml(fallbackLabel)}</span>`;
 }
 
-function laterDate(...values) {
+export function laterDate(...values) {
   return values
     .filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value ?? ''))
     .sort()

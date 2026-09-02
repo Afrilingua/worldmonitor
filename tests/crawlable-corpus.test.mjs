@@ -12,15 +12,21 @@ import {
   buildCiiRankingEntries,
   buildChokepointHubRows,
   buildCorpus,
+  CHOKEPOINT_PAGE_CONTENT_VERSION,
   CHOKEPOINT_PAGE_LASTMOD_PATHS,
+  CII_COUNTRY_PAGE_CONTENT_VERSION,
   chokepointMetaDescription,
   countryMetaDescription,
+  COUNTRY_PAGE_CONTENT_VERSION,
+  DATASET_SCHEMA_CONTENT_VERSION,
   datasetTemporalCoverage,
   describeHeadlineIneligibilityReason,
   GENERATED_DIRS,
   gitFileLastmod,
+  laterDate,
   loadCorpusData,
   resolveChokepointObservation,
+  resolveLatestLivePulseSnapshotPath,
   SOURCE_CATALOG_LASTMOD_PATHS,
   sourcePageLastmod,
   withSchemaContext,
@@ -989,6 +995,45 @@ describe('crawlable corpus generator', () => {
     ]);
   });
 
+  // laterDate is imported rather than re-implemented, so the family-clock
+  // assertions below share one implementation with the builder. These literal
+  // cases are what keeps that from being circular: a regression in laterDate
+  // itself fails here, before it can agree with itself elsewhere.
+  it('folds a set of dates to the latest valid one', () => {
+    assert.equal(laterDate('2026-01-02', '2026-03-04', '2026-02-03'), '2026-03-04');
+    assert.equal(laterDate('2026-03-04', '2026-01-02'), '2026-03-04');
+    assert.equal(laterDate('2026-01-02', null, undefined), '2026-01-02');
+    assert.equal(laterDate('2026-01-02', 'not-a-date', '2026-01-02T05:00:00Z'), '2026-01-02');
+    assert.equal(laterDate('2026-01-02', '2026-01-02'), '2026-01-02');
+    assert.equal(laterDate(null, undefined, ''), null);
+    assert.equal(laterDate(), null);
+  });
+
+  it('picks the newest live-pulse snapshot among several candidates', () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'wm-pulse-resolve-'));
+    try {
+      const snapshotDir = join(fixtureRoot, 'docs', 'snapshots');
+      mkdirSync(snapshotDir, { recursive: true });
+      const today = new Date().toISOString().slice(0, 10);
+      const sections = {
+        countries: [], chokepoints: [], crises: [], signalConvergence: { capturedAt: today },
+      };
+      for (const capturedAt of ['2026-01-05', today, '2026-01-09']) {
+        writeFileSync(
+          join(snapshotDir, `crawlable-live-pulse-${capturedAt}.json`),
+          JSON.stringify({ capturedAt, ...sections }),
+        );
+      }
+      assert.equal(
+        resolveLatestLivePulseSnapshotPath(fixtureRoot),
+        join('docs', 'snapshots', `crawlable-live-pulse-${today}.json`),
+        'the resolver must pick the highest-dated snapshot, not the first or last written',
+      );
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
   it('advances the sources lastmod when the shared page template changes', () => {
     const baseline = sourcePageLastmod({
       manifestLastmod: '2026-08-10',
@@ -1166,6 +1211,10 @@ describe('crawlable corpus generator', () => {
   it('builds a non-trivial static corpus with canonical raw HTML pages', async () => {
     const outDir = mkdtempSync(join(tmpdir(), 'wm-crawlable-corpus-'));
     try {
+      const clock = await loadCorpusData({ rootDir: repoRoot });
+      const countriesLastmod = clock.lastmod.countries;
+      const ciiCountriesLastmod = clock.lastmod.ciiCountries;
+      const ciiIndexLastmod = clock.lastmod.countryInstabilityIndex;
       const manifest = await buildCorpus({
         rootDir: repoRoot,
         outDir,
@@ -1428,7 +1477,7 @@ describe('crawlable corpus generator', () => {
       assert.match(norway, /<link rel="alternate" hreflang="x-default" href="https:\/\/www\.worldmonitor\.app\/countries\/norway\/">/);
       assert.match(norway, /<link rel="alternate" hreflang="en" href="https:\/\/www\.worldmonitor\.app\/countries\/norway\/">/);
       assert.doesNotMatch(norway, /hreflang="zh/, 'English crawlable corpus pages must not advertise zh alternates');
-      assert.match(norway, /<meta name="lastmod" content="2026-09-01">/);
+      assert.match(norway, new RegExp(`<meta name="lastmod" content="${countriesLastmod}">`));
       assert.ok(norway.includes(`Source: ${manifest.sources.resilienceSnapshot}`));
       assert.match(
         norway,
@@ -1459,7 +1508,7 @@ describe('crawlable corpus generator', () => {
       assert.match(norway, /data-live-band>No current score/);
       assert.match(norway, /data-live-trend>Unavailable/);
       const ukraine = read(outDir, 'countries/ukraine/index.html');
-      assert.match(ukraine, /<meta name="lastmod" content="2026-09-01">/);
+      assert.match(ukraine, new RegExp(`<meta name="lastmod" content="${ciiCountriesLastmod}">`));
       assert.match(ukraine, /<title>Ukraine Instability Index &amp; Country Risk \| World Monitor<\/title>/);
       assert.match(ukraine, /<h1>Ukraine Country Instability Index<\/h1>/);
       assert.match(ukraine, /Ukraine's Country Instability Index is <strong>\d+\/100 &middot; [^<]+<\/strong>/);
@@ -1492,9 +1541,11 @@ describe('crawlable corpus generator', () => {
         true,
         'only country pages with a published CII score may target Country Instability Index',
       );
+      // Compare against the live country clock, not a calendar date:
+      // freeze:crawlable-live-pulse advances capturedAt every run.
       assert.equal(
         manifest.sections.countries.routes.every((route) => (
-          /<meta name="lastmod" content="2026-09-01">/.test(
+          new RegExp(`<meta name="lastmod" content="${countriesLastmod}">`).test(
             read(outDir, `${route.slice(1)}index.html`),
           )
         )),
@@ -1521,7 +1572,7 @@ describe('crawlable corpus generator', () => {
       );
       assert.match(ciiIndex, /<title>Country Instability Index: Live Rankings \| World Monitor<\/title>/);
       assert.match(ciiIndex, /<h1>Country Instability Index<\/h1>/);
-      assert.match(ciiIndex, /<meta name="lastmod" content="2026-09-01">/);
+      assert.match(ciiIndex, new RegExp(`<meta name="lastmod" content="${ciiIndexLastmod}">`));
       assert.match(ciiIndex, /data-cii-methodology-version="v8"/);
       assert.match(
         ciiIndex,
@@ -2702,12 +2753,12 @@ describe('crawlable corpus generator', () => {
       assert.ok(hormuzDataset, 'chokepoint page must expose a Dataset mainEntity');
       assert.equal(
         hormuzDataset.dateModified,
-        '2026-09-01',
+        laterDate(corpusData.lastmod.chokepoints, DATASET_SCHEMA_CONTENT_VERSION.chokepoint),
         'chokepoint page template change must advance Dataset dateModified with page lastmod',
       );
       assert.equal(
         pageLastmod(hormuz),
-        '2026-09-01',
+        corpusData.lastmod.chokepoints,
         'chokepoint transit-withhold template change must advance page lastmod',
       );
       assertSourceDerivedTemporalCoverage(hormuzDataset, {
@@ -2963,19 +3014,19 @@ describe('crawlable corpus generator', () => {
       });
       assert.equal(
         redSeaDataset.dateModified,
-        '2026-09-01',
+        laterDate(corpus.lastmod.crises, DATASET_SCHEMA_CONTENT_VERSION.crisis),
         'changed crisis Dataset schema must advance only the crisis family stamp',
       );
       assert.equal(
         pageLastmod(redSea),
-        '2026-09-01',
+        corpus.lastmod.crises,
         'crisis page lastmod must advance with its changed Dataset schema',
       );
       assert.equal(
         sitemapEntries.find((entry) => (
           new URL(entry.loc).pathname === '/crises/red-sea-security/'
         ))?.lastmod,
-        '2026-09-01',
+        corpus.lastmod.crises,
         'crisis sitemap lastmod must advance with its changed Dataset schema',
       );
       assert.equal(redSeaDataset.isAccessibleForFree, true);
@@ -3057,8 +3108,9 @@ describe('crawlable corpus generator', () => {
       const convergenceDataset = collectDatasets(convergencePage)[0];
       assert.equal(convergenceDataset['@id'], 'https://www.worldmonitor.app/tools/signal-convergence/#signal-convergence-dataset');
       assert.equal(convergenceDataset.url, 'https://www.worldmonitor.app/tools/signal-convergence/');
-      assert.equal(convergenceDataset.identifier, 'signal-convergence-2026-08-30');
-      assert.equal(convergenceDataset.datePublished, '2026-08-30');
+      const convergenceCapturedAt = corpus.livePulse.signalConvergence.capturedAt;
+      assert.equal(convergenceDataset.identifier, `signal-convergence-${convergenceCapturedAt}`);
+      assert.equal(convergenceDataset.datePublished, convergenceCapturedAt);
       assert.equal(convergenceDataset.spatialCoverage, 'Worldwide');
       assert.equal(convergenceDataset.variableMeasured[1].value, 3);
       assert.equal(convergenceDataset.variableMeasured[2].value, 3);
@@ -3170,14 +3222,40 @@ describe('crawlable corpus generator', () => {
     assert.equal(data.sources.sourceOrigin, 'scripts/source-origin.mjs');
     assert.deepEqual(data.sources.sourceCatalogInputs, SOURCE_CATALOG_LASTMOD_PATHS);
     assert.equal(data.sources.sharedPageTemplate, 'scripts/build-crawlable-corpus.mjs');
-    assert.equal(data.resilience.capturedAt, '2026-08-29');
+    assert.match(data.resilience.capturedAt, /^\d{4}-\d{2}-\d{2}$/);
     assert.ok(data.sources.resilienceSnapshot.includes(data.resilience.capturedAt));
     // Family lastmods use material + page versions + pulse where the HTML
     // publishes pulse values. CORPUS_GENERATOR_CONTENT_VERSION stays out
     // (#7463). Research lastmod is the report dateModified, not a rebuild stamp.
-    assert.equal(data.lastmod.countries, '2026-09-01');
+    // Do not pin a calendar date: freeze:crawlable-live-pulse advances capturedAt.
+    assert.equal(
+      data.lastmod.countries,
+      laterDate(
+        data.resilience.capturedAt,
+        data.livePulse.capturedAt,
+        gitFileLastmod(repoRoot, data.sources.countryRegions),
+        COUNTRY_PAGE_CONTENT_VERSION,
+      ),
+      'countries lastmod must fold snapshot, pulse, regions and the page content version',
+    );
+    // #7518 set COUNTRY_PAGE_CONTENT_VERSION and CII_COUNTRY_PAGE_CONTENT_VERSION
+    // to the same date, so the two clocks coincide by value. Pin the DERIVATION
+    // instead, which stays falsifiable if either constant moves.
+    assert.equal(
+      data.lastmod.ciiCountries,
+      laterDate(data.lastmod.countries, CII_COUNTRY_PAGE_CONTENT_VERSION),
+      'the CII country clock must derive from the generic country clock',
+    );
     assert.equal(data.lastmod.research, '2026-07-27');
-    assert.equal(data.lastmod.chokepoints, '2026-09-01');
+    assert.equal(
+      data.lastmod.chokepoints,
+      laterDate(
+        ...CHOKEPOINT_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(repoRoot, path)),
+        data.livePulse.capturedAt,
+        CHOKEPOINT_PAGE_CONTENT_VERSION,
+      ),
+      'chokepoints lastmod must fold every material page input, the pulse and the content version',
+    );
     assert.equal(
       data.lastmod.sources,
       sourcePageLastmod({
