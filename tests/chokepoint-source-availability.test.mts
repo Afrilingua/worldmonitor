@@ -71,13 +71,15 @@ describe('chokepoint source availability', () => {
   it('uses append-only proto fields and the private NGA v2 cache key', async () => {
     const maritimeProto = await readFile('proto/worldmonitor/maritime/v1/list_navigational_warnings.proto', 'utf8');
     const supplyChainProto = await readFile('proto/worldmonitor/supply_chain/v1/supply_chain_data.proto', 'utf8');
-    const handler = await readFile('server/worldmonitor/maritime/v1/list-navigational-warnings.ts', 'utf8');
+    const maritimeHandler = await readFile('server/worldmonitor/maritime/v1/list-navigational-warnings.ts', 'utf8');
+    const cableHealthHandler = await readFile('server/worldmonitor/infrastructure/v1/get-cable-health.ts', 'utf8');
 
     assert.match(maritimeProto, /bool data_available = 3;/);
     assert.match(supplyChainProto, /bool navigational_warnings_available = 17;/);
     assert.match(supplyChainProto, /bool ais_snapshot_available = 18;/);
     assert.match(supplyChainProto, /"normal" is an observed AIS level/);
-    assert.match(handler, /maritime:navwarnings:v2/);
+    assert.match(maritimeHandler, /maritime:navwarnings:v2/);
+    assert.match(cableHealthHandler, /cable-health-nga-warnings-v2/);
   });
 
   it('marks a successful empty NGA response available and caches it', async () => {
@@ -100,6 +102,29 @@ describe('chokepoint source availability', () => {
     assert.ok(harness.values.has('maritime:navwarnings:v2:all'));
   });
 
+  it('accepts the live NGA broadcast-warn response envelope', async () => {
+    const harness = redisHarness(async () => Response.json({
+      'broadcast-warn': [{
+        msgYear: 2026,
+        msgNumber: 321,
+        navArea: 'P',
+        subregion: '62',
+        text: 'PERSIAN GULF. STRAIT OF HORMUZ. NAVIGATIONAL HAZARD.',
+        issueDate: '021200Z SEP 2026',
+        authority: 'NGA NAVSAFETY',
+      }],
+    }));
+    globalThis.fetch = harness.fetchImpl as typeof fetch;
+
+    const response = await listNavigationalWarnings({} as never, { area: '', pageSize: 0, cursor: '' });
+
+    assert.equal(response.dataAvailable, true);
+    assert.equal(response.warnings.length, 1);
+    assert.equal(response.warnings[0]?.id, 'P-2026-321');
+    assert.equal(response.warnings[0]?.area, 'P 62');
+    assert.equal(response.warnings[0]?.text, 'PERSIAN GULF. STRAIT OF HORMUZ. NAVIGATIONAL HAZARD.');
+  });
+
   it('marks an NGA fetch failure unavailable', async () => {
     const harness = redisHarness(async () => new Response('unavailable', { status: 503 }));
     globalThis.fetch = harness.fetchImpl as typeof fetch;
@@ -112,6 +137,7 @@ describe('chokepoint source availability', () => {
   it('marks malformed NGA payloads unavailable instead of treating them as empty', async () => {
     const malformedPayloads = [
       { area: 'malformed-envelope', body: { broadcast_warn: {} } },
+      { area: 'malformed-live-envelope', body: { 'broadcast-warn': {} } },
       { area: 'malformed-entry', body: [null] },
     ];
 
@@ -243,6 +269,48 @@ describe('chokepoint source availability', () => {
     const meta = JSON.parse(harness.values.get('seed-meta:supply_chain:chokepoints') || '{}');
     assert.equal(meta.recordCount, 0, 'health must count rows with complete source coverage');
     assert.equal(meta.uncoveredChokepoints?.length, 13);
+  });
+
+  it('reports complete health coverage for the live NGA response envelope', async () => {
+    const harness = redisHarness(async (url) => {
+      if (url.includes('msi.nga.mil')) {
+        return Response.json({
+          'broadcast-warn': [{
+            msgYear: 2026,
+            msgNumber: 321,
+            navArea: 'P',
+            subregion: '62',
+            text: 'PERSIAN GULF. STRAIT OF HORMUZ. NAVIGATIONAL HAZARD.',
+            issueDate: '021200Z SEP 2026',
+            authority: 'NGA NAVSAFETY',
+          }],
+        });
+      }
+      if (url.startsWith('https://relay.test/ais/snapshot')) {
+        return Response.json({
+          density: [],
+          disruptions: [],
+          snapshotAt: Date.now(),
+          status: { connected: true, vessels: 10, messages: 20 },
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    harness.values.set('supply_chain:transit-summaries:v1', JSON.stringify({
+      summaries: completeTransitSummaries(),
+    }));
+    globalThis.fetch = harness.fetchImpl as typeof fetch;
+
+    const response = await getChokepointStatus({} as never, {});
+
+    assert.equal(response.chokepoints.length, 13);
+    assert.equal(response.upstreamUnavailable, false);
+    assert.ok(response.chokepoints.every((row) => row.navigationalWarningsAvailable === true));
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const meta = JSON.parse(harness.values.get('seed-meta:supply_chain:chokepoints') || '{}');
+    assert.equal(meta.recordCount, 13);
+    assert.equal(meta.uncoveredChokepoints, undefined);
   });
 
   it('qualifies quiet rows that are missing from a partial transit payload', async () => {
