@@ -10,6 +10,7 @@ import { Window } from 'happy-dom';
 
 import {
   buildCiiRankingEntries,
+  buildChokepointHubRows,
   buildCorpus,
   CHOKEPOINT_PAGE_LASTMOD_PATHS,
   chokepointMetaDescription,
@@ -24,6 +25,10 @@ import {
   sourcePageLastmod,
   withSchemaContext,
 } from '../scripts/build-crawlable-corpus.mjs';
+import {
+  MAX_FUTURE_SKEW_MS,
+  MAX_LIVE_SNAPSHOT_AGE_MS,
+} from '../scripts/crawlable-live-tools.mjs';
 import { buildSitemapEntries } from '../scripts/build-sitemap.mjs';
 import { buildSourceCatalog, sourceProviderDisplayName } from '../scripts/crawlable-sources-page.mjs';
 import { resolveSourceOrigin, sourceOriginLabel } from '../scripts/source-origin.mjs';
@@ -879,6 +884,28 @@ describe('crawlable corpus generator', () => {
     );
   });
 
+  it('rejects a chokepoint pulse key that is not in the registry', async () => {
+    const data = await loadCorpusData({ rootDir: repoRoot });
+    assert.doesNotThrow(
+      () => buildChokepointHubRows(data.chokepoints, data.livePulse),
+      'the committed pulse must match the registry exactly',
+    );
+    const livePulse = structuredClone(data.livePulse);
+    const [firstChokepoint] = data.chokepoints;
+    livePulse.chokepoints.obsolete_strait = { ...livePulse.chokepoints[firstChokepoint.id] };
+
+    assert.throws(
+      () => buildChokepointHubRows(data.chokepoints, livePulse),
+      /unexpected obsolete_strait/,
+    );
+    const missingPulse = structuredClone(data.livePulse);
+    delete missingPulse.chokepoints[firstChokepoint.id];
+    assert.throws(
+      () => buildChokepointHubRows(data.chokepoints, missingPulse),
+      new RegExp(`missing ${firstChokepoint.id}`),
+    );
+  });
+
   it('emits temporalCoverage only from a committed observation interval', () => {
     assert.equal(datasetTemporalCoverage('2026-05-28'), '2026-05-28');
     assert.equal(datasetTemporalCoverage('2026-01-01/2026-01-31'), '2026-01-01/2026-01-31');
@@ -897,6 +924,60 @@ describe('crawlable corpus generator', () => {
     });
     assert.equal(newerRegistry.capturedAt, '2026-05-01');
     assert.equal(newerRegistry.volumeObservedAt, '2026-03-14');
+  });
+
+  it('rejects invalid chokepoint hub status and congestion before publication', async () => {
+    const data = await loadCorpusData({ rootDir: repoRoot });
+    const [firstChokepoint] = data.chokepoints;
+    const validPulse = data.livePulse.chokepoints[firstChokepoint.id];
+    assert.ok(validPulse, 'committed pulse must include the first registry chokepoint');
+    assert.equal(
+      buildChokepointHubRows(data.chokepoints, {
+        ...data.livePulse,
+        chokepoints: {
+          ...data.livePulse.chokepoints,
+          [firstChokepoint.id]: { ...validPulse, congestion: 'Elevated' },
+        },
+      }).find((row) => row.chokepoint.id === firstChokepoint.id)?.congestion,
+      'Elevated',
+    );
+    assert.equal(
+      buildChokepointHubRows(data.chokepoints, {
+        ...data.livePulse,
+        chokepoints: {
+          ...data.livePulse.chokepoints,
+          [firstChokepoint.id]: { ...validPulse, congestion: 'Not reported' },
+        },
+      }).find((row) => row.chokepoint.id === firstChokepoint.id)?.congestion,
+      'Not reported',
+    );
+
+    for (const [label, pulse] of [
+      ['object status', { ...validPulse, status: { label: 'Yellow' } }],
+      ['numeric status', { ...validPulse, status: 42 }],
+      ['unknown status', { ...validPulse, status: 'Orange' }],
+      ['lowercase status', { ...validPulse, status: 'yellow' }],
+      ['status below score band', { ...validPulse, disruptionScore: '70', status: 'Green' }],
+      ['status above score band', { ...validPulse, disruptionScore: '5', status: 'Red' }],
+      ['status in adjacent score band', { ...validPulse, disruptionScore: '19', status: 'Yellow' }],
+      ['object congestion', { ...validPulse, congestion: { level: 'Normal' } }],
+      ['numeric congestion', { ...validPulse, congestion: 3 }],
+      ['unknown congestion', { ...validPulse, congestion: 'Severe' }],
+      ['lowercase congestion', { ...validPulse, congestion: 'normal' }],
+    ]) {
+      const invalidLivePulse = {
+        ...data.livePulse,
+        chokepoints: {
+          ...data.livePulse.chokepoints,
+          [firstChokepoint.id]: pulse,
+        },
+      };
+      assert.throws(
+        () => buildChokepointHubRows(data.chokepoints, invalidLivePulse),
+        new RegExp(`Chokepoint hub pulse is invalid for ${firstChokepoint.id}`),
+        `${label} must fail the chokepoint hub build`,
+      );
+    }
   });
 
   it('tracks every material chokepoint page input in its lastmod clock', () => {
@@ -1426,6 +1507,18 @@ describe('crawlable corpus generator', () => {
         ciiIndex,
         'https://www.worldmonitor.app/country-instability-index/',
       );
+      const methodologyDoc = readFileSync(
+        join(repoRoot, 'docs/methodology/cii-risk-scores.mdx'),
+        'utf8',
+      );
+      assert.match(
+        methodologyDoc,
+        /^description: "Editorial methodology behind the Country Instability Index\b/m,
+      );
+      assert.match(
+        methodologyDoc,
+        /^The Country Instability Index answers one operational question:$/m,
+      );
       assert.match(ciiIndex, /<title>Country Instability Index: Live Rankings \| World Monitor<\/title>/);
       assert.match(ciiIndex, /<h1>Country Instability Index<\/h1>/);
       assert.match(ciiIndex, /<meta name="lastmod" content="2026-09-01">/);
@@ -1433,6 +1526,21 @@ describe('crawlable corpus generator', () => {
       assert.match(
         ciiIndex,
         /CII v8 currently monitors 31 countries and reports approximate 24-hour movement when available\./,
+      );
+      const ciiQuestion = 'Which countries are most unstable right now?';
+      const ciiQuestionHeading = [...ciiDocument.querySelectorAll('h2')]
+        .find((heading) => heading.textContent.trim() === ciiQuestion);
+      assert.ok(ciiQuestionHeading, `CII hub needs the exact H2 "${ciiQuestion}"`);
+      const ciiAnswer = ciiQuestionHeading.nextElementSibling?.textContent.trim() || '';
+      assert.ok(
+        proseWordCount(ciiAnswer) >= 40 && proseWordCount(ciiAnswer) <= 60,
+        `CII hub answer is ${proseWordCount(ciiAnswer)} words, need 40-60`,
+      );
+      assert.ok(
+        ciiQuestionHeading.compareDocumentPosition(
+          ciiDocument.querySelector('table[data-cii-ranking]'),
+        ) & 4,
+        'CII hub FAQ answer must appear before the ranking table',
       );
       assert.equal(ciiDocument.querySelectorAll('[data-cii-country]').length, 31);
       assert.equal(
@@ -1451,6 +1559,18 @@ describe('crawlable corpus generator', () => {
       const ciiCollection = ciiLd.find((entry) => entry['@type'] === 'CollectionPage');
       const ciiDataset = ciiLd.find((entry) => entry['@type'] === 'Dataset');
       const ciiItemList = ciiLd.find((entry) => entry['@type'] === 'ItemList');
+      const ciiFaq = ciiLd.find((entry) => entry['@type'] === 'FAQPage');
+      assert.equal(ciiFaq?.mainEntity?.[0]?.name, ciiQuestion);
+      assert.equal(ciiFaq?.mainEntity?.[0]?.acceptedAnswer?.text, ciiAnswer);
+      for (const entry of ciiItemList.itemListElement.slice(0, 3)) {
+        assert.match(ciiAnswer, new RegExp(`\\b${entry.name}\\b`));
+      }
+      const ciiUpdatedText = ciiDocument
+        .querySelector('time[data-cii-ranking-updated][datetime]')
+        ?.textContent.trim()
+        .replace(/^Latest published score /, '');
+      assert.ok(ciiUpdatedText && ciiAnswer.includes(ciiUpdatedText));
+      assert.doesNotMatch(ciiAnswer, /\btoday\b/i);
       assert.deepEqual(ciiCollection?.mainEntity, {
         '@id': 'https://www.worldmonitor.app/country-instability-index/#dataset',
       });
@@ -2129,13 +2249,143 @@ describe('crawlable corpus generator', () => {
       assertDataCatalogPresent(norway, '/countries/norway/');
 
       const chokepointsIndex = read(outDir, 'chokepoints/index.html');
-      // The "N routes" / raw-id card subtitles are gone; cards now describe what each waterway connects.
-      assert.doesNotMatch(chokepointsIndex, /\d+ routes?<\/span>/, 'chokepoint index must not expose raw "N routes" counts');
-      assert.doesNotMatch(chokepointsIndex, /hormuz_strait &middot;/, 'chokepoint index must not expose raw canonical ids');
-      assert.match(chokepointsIndex, /Persian Gulf ↔ Gulf of Oman/, 'chokepoint cards should show the human region');
-      assertDefaultSpeakable(
-        jsonLdObjects(chokepointsIndex).find((entry) => entry['@type'] === 'CollectionPage'),
-        'chokepoints hub CollectionPage',
+      const chokepointsDocument = htmlDocument(
+        chokepointsIndex,
+        'https://www.worldmonitor.app/chokepoints/',
+      );
+      const chokepointRows = [...chokepointsDocument.querySelectorAll(
+        'table[data-chokepoint-status] tbody tr',
+      )];
+      assert.equal(chokepointRows.length, corpusData.chokepoints.length);
+      for (const chokepoint of corpusData.chokepoints) {
+        const pulse = corpusData.livePulse.chokepoints[chokepoint.id];
+        const row = chokepointRows.find((candidate) => (
+          candidate.querySelector('a')?.getAttribute('href') === `/chokepoints/${chokepoint.slug}/`
+        ));
+        assert.ok(row, `chokepoint hub is missing ${chokepoint.displayName}`);
+        assert.ok(row.querySelector('[data-hub-region]')?.textContent.trim());
+        assert.equal(Number(row.querySelector('[data-hub-score]')?.textContent), Number(pulse.disruptionScore));
+        assert.equal(row.querySelector('[data-hub-status]')?.textContent.trim(), pulse.status);
+        assert.equal(row.querySelector('[data-hub-congestion]')?.textContent.trim(), pulse.congestion);
+        assert.equal(row.querySelector('time[data-hub-updated]')?.getAttribute('datetime'), pulse.asOf);
+      }
+      assert.ok(
+        chokepointRows.some((row) => row.querySelector('[data-hub-score]')?.textContent.trim() === '0'),
+        'chokepoint hub must publish a numeric zero score',
+      );
+      assert.match(chokepointsIndex, /Persian Gulf ↔ Gulf of Oman/);
+      assert.ok(chokepointsIndex.includes(corpusData.sources.livePulseSnapshot));
+      assert.ok(chokepointsIndex.includes(corpusData.sources.chokepointRegistry));
+      assert.doesNotMatch(chokepointsIndex, /\b\d+ routes?\b/i, 'chokepoint index must not expose raw "N routes" counts');
+      for (const chokepoint of corpusData.chokepoints.filter((entry) => entry.id.includes('_'))) {
+        assert.ok(!chokepointsIndex.includes(chokepoint.id), `chokepoint hub must not expose raw id ${chokepoint.id}`);
+      }
+      const chokepointsLd = jsonLdObjects(chokepointsIndex);
+      const chokepointCollection = chokepointsLd.find((entry) => entry['@type'] === 'CollectionPage');
+      const chokepointDataset = chokepointsLd.find((entry) => entry['@type'] === 'Dataset');
+      const chokepointItemList = chokepointsLd.find((entry) => entry['@type'] === 'ItemList');
+      const chokepointFaq = chokepointsLd.find((entry) => entry['@type'] === 'FAQPage');
+      const chokepointCatalog = chokepointsLd.find((entry) => entry['@type'] === 'DataCatalog');
+      assert.ok(chokepointDataset && chokepointItemList && chokepointFaq && chokepointCatalog);
+      assertDefaultSpeakable(chokepointCollection, 'chokepoints hub CollectionPage');
+      assert.deepEqual(chokepointCollection.mainEntity, {
+        '@id': 'https://www.worldmonitor.app/chokepoints/#status-dataset',
+      });
+      assert.deepEqual(chokepointDataset.mainEntity, {
+        '@id': 'https://www.worldmonitor.app/chokepoints/#status-list',
+      });
+      assert.equal(chokepointItemList['@id'], 'https://www.worldmonitor.app/chokepoints/#status-list');
+      assert.equal(chokepointItemList.numberOfItems, corpusData.chokepoints.length);
+      assert.equal(chokepointItemList.itemListElement.length, corpusData.chokepoints.length);
+      assert.equal(chokepointItemList.itemListOrder, 'https://schema.org/ItemListUnordered');
+      assert.deepEqual(chokepointDataset.creator, {
+        '@id': 'https://www.worldmonitor.app/#organization',
+        '@type': 'Organization',
+        name: 'World Monitor',
+        url: 'https://www.worldmonitor.app/',
+      });
+      assert.ok(chokepointDataset.license);
+      assert.equal(chokepointDataset.datePublished, corpusData.livePulse.capturedAt);
+      const latestChokepointUpdate = Object.values(corpusData.livePulse.chokepoints)
+        .map((pulse) => pulse.asOf)
+        .sort()
+        .at(-1);
+      assert.equal(chokepointDataset.dateModified, latestChokepointUpdate);
+      assert.equal(chokepointDataset.temporalCoverage, corpusData.livePulse.capturedAt);
+      assert.ok(chokepointDataset.measurementTechnique);
+      assert.ok(chokepointDataset.variableMeasured.length >= 3);
+      assert.equal(chokepointDataset.distribution['@type'], 'DataDownload');
+      assert.equal(chokepointDataset.includedInDataCatalog['@id'], chokepointCatalog['@id']);
+      for (const [index, listEntry] of chokepointItemList.itemListElement.entries()) {
+        const visibleRow = chokepointRows[index];
+        assert.equal(listEntry.url, visibleRow.querySelector('a').href);
+        assert.equal(listEntry.item.url, visibleRow.querySelector('a').href);
+        const properties = Object.fromEntries(
+          listEntry.item.additionalProperty.map((property) => [property.name, property.value]),
+        );
+        assert.equal(properties['Disruption score'], Number(visibleRow.querySelector('[data-hub-score]').textContent));
+        assert.equal(properties.Status, visibleRow.querySelector('[data-hub-status]').textContent.trim());
+        assert.equal(properties.Congestion, visibleRow.querySelector('[data-hub-congestion]').textContent.trim());
+      }
+      const chokepointFaqHeadings = [...chokepointsDocument.querySelectorAll('h2[data-chokepoint-hub-faq]')];
+      const chokepointQuestions = chokepointFaqHeadings
+        .map((heading) => heading.textContent.trim());
+      assert.ok(chokepointQuestions.length >= 2 && chokepointQuestions.every((question) => question.endsWith('?')));
+      assert.equal(chokepointFaq.mainEntity.length, chokepointQuestions.length);
+      for (const question of chokepointQuestions) {
+        const heading = chokepointFaqHeadings
+          .find((candidate) => candidate.textContent.trim() === question);
+        const visibleAnswer = heading.nextElementSibling?.textContent.trim();
+        const schemaQuestion = chokepointFaq.mainEntity.find((entry) => entry.name === question);
+        assert.equal(schemaQuestion?.acceptedAnswer?.text, visibleAnswer);
+      }
+
+      const [firstChokepoint] = corpusData.chokepoints;
+      const validPulse = corpusData.livePulse.chokepoints[firstChokepoint.id];
+      for (const [label, pulse] of [
+        ['null score', { ...validPulse, disruptionScore: null }],
+        ['empty score', { ...validPulse, disruptionScore: '' }],
+        ['non-decimal score', { ...validPulse, disruptionScore: '40 points' }],
+        ['negative score', { ...validPulse, disruptionScore: -1 }],
+        ['score above 100', { ...validPulse, disruptionScore: 101 }],
+        ['missing status', { ...validPulse, status: '' }],
+        ['missing congestion', { ...validPulse, congestion: '' }],
+        ['impossible timestamp', { ...validPulse, asOf: '2026-02-31T13:37:22.049Z' }],
+      ]) {
+        const invalidLivePulse = {
+          ...corpusData.livePulse,
+          chokepoints: {
+            ...corpusData.livePulse.chokepoints,
+            [firstChokepoint.id]: pulse,
+          },
+        };
+        assert.throws(
+          () => buildChokepointHubRows(corpusData.chokepoints, invalidLivePulse),
+          new RegExp(`Chokepoint hub pulse is invalid for ${firstChokepoint.id}`),
+          `${label} must fail the chokepoint hub build`,
+        );
+      }
+      const missingPulse = {
+        ...corpusData.livePulse,
+        chokepoints: { ...corpusData.livePulse.chokepoints },
+      };
+      delete missingPulse.chokepoints[firstChokepoint.id];
+      assert.throws(
+        () => buildChokepointHubRows(corpusData.chokepoints, missingPulse),
+        new RegExp(`missing ${firstChokepoint.id}`),
+        'a missing registry member must fail the chokepoint hub build',
+      );
+      const extraPulse = {
+        ...corpusData.livePulse,
+        chokepoints: {
+          ...corpusData.livePulse.chokepoints,
+          obsolete_strait: validPulse,
+        },
+      };
+      assert.throws(
+        () => buildChokepointHubRows(corpusData.chokepoints, extraPulse),
+        /unexpected obsolete_strait/,
+        'an extra pulse key must fail the chokepoint hub build',
       );
 
       const sourcesPage = read(outDir, 'sources/index.html');
@@ -2862,6 +3112,45 @@ describe('crawlable corpus generator', () => {
     } finally {
       rmSync(outDir, { recursive: true, force: true });
     }
+  });
+
+  it('uses the same chokepoint timestamp window as the freeze producer', async () => {
+    const corpusData = await loadCorpusData({ rootDir: repoRoot });
+    const [firstChokepoint] = corpusData.chokepoints;
+    const validPulse = corpusData.livePulse.chokepoints[firstChokepoint.id];
+    const capturedAtMs = corpusData.livePulse.capturedAtMs;
+    const isoFromCapture = (offsetMs) => new Date(capturedAtMs + offsetMs).toISOString();
+    const withAsOf = (asOf) => ({
+      ...corpusData.livePulse,
+      chokepoints: {
+        ...corpusData.livePulse.chokepoints,
+        [firstChokepoint.id]: { ...validPulse, asOf },
+      },
+    });
+    const invalidFor = (asOf, label) => {
+      assert.throws(
+        () => buildChokepointHubRows(corpusData.chokepoints, withAsOf(asOf)),
+        new RegExp(`Chokepoint hub pulse is invalid for ${firstChokepoint.id}`),
+        label,
+      );
+    };
+
+    assert.doesNotThrow(
+      () => buildChokepointHubRows(corpusData.chokepoints, withAsOf(isoFromCapture(-47 * 60 * 60 * 1000))),
+      'a fetchedAt 47 hours before capturedAtMs must remain accepted',
+    );
+    invalidFor(
+      isoFromCapture(-MAX_LIVE_SNAPSHOT_AGE_MS - 1),
+      'a fetchedAt older than 48 hours before capturedAtMs must fail',
+    );
+    invalidFor(
+      isoFromCapture(MAX_FUTURE_SKEW_MS + 1),
+      'a fetchedAt beyond the 5-minute future-skew limit must fail',
+    );
+    assert.doesNotThrow(
+      () => buildChokepointHubRows(corpusData.chokepoints, corpusData.livePulse),
+      'committed same-day asOf values must remain accepted',
+    );
   });
 
   it('loads deterministic source data without network access', async () => {
