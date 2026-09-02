@@ -77,6 +77,7 @@ const OBSERVATION_PERIOD_RE = /^\d{4}-\d{2}(-\d{2})?$/;
 const MAX_LIVE_PULSE_SNAPSHOT_AGE_DAYS = 45;
 const COUNTRY_NAMES_PATH = 'shared/country-names.json';
 const COUNTRY_REGIONS_PATH = 'shared/iso2-to-region.json';
+const MICROSTATE_TERRITORIES_PATH = 'server/worldmonitor/resilience/v1/cohorts/microstate-territories.json';
 const CHOKEPOINT_REGISTRY_PATH = 'src/config/chokepoint-registry.ts';
 const TRADE_ROUTES_PATH = 'src/config/trade-routes.ts';
 const GLOSSARY_DATA_PATH = 'blog-site/src/data/glossary.ts';
@@ -105,7 +106,7 @@ export const CHOKEPOINT_PAGE_LASTMOD_PATHS = Object.freeze([
 // families take the later of this version and their own committed source date,
 // so template changes are reflected without pretending every deploy is fresh.
 export const CORPUS_GENERATOR_CONTENT_VERSION = '2026-09-01';
-const COUNTRY_PAGE_CONTENT_VERSION = '2026-08-31';
+const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-01';
 const CII_COUNTRY_PAGE_CONTENT_VERSION = '2026-09-01';
 const COUNTRIES_INDEX_CONTENT_VERSION = '2026-09-01';
 const CII_RANKING_PAGE_CONTENT_VERSION = '2026-09-01';
@@ -1344,6 +1345,11 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT } = {}) {
   const livePulseSnapshotPath = resolveLatestLivePulseSnapshotPath(rootDir);
   const resilience = readJson(rootDir, resilienceSnapshotPath);
   const livePulse = readJson(rootDir, livePulseSnapshotPath);
+  const microstateTerritoryCodes = new Set(
+    (readJson(rootDir, MICROSTATE_TERRITORIES_PATH).iso2 || [])
+      .map((code) => String(code || '').toUpperCase())
+      .filter((code) => /^[A-Z]{2}$/.test(code)),
+  );
   const reverseNames = reverseCountryNames(readJson(rootDir, COUNTRY_NAMES_PATH));
   const regionsByCode = readJson(rootDir, COUNTRY_REGIONS_PATH);
   const [
@@ -1378,7 +1384,10 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT } = {}) {
     normalizeCountries(resilience, reverseNames),
     regionsByCode,
     crises,
-  );
+  ).map((country) => ({
+    ...country,
+    microstateTerritory: microstateTerritoryCodes.has(country.code),
+  }));
   const ciiRanking = buildCiiRankingEntries(countries, livePulse);
   const countryBounds = normalizeCountryBounds(countryBboxes, countries, reverseNames);
   const chokepoints = normalizeChokepoints(CHOKEPOINT_REGISTRY);
@@ -1399,6 +1408,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT } = {}) {
     resilience.capturedAt,
     livePulse.capturedAt,
     gitFileLastmod(rootDir, COUNTRY_REGIONS_PATH),
+    gitFileLastmod(rootDir, MICROSTATE_TERRITORIES_PATH),
     COUNTRY_PAGE_CONTENT_VERSION,
   );
   const ciiCountriesLastmod = laterDate(
@@ -1473,6 +1483,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT } = {}) {
     sources: {
       resilienceSnapshot: resilienceSnapshotPath,
       livePulseSnapshot: livePulseSnapshotPath,
+      microstateTerritories: MICROSTATE_TERRITORIES_PATH,
       countryNames: COUNTRY_NAMES_PATH,
       countryRegions: COUNTRY_REGIONS_PATH,
       chokepointRegistry: CHOKEPOINT_REGISTRY_PATH,
@@ -2245,6 +2256,73 @@ export function describeAvailableEvidence(country) {
   return `Observed evidence is present for ${formatProseList(observed.map((dimension) => `${dimensionLabel(dimension)} (${formatPercent(dimension.coverage)})`))}. Input coverage is ${formatPercent(country.dimensionCoverage)} and imputation share is ${formatPercent(country.imputationShare)}.`;
 }
 
+function buildMicrostateEvidenceProfile(country) {
+  const dimensions = activeCountryDimensions(country);
+  const supportedDimensions = dimensions
+    .filter((dimension) => (
+      !isCoverageGap(dimension)
+      && String(dimension.imputationClass || '') === ''
+      && Number(dimension.coverage) >= 0.5
+      && typeof dimension.score === 'number'
+      && Number.isFinite(dimension.score)
+    ));
+  const gaps = dimensions.filter(isCoverageGap).sort(compareDimensionsByCoverageAsc);
+  const supportedSourceFamilies = [...new Set(supportedDimensions.flatMap(dimensionSources))];
+  const gapSourceFamilies = [...new Set(gaps.flatMap(dimensionSources))];
+  return {
+    supportedDimensions,
+    supportedSourceFamilies,
+    gapOnlySourceFamilies: gapSourceFamilies.filter((source) => !supportedSourceFamilies.includes(source)),
+    overlappingSourceFamilies: gapSourceFamilies.filter((source) => supportedSourceFamilies.includes(source)),
+  };
+}
+
+function selectMicrostateSourceExamples(sources) {
+  const preferred = ['World Bank', 'UCDP'].filter((source) => sources.includes(source));
+  return [...new Set([
+    ...sources.slice(0, 3),
+    ...preferred,
+    sources.at(-1),
+  ])].filter(Boolean).slice(0, 6);
+}
+
+export function describeMicrostateEvidence(country) {
+  if (country.microstateTerritory !== true) return '';
+  const profile = buildMicrostateEvidenceProfile(country);
+  if (profile.supportedDimensions.length === 0) {
+    return `${country.name} is in the microstate and territory cohort, but this snapshot has no observed dimension reading that can support a country-specific evidence interpretation. No overall resilience score or country rank is published.`;
+  }
+  const readings = profile.supportedDimensions
+    .map((dimension) => `${dimensionLabel(dimension)} ${formatScore(dimension.score)} (${formatPercent(dimension.coverage)})`);
+  const readingClause = `${country.name} has ${readings.length} supported dimension readings with observed inputs: ${readings.join('; ')}. Scores use a 0-100 scale; percentages show coverage.`;
+  const sourceExamples = selectMicrostateSourceExamples(profile.supportedSourceFamilies);
+  const supportedSourceClause = sourceExamples.length > 0
+    ? ` Possible dimension inputs for ${country.name}: ${formatProseList(sourceExamples)}.`
+    : '';
+  const gapOnlyClause = profile.gapOnlySourceFamilies.length > 0
+    ? ` Inputs tied only to missing or unmonitored dimensions in ${country.name}: ${formatProseList(profile.gapOnlySourceFamilies)}.`
+    : '';
+  const overlapClause = profile.overlappingSourceFamilies.length > 0
+    ? ` For ${country.name}, some feed families span supported and missing dimensions: ${formatProseList(profile.overlappingSourceFamilies)}.`
+    : '';
+  return `This is a partial evidence snapshot. ${readingClause}${supportedSourceClause}${gapOnlyClause}${overlapClause} These readings are partial evidence, not a published overall score or a country rank.`;
+}
+
+export function describeMicrostateEvidenceSummary(country) {
+  const profile = buildMicrostateEvidenceProfile(country);
+  if (profile.supportedDimensions.length === 0) {
+    return `${country.name} has no observed dimension reading that can support a country-specific evidence interpretation. No overall resilience score or country rank is published.`;
+  }
+  const highlightedDimensions = profile.supportedDimensions
+    .slice(-3)
+    .map(dimensionLabel);
+  const sourceExamples = profile.supportedSourceFamilies.slice(-3);
+  const feedClause = sourceExamples.length > 0
+    ? ` Possible inputs for ${country.name} include ${formatProseList(sourceExamples)}.`
+    : '';
+  return `${country.name} has ${profile.supportedDimensions.length} supported dimension readings with observed inputs, including ${formatProseList(highlightedDimensions)}.${feedClause} These readings are partial evidence, not a published overall score or a country rank.`;
+}
+
 export function dimensionInventoryNote(country, dimension) {
   const sources = dimensionSources(dimension);
   const sourceLabel = formatProseList(sources);
@@ -2312,7 +2390,7 @@ function countryFaqs(country, capturedAt, rankedCount, ciiEntry = null) {
       },
       {
         question: `What evidence is available for ${country.name}?`,
-        answer: describeAvailableEvidence(country),
+        answer: describeCountryAvailableEvidenceFaq(country),
       },
       {
         question: `How should readers use ${country.name}'s page?`,
@@ -2341,6 +2419,18 @@ function countryFaqs(country, capturedAt, rankedCount, ciiEntry = null) {
       answer: `The 30-day reading is ${country.trend || 'unknown'}, with a change of ${formatSignedScore(country.change30d)} points. It is structural and separate from the live instability monitor.`,
     },
   ];
+}
+
+function describeCountryAvailableEvidence(country) {
+  return country.microstateTerritory === true
+    ? describeMicrostateEvidence(country)
+    : describeAvailableEvidence(country);
+}
+
+function describeCountryAvailableEvidenceFaq(country) {
+  return country.microstateTerritory === true
+    ? describeMicrostateEvidenceSummary(country)
+    : describeAvailableEvidence(country);
 }
 
 function renderCountryAnalysis({ country, capturedAt, methodologyFormula, rankedCount, ciiEntry = null }) {
@@ -2374,6 +2464,7 @@ function renderCountryAnalysis({ country, capturedAt, methodologyFormula, ranked
       : status === 'un-member'
         ? ` ${country.name} is in the rankable universe as a UN member.`
         : '';
+    const availableEvidence = describeCountryAvailableEvidence(country);
     const html = `      <article data-country-analysis>
         <h2>${escapeHtml(country.name)} resilience analysis</h2>
         <p>${escapeHtml(describeHeadlineIneligibility(country))}${escapeHtml(officialBit)}${escapeHtml(statusBit)} Ranked comparisons use ${escapeHtml(country.regionName)} peers rather than other unpublished pages. The snapshot records ${escapeHtml(country.name)} as ${escapeHtml(country.code)}.</p>
@@ -2382,7 +2473,7 @@ function renderCountryAnalysis({ country, capturedAt, methodologyFormula, ranked
         <h3>Source inventory gaps</h3>
         <p>${escapeHtml(describeCoverageGaps(country))}</p>
         <h3>What the snapshot does cover</h3>
-        <p>${escapeHtml(describeAvailableEvidence(country))}</p>
+        <p>${escapeHtml(availableEvidence)}</p>
         <h3>Dimension evidence inventory</h3>
         <ul class="routes">
 ${inventoryItems}

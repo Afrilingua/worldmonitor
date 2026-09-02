@@ -1347,7 +1347,7 @@ describe('crawlable corpus generator', () => {
       assert.match(norway, /<link rel="alternate" hreflang="x-default" href="https:\/\/www\.worldmonitor\.app\/countries\/norway\/">/);
       assert.match(norway, /<link rel="alternate" hreflang="en" href="https:\/\/www\.worldmonitor\.app\/countries\/norway\/">/);
       assert.doesNotMatch(norway, /hreflang="zh/, 'English crawlable corpus pages must not advertise zh alternates');
-      assert.match(norway, /<meta name="lastmod" content="2026-08-31">/);
+      assert.match(norway, /<meta name="lastmod" content="2026-09-01">/);
       assert.ok(norway.includes(`Source: ${manifest.sources.resilienceSnapshot}`));
       assert.match(
         norway,
@@ -1412,22 +1412,13 @@ describe('crawlable corpus generator', () => {
         'only country pages with a published CII score may target Country Instability Index',
       );
       assert.equal(
-        manifest.sections.countries.routes.filter((route) => (
-          /<meta name="lastmod" content="2026-08-31">/.test(
-            read(outDir, `${route.slice(1)}index.html`),
-          )
-        )).length,
-        165,
-        'the 165 generic country pages must retain the generic content clock',
-      );
-      assert.equal(
-        ciiTargetedCountryPages.every((route) => (
+        manifest.sections.countries.routes.every((route) => (
           /<meta name="lastmod" content="2026-09-01">/.test(
             read(outDir, `${route.slice(1)}index.html`),
           )
         )),
         true,
-        'only the 31 CII-targeted country pages use the CII content clock',
+        'all country pages must use the current country content clock',
       );
 
       const ciiIndex = read(outDir, 'country-instability-index/index.html');
@@ -1530,6 +1521,18 @@ describe('crawlable corpus generator', () => {
 
       const corpusData = await loadCorpusData({ rootDir: repoRoot });
       const countryByCode = new Map(corpusData.countries.map((country) => [country.code, country]));
+      const microstateCohort = JSON.parse(readFileSync(
+        join(repoRoot, 'server/worldmonitor/resilience/v1/cohorts/microstate-territories.json'),
+        'utf8',
+      ));
+      const microstateCodes = new Set((microstateCohort.iso2 || []).map((code) => String(code).toUpperCase()));
+      for (const country of corpusData.countries) {
+        assert.equal(
+          country.microstateTerritory,
+          microstateCodes.has(country.code),
+          `${country.code} must match microstate cohort membership`,
+        );
+      }
       const vercelConfig = JSON.parse(readFileSync(join(repoRoot, 'vercel.json'), 'utf8'));
       const redirectPairs = new Set(
         vercelConfig.redirects.map((redirect) => `${redirect.source} -> ${redirect.destination}`),
@@ -1922,7 +1925,7 @@ describe('crawlable corpus generator', () => {
         /below the ranking threshold|input coverage is below/i,
       );
 
-      const unrankedSampleCodes = ['AD', 'SM', 'SY', 'TV', 'TW'];
+      const unrankedSampleCodes = ['AD', 'MO', 'SM', 'SY', 'TV', 'TW'];
       const unrankedArticles = [];
       const rankedNames = new Set(
         corpusData.countries.filter((country) => country.rank != null).map((country) => country.name),
@@ -1935,8 +1938,35 @@ describe('crawlable corpus generator', () => {
         const document = htmlDocument(html, `https://www.worldmonitor.app${route}`);
         const analysis = document.querySelector('[data-country-analysis]');
         assert.ok(analysis, `${route} must render unpublished analysis`);
+        const mainText = document.querySelector('main')?.textContent || '';
+        if (['TV', 'SM', 'MO'].includes(code)) {
+          const evidenceQuestion = `What evidence is available for ${country.name}?`;
+          const evidenceFaq = [...document.querySelectorAll('[data-country-faq]')]
+            .find((node) => node.querySelector('summary')?.textContent === evidenceQuestion);
+          assert.ok(evidenceFaq, `${route} must show a microstate evidence FAQ`);
+          assert.match(evidenceFaq.textContent || '', /supported dimension readings with observed inputs, including/);
+          assert.doesNotMatch(evidenceFaq.textContent || '', /Observed feeds/);
+          const faqLabel = {
+            TV: 'State continuity',
+            SM: 'Liquid-reserve adequacy',
+            MO: 'Import concentration',
+          }[code];
+          assert.match(evidenceFaq.textContent || '', new RegExp(faqLabel));
+          assert.doesNotMatch(evidenceFaq.textContent || '', /overall score[^.]*\d|country rank[^.]*\d/i);
+          const faqPage = jsonLdObjects(html).find((entry) => entry['@type'] === 'FAQPage');
+          const faqAnswer = faqPage?.mainEntity?.find((entry) => entry.name === evidenceQuestion);
+          assert.match(faqAnswer?.acceptedAnswer?.text || '', /supported dimension readings with observed inputs, including/);
+          assert.doesNotMatch(faqAnswer?.acceptedAnswer?.text || '', /Observed feeds/);
+          assert.match(faqAnswer?.acceptedAnswer?.text || '', new RegExp(faqLabel));
+          assert.doesNotMatch(faqAnswer?.acceptedAnswer?.text || '', /overall score[^.]*\d|country rank[^.]*\d/i);
+        }
         analysis.querySelectorAll('[data-country-faq]').forEach((node) => node.remove());
-        unrankedArticles.push({ route, text: analysis.textContent || '' });
+        unrankedArticles.push({
+          code,
+          route,
+          text: analysis.textContent || '',
+          mainText,
+        });
         assert.match(html, /Nearest ranked comparators:/);
         assert.doesNotMatch(html, new RegExp(`\\b${code} · `));
         for (const peer of country.peers) {
@@ -1946,6 +1976,29 @@ describe('crawlable corpus generator', () => {
       const syria = read(outDir, 'countries/syria/index.html');
       assert.match(syria, /Macro-fiscal position/);
       assert.match(syria, /IMF/);
+      const expectedMicrostateReadings = {
+        TV: { id: 'borderSecurity', label: 'Border security', source: 'UCDP' },
+        SM: { id: 'liquidReserveAdequacy', label: 'Liquid-reserve adequacy', source: 'World Bank' },
+        MO: { id: 'importConcentration', label: 'Import concentration', source: 'UN Comtrade' },
+      };
+      for (const code of ['TV', 'SM', 'MO']) {
+        const country = countryByCode.get(code);
+        const html = read(outDir, `countries/${country.slug}/index.html`);
+        const evidence = unpublishedHeadingParagraph(html, 'What the snapshot does cover');
+        const expected = expectedMicrostateReadings[code];
+        const dimension = country.domains
+          .flatMap((domain) => domain.dimensions || [])
+          .find((candidate) => candidate.id === expected.id);
+        assert.ok(dimension, `${code} fixture must retain ${expected.id}`);
+        const expectedReading = `${expected.label} ${Number(dimension.score).toFixed(1).replace(/\.0$/, '')} (${Math.round(Number(dimension.coverage) * 100)}%)`;
+        assert.ok(evidence.includes(expectedReading), `${code} must publish ${expectedReading}`);
+        assert.match(evidence, /supported dimension readings with observed inputs:/);
+        assert.match(evidence, /Scores use a 0-100 scale; percentages show coverage/);
+        assert.match(evidence, new RegExp(`Possible dimension inputs for ${country.name}:`));
+        assert.match(evidence, new RegExp(`Possible dimension inputs for ${country.name}:.*${expected.source}`));
+        assert.doesNotMatch(evidence, /Observed feeds/);
+        assert.match(evidence, /not a published overall score or a country rank/);
+      }
       const andorra = read(outDir, 'countries/andorra/index.html');
       assert.doesNotMatch(andorra, /<summary>What is Andorra&#39;s Country Instability Index\?<\/summary>/);
       assert.equal(countryByCode.get('AD')?.lowConfidence, false);
@@ -1989,6 +2042,19 @@ describe('crawlable corpus generator', () => {
           assert.ok(
             share >= 0.4,
             `${unrankedArticles[left].route} and ${unrankedArticles[right].route} unranked pair must be at least 40% unique, got ${(share * 100).toFixed(1)}%`,
+          );
+        }
+      }
+      const microstateMainPages = unrankedArticles.filter(({ code }) => ['TV', 'SM', 'MO'].includes(code));
+      for (let left = 0; left < microstateMainPages.length; left += 1) {
+        for (let right = left + 1; right < microstateMainPages.length; right += 1) {
+          const share = pairwiseUniqueShare(
+            microstateMainPages[left].mainText,
+            microstateMainPages[right].mainText,
+          );
+          assert.ok(
+            share >= 0.4,
+            `${microstateMainPages[left].route} and ${microstateMainPages[right].route} main content must be at least 40% unique, got ${(share * 100).toFixed(1)}%`,
           );
         }
       }
@@ -2820,7 +2886,7 @@ describe('crawlable corpus generator', () => {
     // Family lastmods use material + page versions + pulse where the HTML
     // publishes pulse values. CORPUS_GENERATOR_CONTENT_VERSION stays out
     // (#7463). Research lastmod is the report dateModified, not a rebuild stamp.
-    assert.equal(data.lastmod.countries, '2026-08-31');
+    assert.equal(data.lastmod.countries, '2026-09-01');
     assert.equal(data.lastmod.research, '2026-07-27');
     assert.equal(data.lastmod.chokepoints, '2026-09-01');
     assert.equal(
