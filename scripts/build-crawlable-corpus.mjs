@@ -17,6 +17,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { writeResearchSection } from './build-research-reports.mjs';
 import {
+  COMPARISONS_CONTENT_VERSION,
+  COMPARISON_PAGES,
+  writeComparisonPages,
+} from './build-comparison-pages.mjs';
+import {
   USE_CASE_PAGES,
   USE_CASES_CONTENT_VERSION,
   writeUseCasesSection,
@@ -253,6 +258,7 @@ export const GENERATED_DIRS = [
   'country-instability-index',
   'countries',
   'chokepoints',
+  'compare',
   'crises',
   'tools',
   'reference/changelog',
@@ -1641,6 +1647,10 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT } = {}) {
     USE_CASES_CONTENT_VERSION,
     gitFileLastmod(rootDir, 'scripts/build-use-cases.mjs'),
   );
+  const comparisonsLastmod = laterDate(
+    COMPARISONS_CONTENT_VERSION,
+    gitFileLastmod(rootDir, 'scripts/build-comparison-pages.mjs'),
+  );
   const attributionManifest = readJson(rootDir, SOURCE_ATTRIBUTION_MANIFEST_PATH);
   // Production generators share the validated attribution predicate and stats.
   // Tests retain a separate raw-manifest oracle so a mutation here cannot make
@@ -1683,6 +1693,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT } = {}) {
       crisisRegistry: CRISIS_REGISTRY_PATH,
       researchReports: RESEARCH_REPORTS_INDEX_PATH,
       useCases: 'scripts/build-use-cases.mjs',
+      comparisons: 'scripts/build-comparison-pages.mjs',
       sourceAttributionManifest: SOURCE_ATTRIBUTION_MANIFEST_PATH,
       sourcePageRenderer: SOURCE_PAGE_RENDERER_PATH,
       sourceOrigin: SOURCE_ORIGIN_PATH,
@@ -1701,6 +1712,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT } = {}) {
       crises: crisesLastmod,
       research: researchLastmod,
       useCases: useCasesLastmod,
+      comparisons: comparisonsLastmod,
       sources: sourcesLastmod,
     },
     sourceStats,
@@ -1861,6 +1873,7 @@ function pageDocument({
     .map((entry) => withSchemaContext(entry));
   const renderedNav = headerNav || `        <a href="/">World Monitor</a>
         <a href="/sources/">Sources</a>
+        <a href="/compare/">Compare</a>
         <a href="/countries/">Countries</a>
         <a href="/chokepoints/">Chokepoints</a>
         <a href="/crises/">Crises</a>
@@ -4671,6 +4684,11 @@ function buildManifest({ data, baseUrl, changelogPageCount }) {
         index: '/use-cases/',
         routes: USE_CASE_PAGES.map((page) => page.path),
       },
+      comparisons: {
+        count: COMPARISON_PAGES.length + 1,
+        index: '/compare/',
+        routes: COMPARISON_PAGES.map((page) => page.path),
+      },
       sources: {
         count: 1,
         index: '/sources/',
@@ -4886,6 +4904,13 @@ export async function buildCorpus({
     tpl: { escapeHtml, absoluteUrl, breadcrumbLd, withUtmSource, pageDocument },
   });
 
+  writeComparisonPages({
+    outDir,
+    baseUrl,
+    lastmod: data.lastmod.comparisons,
+    tpl: { escapeHtml, absoluteUrl, breadcrumbLd, withUtmSource, pageDocument },
+  });
+
   writeGeneratedFile(
     outDir,
     'tools/live-tools.js',
@@ -5033,6 +5058,7 @@ async function main() {
     + `${manifest.sections.tools.count} live tools, `
     + `${manifest.sections.research.count} research reports, `
     + `${manifest.sections.changelog.count} changelog pages, `
+    + `${manifest.sections.comparisons.count} comparison pages, `
     + `${manifest.sections.sources.count} source catalog page. `
     + `Glossary manifest references ${manifest.sections.glossary.count} existing blog pages.\n`,
   );
