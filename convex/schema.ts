@@ -1624,6 +1624,36 @@ export default defineSchema({
     .index("by_userId_revokedAt", ["userId", "revokedAt"])
     .index("by_keyHash", ["keyHash"]),
 
+  // Partner-embed keys (`wme_…`). A SEPARATE table from `userApiKeys` on
+  // purpose: an embed key is pasted into the partner's public HTML, so it must
+  // be mintable by every paid tier, while `userApiKeys` issuance is
+  // deliberately fenced behind the `API_ACCESS_REQUIRED` throw that keeps
+  // `wm_…` away from Pro. Sharing one table would mean relaxing that throw.
+  embedKeys: defineTable({
+    userId: v.string(),
+    name: v.string(),
+    keyPrefix: v.string(),        // first 9 chars of plaintext key, for display
+    keyHash: v.string(),          // SHA-256 hex digest — never store plaintext
+    createdAt: v.number(),
+    lastUsedAt: v.optional(v.number()),
+    revokedAt: v.optional(v.number()),
+    // Set when a key is replaced by a rotation rather than revoked outright,
+    // so a partner mid-swap can be told which of two dead keys their page is
+    // still serving. Rotation is a later unit; nothing writes this yet.
+    supersededAt: v.optional(v.number()),
+    // DECLARED, NOT ENFORCED. The origins a partner says they will embed from,
+    // captured at issuance for attribution and to catch honest misconfiguration.
+    // This is NOT an auth boundary and must never be read as one: the key ships
+    // in the partner's public HTML and `Origin` is attacker-controlled off a
+    // browser entirely. A later unit consumes it; nothing reads it yet. The
+    // column lands now so that unit is additive rather than a schema change on
+    // a table with live rows.
+    allowedOrigins: v.optional(v.array(v.string())),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_userId_revokedAt", ["userId", "revokedAt"])
+    .index("by_keyHash", ["keyHash"]),
+
   // Non-key Pro MCP identity rows. One row per OAuth grant for a Pro user.
   // Referenced from OAuth code/token records as `mcpTokenId` — never carries
   // plaintext or `wm_` keys. Revoke deletes the row's revokedAt → next
