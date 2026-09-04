@@ -824,6 +824,12 @@ export default defineSchema({
       // validator MUST accept it or the webhook's entitlement write is
       // rejected (v.object is strict on extra keys).
       apiDailyAllowance: v.optional(v.number()),
+      // Optional — partner-embed key issuance. Legacy rows predate it; the
+      // read-time catalog merge supplies it and consumers treat undefined as
+      // false (fail-closed). Catalog-sourced writes always set it, so this
+      // validator MUST accept it or the Dodo webhook's entitlement write is
+      // rejected at runtime (v.object is strict on extra keys).
+      embedAccess: v.optional(v.boolean()),
       // Optional — data-export entitlement (plan 2026-07-25-001). Legacy rows
       // predate it; consumers treat undefined on a tier >= 2 row as entitled
       // (fail-OPEN, permanently — see the PlanFeatures JSDoc). Catalog-sourced

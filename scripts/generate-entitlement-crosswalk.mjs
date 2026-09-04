@@ -30,7 +30,7 @@ const add = (source, id, detail) => rules.push({ rule: `${source}:${id}`, source
 // 1. productCatalog — every (plan × gating field) pair
 {
   const s = R('convex/config/productCatalog.ts');
-  const FIELDS = ['tier','maxDashboards','apiRateLimit','prioritySupport','mcpAccess','dataExport','apiAccess','apiRequestsPerDay','apiBurstRequestsPerMinute','mcpCallsPerDay','mcpBurstRequestsPerMinute','apiDailyAllowance','exportFormats'];
+  const FIELDS = ['tier','maxDashboards','apiRateLimit','prioritySupport','mcpAccess','dataExport','apiAccess','embedAccess','apiRequestsPerDay','apiBurstRequestsPerMinute','mcpCallsPerDay','mcpBurstRequestsPerMinute','apiDailyAllowance','exportFormats'];
   for (const m of s.matchAll(/const (FREE|PRO|PRO_BUSINESS|API_STARTER|API_BUSINESS|ENTERPRISE)_FEATURES[^=]*=\s*\{([\s\S]*?)\n\};/g)) {
     const [, plan, body] = m;
     for (const f of FIELDS) {
@@ -108,6 +108,7 @@ const MAP = [
   [/^catalog:\w+\.exportFormats$/,           { cap: 'export.data', note: 'format allowlist' }],
   [/^catalog:\w+\.dataExport$/,              { cap: 'export.data' }],
   [/^catalog:\w+\.apiAccess$/,               { cap: 'api.keys' }],
+  [/^catalog:\w+\.embedAccess$/,             { cap: 'embed.panels', note: 'wme_ key issuance' }],
   [/^catalog:\w+\.apiRequestsPerDay$/,       { cap: 'api.rest' }],
   [/^catalog:\w+\.apiRateLimit$/,            { cap: 'api.rest', note: 'rate ceiling' }],
   [/^catalog:\w+\.apiBurstRequestsPerMinute$/,{ cap: 'api.rest', note: 'burst ceiling' }],

@@ -75,6 +75,15 @@ export interface CachedEntitlements {
      */
     dataExport?: boolean;
     /**
+     * Partner-embed key issuance (`wme_…`). Mirrors the catalog field so the
+     * edge can read what the Convex read-time merge already puts on the wire;
+     * without it a caller cannot reach the value without a type error, and
+     * `shared/embed-access.ts` would silently see `undefined`. Like
+     * `mcpAccess` and unlike `dataExport`, `undefined` is **fail-CLOSED** —
+     * embedding is a publishable credential, so a stale row must not mint one.
+     */
+    embedAccess?: boolean;
+    /**
      * Catalog plan limits, mirrored verbatim from `PlanFeatures.planLimits`
      * (convex/config/productCatalog.ts). Optional because legacy rows predate
      * it and because the Convex read path only merges what the catalog holds.
