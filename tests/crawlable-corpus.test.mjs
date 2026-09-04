@@ -38,6 +38,7 @@ import {
   withSchemaContext,
 } from '../scripts/build-crawlable-corpus.mjs';
 import {
+  chokepointEvidenceNarrative,
   MAX_FUTURE_SKEW_MS,
   MAX_LIVE_SNAPSHOT_AGE_MS,
 } from '../scripts/crawlable-live-tools.mjs';
@@ -3267,6 +3268,15 @@ describe('crawlable corpus generator', () => {
         const schemaQuestion = chokepointFaq.mainEntity.find((entry) => entry.name === question);
         assert.equal(schemaQuestion?.acceptedAnswer?.text, visibleAnswer);
       }
+      const scoreAnswer = chokepointFaq.mainEntity.find(
+        (entry) => entry.name === 'How does World Monitor score chokepoint status?',
+      )?.acceptedAnswer?.text;
+      assert.match(scoreAnswer, /maximum AIS severity/);
+      assert.match(scoreAnswer, /AIS event counts[^.]+are context rather than score inputs/);
+      assert.doesNotMatch(
+        chokepointFaq.mainEntity.map((entry) => entry.acceptedAnswer.text).join(' '),
+        /Green means open|Yellow means restricted|Red means effectively closed|maps? to passage status/,
+      );
       const sparseMetricsAnswer = chokepointFaq.mainEntity.find(
         (entry) => entry.name === 'Why do some chokepoint pages show fewer metrics than others?',
       )?.acceptedAnswer?.text;
@@ -3596,7 +3606,22 @@ describe('crawlable corpus generator', () => {
       assert.match(hormuz, /href="\/blog\/glossary\/strait-of-hormuz\/"/);
       assert.match(hormuz, /data-live-chokepoint data-chokepoint-id="hormuz_strait"/);
       assert.match(hormuz, /data-published-pulse/);
-      assert.match(hormuz, /traffic-light badge is a disruption score, not an operational closure declaration/i);
+      // #7613: keep the open/closed query while answering only from the
+      // evidence this snapshot can support.
+      assert.match(hormuz, /<h2>Is Strait of Hormuz open right now\?<\/h2>/);
+      assert.match(
+        hormuz,
+        /data-chokepoint-open-status>As of [^<]*source coverage for the Strait of Hormuz is partial\. No transit count is published for this snapshot\. World Monitor cannot verify operational passage status from this snapshot\.</,
+      );
+      assert.match(
+        hormuz,
+        /data-chokepoint-score-driver>The score of 70 \(Red\) has this evidence basis\. Configured geopolitical baseline: Active conflict — Iran-Israel war/,
+      );
+      assert.match(
+        hormuz,
+        /Observed score inputs: 0 warnings; maximum AIS severity Normal\. Context only \(not score inputs\): AIS event count \(0 AIS disruptions\); transit count unavailable\./,
+      );
+      assert.doesNotMatch(hormuz, /data-chokepoint-status-mapping/);
       assert.ok(hormuz.includes(liveScriptTag), 'chokepoint live script must match the production CSP nonce');
       assert.doesNotMatch(hormuz, /id="app"/, 'chokepoint page must be raw static HTML, not the SPA shell');
       assert.doesNotMatch(hormuz, /Connecting…/);
@@ -3859,6 +3884,68 @@ describe('crawlable corpus generator', () => {
         const meta = chokepointSlugs.get(cpId);
         if (!meta) continue;
         const page = read(outDir, `chokepoints/${meta.slug}/index.html`);
+        // Every page keeps the query heading, but the answer follows source
+        // coverage instead of turning the risk band into a closure verdict.
+        assert.match(
+          page,
+          new RegExp(`<h2>Is ${meta.name} open right now\\?</h2>`),
+          `${meta.name} must carry the open/closed query heading`,
+        );
+        const document = htmlDocument(page, `https://www.worldmonitor.app/chokepoints/${meta.slug}/`);
+        const passageText = document.querySelector('[data-chokepoint-open-status]')?.textContent ?? '';
+        const asOfText = passageText.match(/^As of (.*), (?:source coverage|the observed transit count)/)?.[1];
+        assert.ok(asOfText, `${meta.name} passage evidence must carry an as-of timestamp`);
+        const expectedNarrative = chokepointEvidenceNarrative({
+          displayName: meta.name,
+          score: pulse.disruptionScore,
+          bandLabel: pulse.status,
+          description: pulse.description,
+          asOfText,
+          partial: pulse.partial === true
+            || pulse.todayTransits == null
+            || pulse.navigationalWarningsAvailable !== true
+            || pulse.aisSnapshotAvailable !== true,
+          warningsLabel: pulse.navigationalWarningsAvailable === true
+            ? pulse.navigationalWarnings
+            : null,
+          congestionLabel: pulse.aisSnapshotAvailable === true ? pulse.congestion : null,
+          aisEventCountLabel: pulse.aisSnapshotAvailable === true ? pulse.aisDisruptions : null,
+          todayTransits: pulse.todayTransits,
+        });
+        assert.equal(passageText, expectedNarrative.passage, `${meta.name} must use the shared passage policy`);
+        assert.equal(
+          document.querySelector('[data-chokepoint-score-driver]')?.textContent,
+          expectedNarrative.scoreDriver,
+          `${meta.name} must use the shared score-driver policy`,
+        );
+        if (expectedNarrative.passage.includes('source coverage')) {
+          assert.match(passageText, /cannot verify operational passage status/);
+        } else {
+          assert.match(passageText, /observed transit count/);
+          assert.match(passageText, /does not verify unrestricted passage or operational closure/);
+        }
+        assert.doesNotMatch(
+          passageText,
+          / is (?:open|restricted|effectively closed) to commercial shipping/,
+          `${meta.name} must not convert the score band into passage status`,
+        );
+        assert.match(
+          page,
+          new RegExp(`data-chokepoint-score-driver>The score of ${pulse.disruptionScore} \\(${pulse.status}\\)`),
+          `${meta.name} must attribute its score`,
+        );
+        // Absence and coverage notes are never the threat weight, whatever the
+        // frozen description carries for this snapshot.
+        assert.doesNotMatch(
+          page,
+          /Configured geopolitical baseline: No active disruptions/,
+          `${meta.name} must not quote absence as the threat baseline`,
+        );
+        assert.doesNotMatch(
+          page,
+          /Configured geopolitical baseline: Traffic down/,
+          `${meta.name} must not quote the transit anomaly as the threat baseline`,
+        );
         const raw = Number(String(pulse.todayTransits ?? '').replace(/,/g, ''));
         const noteRe = new RegExp(
           `World Monitor is not currently publishing a transit count for ${meta.name} for this period`,
