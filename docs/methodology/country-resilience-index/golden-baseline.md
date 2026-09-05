@@ -63,10 +63,10 @@ Two flows, by checkout:
   artifact records the branch HEAD, which becomes the accepted commit on
   merge. This is the sanctioned in-PR regeneration path.
 
-By default the generator also refuses to run when any guarded path has
-uncommitted changes — the input fixture, the generator module itself, and
-`server/worldmonitor/resilience/v1/` (everything the bytes and the provenance
-claims depend on). `--allow-dirty-fixture` overrides that gate explicitly; the
+By default the generator refuses to run when the worktree has staged, unstaged,
+or untracked changes. This includes shared scorer dependencies and configuration
+files. Only the output artifact is excluded, so repeating generation on the
+same commit is permitted. `--allow-dirty-fixture` overrides that gate explicitly; the
 two flags are independent. Never regenerate merely to make a failing test
 pass; a golden failure is a signal to review the scorer change first.
 

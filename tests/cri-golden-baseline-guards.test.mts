@@ -1,14 +1,16 @@
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { describe, it } from 'node:test';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
 import {
   GOLDEN_ENV_FLAGS,
   assertGenerationGuards,
   isDirectRun,
+  readGenerationDirtyStatus,
 } from '../scripts/generate-cri-golden-baseline.mts';
 
 // Unit coverage for the generator CLI's guard logic (issue #7728 review
@@ -85,6 +87,56 @@ describe('CRI golden baseline generator guards', () => {
         () => assertGenerationGuards(guardsFixture({ dirtyStatusLines: ['?? x'], allowNonMain: true })),
         /--allow-dirty-fixture/,
       );
+    });
+  });
+
+  describe('working-tree input guard', () => {
+    it('rejects real staged, unstaged, and untracked inputs while allowing output-only changes', () => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'wm-golden-inputs-'));
+      const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')));
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe', env });
+      const write = (file: string, content: string) => {
+        const target = path.join(dir, file);
+        mkdirSync(path.dirname(target), { recursive: true });
+        writeFileSync(target, content);
+      };
+      const dependencies = [
+        'server/_shared/resilience-stats.ts',
+        'server/_shared/resilience-freshness.ts',
+        'shared/iso2-to-iso3.json',
+        'tsconfig.json',
+      ];
+      const output = 'tests/fixtures/resilience-cri-golden-baseline-2026-08-13.json';
+      try {
+        git('init', '--quiet');
+        for (const file of [...dependencies, output]) write(file, '{}\n');
+        git('add', '.');
+        git('-c', 'user.name=Guard test', '-c', 'user.email=guard@example.invalid',
+          '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'Input baseline');
+        assert.deepEqual(readGenerationDirtyStatus(dir), []);
+        write(output, '{"regenerated":true}\n');
+        assert.deepEqual(readGenerationDirtyStatus(dir), []);
+        git('add', output);
+        assert.deepEqual(readGenerationDirtyStatus(dir), []);
+
+        for (const file of dependencies) {
+          write(file, '{"changed":true}\n');
+          for (const staged of [false, true]) {
+            if (staged) git('add', file);
+            const dirtyStatusLines = readGenerationDirtyStatus(dir);
+            assert.ok(dirtyStatusLines?.some((line) => line.endsWith(file)), file);
+            assert.throws(() => assertGenerationGuards(guardsFixture({ dirtyStatusLines })), /--allow-dirty-fixture/);
+          }
+          write(file, '{}\n');
+          git('add', file);
+        }
+        write('shared/new-scoring-input.json', '{}\n');
+        const dirtyStatusLines = readGenerationDirtyStatus(dir);
+        assert.ok(dirtyStatusLines?.some((line) => line === '?? shared/new-scoring-input.json'));
+        assert.throws(() => assertGenerationGuards(guardsFixture({ dirtyStatusLines })), /--allow-dirty-fixture/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 

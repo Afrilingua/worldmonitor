@@ -273,9 +273,13 @@ export async function sha256File(filePath: string): Promise<string> {
   return sha256Hex(await readFile(filePath));
 }
 
-function git(args: string[], options: { allowFailure?: boolean } = {}): string | null {
+function git(args: string[], options: { allowFailure?: boolean; cwd?: string } = {}): string | null {
   try {
-    return execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' }).trim();
+    return execFileSync('git', args, {
+      cwd: options.cwd ?? REPO_ROOT,
+      encoding: 'utf8',
+      env: Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_'))),
+    }).trim();
   } catch (err) {
     if (options.allowFailure) return null;
     throw err;
@@ -297,13 +301,14 @@ function isHeadAncestorOfOriginMain(): boolean {
   return git(['merge-base', '--is-ancestor', 'HEAD', 'origin/main'], { allowFailure: true }) !== null;
 }
 
-// Everything the golden bytes and the artifact's provenance claims depend on.
-// A dirty path here would make the artifact describe state no commit contains.
-const GUARDED_PATHS = [
-  INPUT_FIXTURE_RELATIVE_PATH,
-  'scripts/generate-cri-golden-baseline.mts',
-  'server/worldmonitor/resilience/v1',
-] as const;
+export function readGenerationDirtyStatus(repoRoot = REPO_ROOT): string[] | null {
+  // The output may already differ after regeneration; every other path can be an input.
+  const status = git([
+    'status', '--porcelain', '--untracked-files=all', '--', '.',
+    `:(exclude)${GOLDEN_ARTIFACT_RELATIVE_PATH}`,
+  ], { allowFailure: true, cwd: repoRoot });
+  return status === null ? null : status.split('\n').filter(Boolean);
+}
 
 export interface GenerationGuards {
   headSha: string;
@@ -344,11 +349,10 @@ async function main(): Promise<void> {
   const allowNonMain = process.argv.includes('--allow-non-main');
   const allowDirtyTree = process.argv.includes('--allow-dirty-fixture');
   const headSha = currentHeadCommit();
-  const dirtyStatus = git(['status', '--porcelain', '--', ...GUARDED_PATHS], { allowFailure: true });
   assertGenerationGuards({
     headSha,
     headIsAncestorOfOriginMain: isHeadAncestorOfOriginMain(),
-    dirtyStatusLines: dirtyStatus === null ? null : dirtyStatus.split('\n').filter(Boolean),
+    dirtyStatusLines: readGenerationDirtyStatus(),
     allowNonMain,
     allowDirtyTree,
   });
