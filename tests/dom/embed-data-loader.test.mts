@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EmbedDataLoader, type EmbedMapSurface } from '@/embed/embed-data-loader';
-import { fetchEmbedMapFrame, type EmbedGrant, type EmbedGrantResult } from '@/embed/embed-fetch';
+import {
+  fetchEmbedMapFrame,
+  mintEmbedGrant,
+  type EmbedGrant,
+  type EmbedGrantResult,
+} from '@/embed/embed-fetch';
+import type { MapLayers } from '@/types';
 import { classifyPublicEmbedFrameRequest } from '../../shared/embed-map-frame';
 import {
   EMBED_FREE_REFRESH_MS,
@@ -20,6 +26,8 @@ interface RecordedMap extends EmbedMapSurface {
   weather: unknown[][];
   ready: Map<string, boolean>;
   loading: string[];
+  layers: MapLayers;
+  bypassEntitlementSanitization: boolean;
 }
 
 function recordingMap(): RecordedMap {
@@ -31,6 +39,8 @@ function recordingMap(): RecordedMap {
     weather: [],
     ready: new Map(),
     loading: [],
+    layers: {} as MapLayers,
+    bypassEntitlementSanitization: false,
     supportsLiveConflictEvents: () => true,
     setConflictEvents: (events) => { map.conflicts.push(events); },
     setEarthquakes: (events) => { map.earthquakes.push(events); },
@@ -39,6 +49,11 @@ function recordingMap(): RecordedMap {
     setWeatherAlerts: (alerts) => { map.weather.push(alerts); },
     setLayerLoading: (layer, loading) => { map.loading.push(`${String(layer)}:${loading}`); },
     setLayerReady: (layer, ready) => { map.ready.set(String(layer), ready); },
+    getState: () => ({ layers: map.layers }),
+    setLayers: (layers, options) => {
+      map.layers = layers;
+      map.bypassEntitlementSanitization = options?.bypassEntitlementSanitization === true;
+    },
   };
   return map;
 }
@@ -138,6 +153,23 @@ describe('embed map frame request', () => {
       'a credentialed URL must never match the shared shape',
     ).toBeNull();
   });
+
+  it('keeps rate limits and server failures retryable', async () => {
+    vi.stubGlobal('fetch', async () => new Response('', {
+      status: 429,
+      headers: { 'Retry-After': '7' },
+    }));
+    await expect(mintEmbedGrant('map', 'wme_test')).resolves.toEqual({
+      status: 'unavailable',
+      retryAfterMs: 7_000,
+    });
+
+    vi.stubGlobal('fetch', async () => new Response('', { status: 500 }));
+    await expect(mintEmbedGrant('map', 'wme_test')).resolves.toEqual({
+      status: 'unavailable',
+      retryAfterMs: 60_000,
+    });
+  });
 });
 
 describe('embed data loader', () => {
@@ -197,21 +229,35 @@ describe('embed data loader', () => {
     expect(map.earthquakes, 'every other layer still applies').toEqual([[{ id: 'q1' }]]);
   });
 
-  it('marks a not-entitled layer un-ready instead of rendering it', async () => {
+  it('disables a rejected layer and clears its cached live data', async () => {
     const map = recordingMap();
+    map.layers = { conflicts: true, protests: true } as MapLayers;
+    let request = 0;
     const loader = new EmbedDataLoader(map, ['conflicts', 'protests'], {
-      fetchFrame: async () => frame({
-        layers: { conflicts: 'ok', protests: 'not-entitled' },
-        data: { conflicts: [{ id: 'c1' }] },
-      }),
+      fetchFrame: async () => {
+        request += 1;
+        return request === 1
+          ? frame({
+            layers: { conflicts: 'ok', protests: 'ok' },
+            data: { conflicts: [{ id: 'c1' }], protests: [protestEvent()] },
+          })
+          : frame({
+            layers: { conflicts: 'ok', protests: 'not-entitled' },
+            data: { conflicts: [{ id: 'c1' }] },
+          });
+      },
       now: () => NOW,
     });
 
     await loader.loadOnce();
+    await loader.loadOnce();
 
     expect(map.ready.get('conflicts')).toBe(true);
     expect(map.ready.get('protests')).toBe(false);
-    expect(map.protests).toHaveLength(0);
+    expect(map.layers.protests).toBe(false);
+    expect(map.bypassEntitlementSanitization).toBe(true);
+    expect(map.protests).toHaveLength(2);
+    expect(map.protests[map.protests.length - 1]).toEqual([]);
   });
 
   it('keeps a partial layer on the map and drops an unavailable one', async () => {
@@ -278,7 +324,7 @@ describe('embed data loader', () => {
     expect(seen[0]).toBeNull();
     expect(seen[1]?.token).toBe('wmg_test');
     expect(map.ready.get('protests'), 'the paid layer appears after the upgrade').toBe(true);
-    expect(map.protests[0]).toHaveLength(1);
+    expect(map.protests[map.protests.length - 1]).toHaveLength(1);
   });
 
   it('takes its cadence from the response rather than a client constant', async () => {
@@ -301,6 +347,35 @@ describe('embed data loader', () => {
 
     expect(EMBED_FREE_REFRESH_MS).not.toBe(EMBED_KEYED_REFRESH_MS);
     expect(cadences).toEqual([EMBED_FREE_REFRESH_MS, EMBED_KEYED_REFRESH_MS]);
+  });
+
+  it('retries an unavailable initial grant exchange after its advertised delay', async () => {
+    vi.useFakeTimers();
+    try {
+      const map = recordingMap();
+      let renewals = 0;
+      const loader = new EmbedDataLoader(map, ['conflicts'], {
+        fetchFrame: async () => frame({ layers: { conflicts: 'ok' } }),
+        renewGrant: async (): Promise<EmbedGrantResult> => {
+          renewals += 1;
+          return renewals === 1
+            ? { status: 'unavailable', retryAfterMs: 10_000 }
+            : { status: 'granted', grant: grant(NOW + 30 * 60_000) };
+        },
+        now: () => NOW,
+      });
+
+      await loader.requestGrant();
+      expect(renewals).toBe(1);
+      expect(loader.currentGrant()).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(renewals).toBe(2);
+      expect(loader.currentGrant()?.token).toBe('wmg_test');
+      loader.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   describe('grant renewal', () => {
@@ -358,6 +433,31 @@ describe('embed data loader', () => {
         map.ready.get('protests'),
         'the paid layer stays on screen through a transient billing outage',
       ).toBe(true);
+    });
+
+    it('does not renew again before an unavailable response permits it', async () => {
+      const map = recordingMap();
+      let clock = NOW;
+      let renewals = 0;
+      const loader = new EmbedDataLoader(map, ['conflicts'], {
+        fetchFrame: async () => frame({ layers: { conflicts: 'ok' } }),
+        renewGrant: async (): Promise<EmbedGrantResult> => {
+          renewals += 1;
+          return renewals === 1
+            ? { status: 'unavailable', retryAfterMs: 10_000 }
+            : { status: 'granted', grant: grant(NOW + 30 * 60_000) };
+        },
+        now: () => clock,
+      });
+
+      await loader.upgrade(grant(NOW + 30_000));
+      clock = NOW + 9_999;
+      await loader.loadOnce();
+      expect(renewals).toBe(1);
+
+      clock = NOW + 10_000;
+      await loader.loadOnce();
+      expect(renewals).toBe(2);
     });
 
     it('falls back to the free tier when renewal is terminally denied', async () => {

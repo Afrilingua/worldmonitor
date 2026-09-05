@@ -103,7 +103,7 @@ export async function mintEmbedGrant(
     return { status: 'unavailable', retryAfterMs: DEFAULT_GRANT_RETRY_MS };
   }
 
-  if (resp.status === 503) {
+  if (resp.status === 429 || resp.status >= 500) {
     const header = Number(resp.headers.get('Retry-After'));
     return {
       status: 'unavailable',
