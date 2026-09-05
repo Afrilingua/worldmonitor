@@ -15,6 +15,7 @@ import { timingSafeIncludes } from '../_crypto.js';
 import { checkEndpointRateLimit } from '../../server/_shared/rate-limit';
 import { getEntitlements, isEntitlementBackendConfigured } from '../../server/_shared/entitlement-check';
 import { validateUserApiKey } from '../../server/_shared/user-api-key';
+import { lookupClerkPlan } from '../../server/auth-session';
 import {
   evaluateEmbedEntitlement,
   parseEnterpriseApiKeys,
@@ -60,6 +61,7 @@ export default async function handler(req: Request): Promise<Response> {
       timingSafeIncludes,
       validateUserApiKey,
       getEntitlements,
+      getAccountPlan: lookupClerkPlan,
       isEntitlementBackendConfigured,
     },
   );

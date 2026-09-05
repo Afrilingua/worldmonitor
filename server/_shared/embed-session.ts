@@ -8,7 +8,8 @@
  */
 
 import { parseEmbedPanelId, type EmbedPanelId } from '../../shared/embed-panels';
-import { hasEmbedAccess } from '../../shared/embed-access';
+import { hasAccountEmbedAccess, hasEmbedAccess } from '../../shared/embed-access';
+import type { ClerkPlanLookupResult } from '../auth-session';
 import { classifyBillingVerification, type CachedEntitlements } from './entitlement-check';
 import { isEmbedKeyUnavailableError } from './embed-key';
 
@@ -32,6 +33,7 @@ export interface EmbedSessionResult {
 export interface EmbedSessionDeps {
   validateEmbedKey: (key: string) => Promise<{ userId: string } | null>;
   getEntitlements: (userId: string) => Promise<CachedEntitlements | null>;
+  getAccountPlan: (userId: string) => Promise<ClerkPlanLookupResult>;
   isEntitlementBackendConfigured: () => boolean;
   mintGrant: (
     claims: { panel: EmbedPanelId; accountId: string },
@@ -97,33 +99,38 @@ export async function evaluateEmbedSession(
   }
 
   const entitlements = await deps.getEntitlements(key.userId);
-  if (!entitlements) {
-    // A null answer is either "backend unconfigured, no lookup happened" or
-    // "Convex answered: this account is free". Only the second is terminal.
-    if (!deps.isEntitlementBackendConfigured()) {
+  const now = deps.now();
+  if (!hasEmbedAccess(entitlements, now)) {
+    const accountPlan = await deps.getAccountPlan(key.userId);
+    if (accountPlan === 'unavailable') {
       return {
         status: 503,
-        body: { granted: false, panel, error: 'entitlement_verification_unavailable' },
+        body: { granted: false, panel, error: 'account_verification_unavailable' },
         retryAfterSeconds: DEFAULT_RETRY_AFTER_SECONDS,
       };
     }
-    return { status: 403, body: { granted: false, panel, error: 'embed_not_entitled' } };
-  }
 
-  const denial = classifyBillingVerification(entitlements);
-  if (denial) {
-    if (denial.retryable) {
-      return {
-        status: 503,
-        body: { granted: false, panel, error: denial.code },
-        retryAfterSeconds: denial.retryAfterSeconds || DEFAULT_RETRY_AFTER_SECONDS,
-      };
+    if (!hasAccountEmbedAccess(accountPlan, entitlements, now)) {
+      const denial = entitlements ? classifyBillingVerification(entitlements) : null;
+      if (denial?.retryable) {
+        return {
+          status: 503,
+          body: { granted: false, panel, error: denial.code },
+          retryAfterSeconds: denial.retryAfterSeconds || DEFAULT_RETRY_AFTER_SECONDS,
+        };
+      }
+      if (denial) {
+        return { status: 403, body: { granted: false, panel, error: denial.code } };
+      }
+      if (!entitlements && !deps.isEntitlementBackendConfigured()) {
+        return {
+          status: 503,
+          body: { granted: false, panel, error: 'entitlement_verification_unavailable' },
+          retryAfterSeconds: DEFAULT_RETRY_AFTER_SECONDS,
+        };
+      }
+      return { status: 403, body: { granted: false, panel, error: 'embed_not_entitled' } };
     }
-    return { status: 403, body: { granted: false, panel, error: denial.code } };
-  }
-
-  if (!hasEmbedAccess(entitlements, deps.now())) {
-    return { status: 403, body: { granted: false, panel, error: 'embed_not_entitled' } };
   }
 
   const grant = await deps.mintGrant({ panel, accountId: key.userId });
