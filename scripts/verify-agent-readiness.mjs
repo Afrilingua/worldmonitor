@@ -36,7 +36,7 @@ await check('JSON agent mode', '/?mode=agent', { Accept: 'application/json' }, (
 });
 
 const docs = readdirSync(new URL('../public/', import.meta.url)).filter((name) => name.endsWith('.md'));
-docs.push('api/download.md');
+docs.push('api/download.md', 'countries.md', 'sources.md', 'contact.md');
 for (const document of docs) await check(document, `/${document}`, {}, markdown);
 for (const ua of policy.userAgents) {
   await check(`${ua} homepage`, '/', { 'User-Agent': `${ua}/1.0`, Accept: 'text/html' }, markdown);
