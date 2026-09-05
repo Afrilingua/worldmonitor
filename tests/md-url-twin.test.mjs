@@ -63,6 +63,23 @@ describe('api/md-twin.ts vary coverage (#7616 U4)', () => {
 });
 
 describe('api/md-twin.ts', () => {
+  it('includes metadata when a sibling redirects to its canonical page', async () => {
+    const response = await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/countries.md'),
+      '/countries.md',
+      async () => new Response(null, { status: 308, headers: { Location: '/countries/' } }),
+    );
+    assert.equal(response.status, 200);
+    const document = await response.text();
+    const block = document.match(/^---\n([\s\S]*?)\n---\n/);
+    assert.ok(block, 'redirect documents must carry metadata');
+    assert.deepEqual(load(block[1]), {
+      title: 'countries',
+      canonical: 'https://www.worldmonitor.app/countries.md',
+    });
+    assert.match(document, /\[\/countries\/\]\(\/countries\/\)/);
+  });
+
   it('adds escaped title and canonical metadata to generated documents', async () => {
     const response = await buildMarkdownTwinResponse(
       new Request('https://www.worldmonitor.app/example.md'),
