@@ -4778,7 +4778,8 @@ describe('agent readiness: named developer-resource pages (#4953)', () => {
   for (const page of DEV_PAGES) {
     it(`public/${page.file} opens with the brand-named H1 "${page.h1}"`, () => {
       const body = readFileSync(resolve(__dirname, `../public/${page.file}`), 'utf-8');
-      assert.ok(body.startsWith(`${page.h1}\n`), `public/${page.file} must open with "${page.h1}"`);
+      const content = body.replace(/^---\n[\s\S]*?\n---\n+/, '');
+      assert.ok(content.startsWith(`${page.h1}\n`), `public/${page.file} must open with "${page.h1}" after metadata`);
     });
 
     it(`${page.path} serves the static page, never the app shell`, () => {
