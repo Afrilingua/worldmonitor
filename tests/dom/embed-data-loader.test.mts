@@ -177,6 +177,26 @@ describe('embed data loader', () => {
     expect([...requested]).toEqual(['conflicts', 'weather', 'cables']);
   });
 
+  it('withholds conflict events from a renderer that cannot draw them', async () => {
+    // The DeckGL and globe renderers return false here. That rule used to be
+    // enforced at the fetch step — the embed simply never called the ACLED RPC
+    // — and e2e/embed.spec.ts watched the wire for it. The composed endpoint
+    // moved it: one request carries every active layer whatever the renderer
+    // is, so the only place the rule still lives is applyFrame, and the only
+    // place it can be observed is here.
+    const map = recordingMap();
+    map.supportsLiveConflictEvents = () => false;
+    const loader = new EmbedDataLoader(map, ['conflicts', 'earthquakes'], {
+      fetchFrame: async () => frame(),
+      now: () => NOW,
+    });
+
+    await loader.loadOnce();
+
+    expect(map.conflicts, 'a canvas renderer must not receive live conflict events').toHaveLength(0);
+    expect(map.earthquakes, 'every other layer still applies').toEqual([[{ id: 'q1' }]]);
+  });
+
   it('marks a not-entitled layer un-ready instead of rendering it', async () => {
     const map = recordingMap();
     const loader = new EmbedDataLoader(map, ['conflicts', 'protests'], {
