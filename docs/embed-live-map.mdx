@@ -32,6 +32,30 @@ Map refresh pauses while the page is hidden and resumes when it becomes visible.
 
 The Chokepoint Monitor and Fear & Greed panels load data when the iframe opens. They do not refresh on the map's schedule. Reload the iframe to fetch data again.
 
+## Unattended screens and kiosk displays
+
+You can include the map in an executive dashboard or digital signage page alongside other information feeds. Set the starting view in the snippet before you install a screen without a keyboard or mouse.
+
+### Can I use an iframe on another domain?
+
+Yes. Use the dedicated `/embed` route, which permits framing on other websites. The full `/dashboard` restricts framing and is not the route to use for this setup. See [framing headers](#framing-headers) for the security policy details.
+
+### Does the screen need to stay signed in?
+
+No. The free map needs no login or key. For a paid map, configure a `wme_…` embed key in the [loader snippet](#copy-paste-loader). The screen does not use a viewer's signed-in session or cookies.
+
+The paid map obtains a grant that lasts 30 minutes and renews it automatically while the key and the account's embed access remain valid. An operator does not need to sign in at each renewal. Reloading the host page runs the snippet again and requests a new grant with the configured key.
+
+There is no supported token URL for this setup. Keep the key in the snippet's `data-key` attribute, not in the URL. A revoked key, a change in account access, or a service failure can affect the display; see [failure behavior](#failure-behavior).
+
+### How do I hide menus and use the full display area?
+
+The `/embed` map already omits dashboard navigation, layer selectors, and map controls. No `?view=kiosk` or `?menu=hidden` parameter is needed; these are not supported settings. The World Monitor attribution link remains visible.
+
+Size the iframe or its container to fit your split-screen layout. Use the display browser or signage player's kiosk/fullscreen setting to hide browser controls. The embed does not switch the browser into kiosk mode.
+
+Configure the display player to open your host page at startup, prevent sleep, and reopen or reload the page after a restart or browser failure. Test startup and recovery from a network or power outage on the intended hardware. The embed does not manage the device, and a visible map can contain older data during a service outage.
+
 ## Copy a map from the dashboard
 
 1. Open the [World Monitor dashboard](https://www.worldmonitor.app/dashboard).
@@ -137,6 +161,19 @@ If your editor removes script tags, use the [free iframe](#iframe-live-map). Pai
 | The embed could not load. | Inspect the iframe's browser console and network requests. Reload after the source or service recovers. |
 
 ## Developer reference
+
+### Framing headers
+
+The hosted application uses different response headers for embeds and the dashboard:
+
+| Route | Framing policy |
+| --- | --- |
+| `/embed` and `/embed.html` | CSP includes `frame-ancestors *`. No `X-Frame-Options` header is set. Third-party websites can frame these routes. |
+| `/dashboard` | `X-Frame-Options: SAMEORIGIN` and a CSP `frame-ancestors` allowlist restrict framing. Do not use it as a third-party embed. |
+
+The embed's CSP also contains `frame-src 'none'`. This prevents the embed from loading nested frames; it does not block a website from framing the embed. `frame-ancestors` controls which parents can embed it.
+
+If your host page sets a CSP, allow `https://www.worldmonitor.app` in `frame-src` and, when using the loader, in `script-src`. For a self-hosted installation, check the final response headers after any reverse proxy; an added framing restriction can block the embed.
 
 ### Query parameters
 
