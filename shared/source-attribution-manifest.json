@@ -444,9 +444,6 @@
         },
         {
           "path": "scripts/seed-cyber-threats.mjs"
-        },
-        {
-          "path": "server/worldmonitor/cyber/v1/_shared.ts"
         }
       ]
     },
@@ -4184,9 +4181,6 @@
       "references": [
         {
           "path": "scripts/seed-cyber-threats.mjs"
-        },
-        {
-          "path": "server/worldmonitor/cyber/v1/_shared.ts"
         }
       ]
     },
@@ -4276,9 +4270,6 @@
         },
         {
           "path": "server/worldmonitor/market/v1/_quote-provider.ts"
-        },
-        {
-          "path": "server/worldmonitor/market/v1/_shared.ts"
         },
         {
           "path": "server/worldmonitor/market/v1/get-insider-transactions.ts"
@@ -4395,9 +4386,6 @@
       "references": [
         {
           "path": "scripts/seed-cyber-threats.mjs"
-        },
-        {
-          "path": "server/worldmonitor/cyber/v1/_shared.ts"
         }
       ]
     },
@@ -5173,9 +5161,6 @@
       "references": [
         {
           "path": "scripts/seed-cyber-threats.mjs"
-        },
-        {
-          "path": "server/worldmonitor/cyber/v1/_shared.ts"
         }
       ]
     },
@@ -6920,9 +6905,6 @@
       "references": [
         {
           "path": "scripts/seed-cyber-threats.mjs"
-        },
-        {
-          "path": "server/worldmonitor/cyber/v1/_shared.ts"
         }
       ]
     },
@@ -7465,9 +7447,6 @@
           "path": "scripts/seed-market-quotes.mjs"
         },
         {
-          "path": "server/worldmonitor/market/v1/_shared.ts"
-        },
-        {
           "path": "server/worldmonitor/market/v1/analyze-stock.ts"
         },
         {
@@ -7571,9 +7550,6 @@
         },
         {
           "path": "scripts/seed-disease-outbreaks.mjs"
-        },
-        {
-          "path": "server/worldmonitor/cyber/v1/_shared.ts"
         }
       ]
     },
@@ -9754,9 +9730,6 @@
         },
         {
           "path": "scripts/seed-cyber-threats.mjs"
-        },
-        {
-          "path": "server/worldmonitor/cyber/v1/_shared.ts"
         }
       ]
     },
@@ -10519,9 +10492,6 @@
         },
         {
           "path": "server/worldmonitor/market/v1/_quote-provider.ts"
-        },
-        {
-          "path": "server/worldmonitor/market/v1/_shared.ts"
         }
       ]
     },
