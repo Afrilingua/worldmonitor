@@ -13,10 +13,17 @@
 //
 // This module exports the frozen harness (clock, reader, byte computation) so
 // the generator and the test share one implementation and cannot drift apart.
-// The CLI entry (guarded main below) writes the artifact. Run it only from an
-// accepted `main` commit:
+// The CLI entry (guarded main below) writes the artifact. Rationale, artifact
+// fields, and the regeneration flows:
+// docs/methodology/country-resilience-index/golden-baseline.md
 //
 //   npm run freeze:resilience-cri-golden
+//
+// Run it from an up-to-date accepted `main` checkout, or — when regenerating as
+// part of the PR that makes an intentional CRI methodology change — on that
+// branch with --allow-non-main (the recorded acceptedSourceCommit becomes the
+// accepted commit on merge). --allow-dirty-fixture separately overrides the
+// working-tree dirtiness gate; both guards refuse by default.
 //
 // The artifact records the accepted source commit, the CRI cache identity
 // (formula tag + score cache prefix), the frozen clock, the frozen feature
@@ -40,6 +47,7 @@ import {
 } from '../server/worldmonitor/resilience/v1/_dimension-scorers.ts';
 import {
   RESILIENCE_HISTORY_KEY_PREFIX,
+  RESILIENCE_SCHEMA_V2_ENABLED,
   RESILIENCE_SCORE_CACHE_PREFIX,
   buildDimensionList,
   buildDomainList,
@@ -54,21 +62,41 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 
 export const INPUT_FIXTURE_RELATIVE_PATH =
   'tests/fixtures/resilience-whole-index-pairs-2026-08-13.json';
-export const GOLDEN_ARTIFACT_RELATIVE_PATH =
+const GOLDEN_ARTIFACT_RELATIVE_PATH =
   'tests/fixtures/resilience-cri-golden-baseline-2026-08-13.json';
-export const REGENERATION_COMMAND = 'npm run freeze:resilience-cri-golden';
+const REGENERATION_COMMAND = 'npm run freeze:resilience-cri-golden';
 
 // Same fixed flag configuration as the five-factor CRI isolation test: this is
 // the frozen #6441 comparison configuration (pillar-combined formula, education
-// serialized, fin-sys-exposure and energy-v2 dark). These are the only
-// RESILIENCE_* env reads in the scoring path, so pinning all four pins the
-// flag-dependent behavior.
+// serialized, fin-sys-exposure and energy-v2 dark). These four are the only
+// DYNAMIC (read-per-call) RESILIENCE_* env reads in the scoring path, so pinning
+// them pins the flag-dependent byte behavior. One more RESILIENCE_* read exists
+// but is different in kind: RESILIENCE_SCHEMA_V2_ENABLED is captured at
+// _shared.ts module load (before any env pinning can apply), so it cannot be
+// pinned here — assertFrozenScorerDefaults() below fails fast on it instead.
 export const GOLDEN_ENV_FLAGS: Readonly<Record<string, string>> = {
   RESILIENCE_EDUCATION_ENABLED: 'true',
   RESILIENCE_FIN_SYS_EXPOSURE_ENABLED: 'false',
   RESILIENCE_PILLAR_COMBINE_ENABLED: 'true',
   RESILIENCE_ENERGY_V2_ENABLED: 'false',
 };
+
+// Fail fast when the ambient environment captured the module-load
+// RESILIENCE_SCHEMA_V2_ENABLED const as false. The golden bytes do not depend
+// on that const (the byte-path scorers never read it), but the recorded formula
+// tag does: an ambient `false` makes getCurrentCacheFormula() report 'd6' and
+// turns the golden test's formula assertion into a wrong-advice "regenerate"
+// failure. Requiring the default 'true' keeps generation and comparison on one
+// deterministic interpretation. Called before any scoring runs.
+export function assertFrozenScorerDefaults(): void {
+  if (!RESILIENCE_SCHEMA_V2_ENABLED) {
+    throw new Error(
+      'RESILIENCE_SCHEMA_V2_ENABLED was captured as false from the ambient environment. ' +
+        'The golden CRI harness requires the default (unset RESILIENCE_SCHEMA_V2_ENABLED in your shell or CI); ' +
+        'unset it and re-run.',
+    );
+  }
+}
 
 // The wall clock is pinned to the same instant the isolation test pins the
 // frozen seed-meta fetchedAt to, so seed-meta staleness preflights, cyber
@@ -119,6 +147,7 @@ export function restoreRealClock(): void {
 }
 
 export function applyGoldenEnvFlags(): Record<string, string | undefined> {
+  assertFrozenScorerDefaults();
   const previous: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(GOLDEN_ENV_FLAGS)) {
     previous[key] = process.env[key];
@@ -169,7 +198,7 @@ export function createBaselineReader(): ResilienceSeedReader {
     const value = fixturePayload[key];
     if (!key.startsWith('seed-meta:')) return value ?? null;
     return value && typeof value === 'object' && !Array.isArray(value)
-      ? { ...value, fetchedAt: Date.parse(FROZEN_CLOCK_ISO) }
+      ? { ...value, fetchedAt: FROZEN_NOW_MS }
       : null;
   };
 }
@@ -211,7 +240,7 @@ export async function computeFrozenCriBytes(
   };
 }
 
-export interface GoldenBaselineArtifact {
+interface GoldenBaselineArtifact {
   schemaVersion: 1;
   artifactKind: 'cri-golden-baseline';
   issue: number;
@@ -268,33 +297,68 @@ function isHeadAncestorOfOriginMain(): boolean {
   return git(['merge-base', '--is-ancestor', 'HEAD', 'origin/main'], { allowFailure: true }) !== null;
 }
 
+// Everything the golden bytes and the artifact's provenance claims depend on.
+// A dirty path here would make the artifact describe state no commit contains.
+const GUARDED_PATHS = [
+  INPUT_FIXTURE_RELATIVE_PATH,
+  'scripts/generate-cri-golden-baseline.mts',
+  'server/worldmonitor/resilience/v1',
+] as const;
+
+export interface GenerationGuards {
+  headSha: string;
+  headIsAncestorOfOriginMain: boolean;
+  dirtyStatusLines: string[] | null;
+  allowNonMain: boolean;
+  allowDirtyTree: boolean;
+}
+
+// Pure so the guard semantics are unit-testable with an injected git runner at
+// the CLI boundary (see tests/cri-golden-baseline-guards.test.mts).
+export function assertGenerationGuards(guards: GenerationGuards): void {
+  // The baseline must describe scorer behavior an accepted commit contains.
+  // Running it from a feature branch would commit a golden that describes
+  // unreviewed changes; the sanctioned in-PR path is --allow-non-main, whose
+  // recorded acceptedSourceCommit becomes the accepted commit on merge.
+  if (!guards.headIsAncestorOfOriginMain && !guards.allowNonMain) {
+    throw new Error(
+      `HEAD ${guards.headSha} is not an ancestor of origin/main (or origin/main is unavailable). ` +
+        'For an intentional CRI methodology change, run the generator on the branch making the change with --allow-non-main ' +
+        '(the recorded acceptedSourceCommit becomes the accepted commit on merge), ' +
+        'or run it from an up-to-date accepted main checkout.',
+    );
+  }
+  if (guards.dirtyStatusLines === null) {
+    throw new Error('could not determine working-tree dirtiness via git status');
+  }
+  if (guards.dirtyStatusLines.length > 0 && !guards.allowDirtyTree) {
+    throw new Error(
+      'the golden depends on files with uncommitted changes:\n  ' +
+        guards.dirtyStatusLines.join('\n  ') +
+        '\nGenerate from committed scorer, harness, and fixture state, or pass --allow-dirty-fixture explicitly.',
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const allowNonMain = process.argv.includes('--allow-non-main');
+  const allowDirtyTree = process.argv.includes('--allow-dirty-fixture');
   const headSha = currentHeadCommit();
-
-  // The baseline must come from an accepted main commit; running it from a
-  // feature branch would commit a golden that describes unreviewed scorer
-  // behavior.
+  const dirtyStatus = git(['status', '--porcelain', '--', ...GUARDED_PATHS], { allowFailure: true });
+  assertGenerationGuards({
+    headSha,
+    headIsAncestorOfOriginMain: isHeadAncestorOfOriginMain(),
+    dirtyStatusLines: dirtyStatus === null ? null : dirtyStatus.split('\n').filter(Boolean),
+    allowNonMain,
+    allowDirtyTree,
+  });
   if (!isHeadAncestorOfOriginMain()) {
-    if (!allowNonMain) {
-      throw new Error(
-        `HEAD ${headSha} is not an ancestor of origin/main (or origin/main is unavailable). ` +
-          'Run the generator from an up-to-date accepted main checkout, or pass --allow-non-main to accept the current commit explicitly.',
-      );
-    }
     console.warn(
       `[generate-cri-golden-baseline] accepting non-main commit ${headSha} via --allow-non-main`,
     );
   }
 
   const inputFixturePath = path.join(REPO_ROOT, INPUT_FIXTURE_RELATIVE_PATH);
-  const dirtyFixture = git(['status', '--porcelain', '--', INPUT_FIXTURE_RELATIVE_PATH]);
-  if (dirtyFixture && !allowNonMain) {
-    throw new Error(
-      `${INPUT_FIXTURE_RELATIVE_PATH} has uncommitted changes; the golden must be generated from the committed fixture (or pass --allow-non-main).`,
-    );
-  }
-
   const previousFlags = applyGoldenEnvFlags();
   installFrozenClock();
   let artifact: GoldenBaselineArtifact;

@@ -47,18 +47,37 @@ The generator and the test import the same module, so they cannot drift.
 
 ## Regenerating
 
-Only for an **intentional CRI methodology change**, from an accepted `main`
-commit:
+Only for an **intentional CRI methodology change**:
 
 ```bash
 npm run freeze:resilience-cri-golden
 ```
 
-The generator refuses to run when HEAD is not an ancestor of `origin/main` or
-the input fixture has uncommitted changes (`--allow-non-main` overrides
-explicitly). Never regenerate merely to make a failing test pass; a golden
-failure is a signal to review the scorer change first.
+Two flows, by checkout:
 
-The test also asserts the recorded formula tag and score cache prefix still
+- **Accepted main checkout** (up to date with `origin/main`): run the command
+  directly. The artifact records that commit as `acceptedSourceCommit`.
+- **The PR that makes the methodology change** (the usual case): the golden
+  test fails on that PR by design, and the generator refuses to run there by
+  default. Run the command **on that branch with `--allow-non-main`**; the
+  artifact records the branch HEAD, which becomes the accepted commit on
+  merge. This is the sanctioned in-PR regeneration path.
+
+By default the generator also refuses to run when any guarded path has
+uncommitted changes — the input fixture, the generator module itself, and
+`server/worldmonitor/resilience/v1/` (everything the bytes and the provenance
+claims depend on). `--allow-dirty-fixture` overrides that gate explicitly; the
+two flags are independent. Never regenerate merely to make a failing test
+pass; a golden failure is a signal to review the scorer change first.
+
+The artifact is a pure function of (accepted commit, input fixture, scorer,
+frozen harness constants): it carries no wall-clock timestamp, so regenerating
+on the same commit is a git no-op.
+
+The test also asserts the recorded formula tag and score cache prefixes still
 match the live scorer, so a cache-identity change surfaces as an explicit
-"regenerate the baseline" failure instead of a raw byte diff.
+"regenerate the baseline" failure instead of a raw byte diff. Byte
+reproducibility assumes the repository's Node.js 24 toolchain (`.nvmrc`); the
+rounded two- and four-decimal serialization keeps the bytes stable against
+floating-point last-bit drift, but a Node/V8 upgrade that changes rounding at
+a boundary would surface as a baseline failure to review.

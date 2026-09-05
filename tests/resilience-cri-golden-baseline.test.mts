@@ -17,6 +17,7 @@ import {
   sha256File,
 } from '../scripts/generate-cri-golden-baseline.mts';
 import {
+  RESILIENCE_HISTORY_KEY_PREFIX,
   RESILIENCE_SCORE_CACHE_PREFIX,
   getCurrentCacheFormula,
 } from '../server/worldmonitor/resilience/v1/_shared.ts';
@@ -27,13 +28,20 @@ import wholeIndexFixture from './fixtures/resilience-whole-index-pairs-2026-08-1
 // so a shared-scorer defect moves both sides together and passes. Here the
 // expected bytes come from the committed golden artifact instead: any change to
 // the live CRI scorer output (scores, ranking, dimension payloads) fails until
-// the baseline is intentionally regenerated with
-// `npm run freeze:resilience-cri-golden` from an accepted main commit.
+// the baseline is intentionally regenerated with `npm run
+// freeze:resilience-cri-golden`. Full rationale and the regeneration flows
+// (including the in-PR --allow-non-main path):
+// docs/methodology/country-resilience-index/golden-baseline.md
 //
 // The frozen input (fixture + synthetic tech-readiness override), the frozen
 // clock, the pinned env flags, the stable country order, and the serialization
 // are all defined in scripts/generate-cri-golden-baseline.mts — the same module
 // that generated the artifact — so the generator and this test cannot drift.
+
+const REGENERATION_HINT =
+  'if this is an intentional CRI methodology change, regenerate with ' +
+  'npm run freeze:resilience-cri-golden — from an up-to-date accepted main checkout, ' +
+  'or on the branch making the change with --allow-non-main';
 
 const artifact = goldenArtifact as typeof goldenArtifact & {
   schemaVersion: number;
@@ -67,6 +75,10 @@ after(() => {
 
 describe('CRI golden baseline non-regression (#7728)', () => {
   it('matches the committed golden country-score and ranking bytes byte-for-byte', async () => {
+    assert.ok(
+      fixture.__fixture.countries.length >= 10,
+      'the frozen cohort must cover an approximately ten-country hand-check scale; an empty or truncated cohort would make vacuous golden bytes',
+    );
     const live = await computeFrozenCriBytes(
       createBaselineReader(),
       fixture.__fixture.countries,
@@ -74,14 +86,12 @@ describe('CRI golden baseline non-regression (#7728)', () => {
     assert.equal(
       live.countryScores,
       artifact.golden.countryScores,
-      'live CRI country scores drifted from the committed golden baseline; if this is an intentional CRI methodology change, regenerate with ' +
-        'npm run freeze:resilience-cri-golden from an accepted main commit',
+      `live CRI country scores drifted from the committed golden baseline; ${REGENERATION_HINT}`,
     );
     assert.equal(
       live.ranking,
       artifact.golden.ranking,
-      'live CRI ranking drifted from the committed golden baseline; if this is an intentional CRI methodology change, regenerate with ' +
-        'npm run freeze:resilience-cri-golden from an accepted main commit',
+      `live CRI ranking drifted from the committed golden baseline; ${REGENERATION_HINT}`,
     );
   });
 
@@ -95,10 +105,14 @@ describe('CRI golden baseline non-regression (#7728)', () => {
       'the artifact must reference the committed frozen input fixture',
     );
     assert.equal(
+      artifact.inputFixture.capturedAt,
+      fixture.__fixture.capturedAt,
+      'the artifact must reference the frozen input fixture capture date',
+    );
+    assert.equal(
       artifact.inputFixture.sha256,
       fixtureSha256,
-      'the frozen input fixture changed without regenerating the golden baseline; run ' +
-        'npm run freeze:resilience-cri-golden from an accepted main commit',
+      `the frozen input fixture changed without regenerating the golden baseline; ${REGENERATION_HINT}`,
     );
   });
 
@@ -106,16 +120,27 @@ describe('CRI golden baseline non-regression (#7728)', () => {
     assert.equal(
       artifact.formula,
       getCurrentCacheFormula(),
-      'the CRI formula tag changed; regenerate the golden baseline with ' +
-        'npm run freeze:resilience-cri-golden from an accepted main commit',
+      `the CRI formula tag changed; ${REGENERATION_HINT}`,
     );
     assert.equal(
       artifact.scorerCacheIdentity.scoreCachePrefix,
       RESILIENCE_SCORE_CACHE_PREFIX,
-      'the CRI score cache prefix changed; regenerate the golden baseline with ' +
-        'npm run freeze:resilience-cri-golden from an accepted main commit',
+      `the CRI score cache prefix changed; ${REGENERATION_HINT}`,
     );
-    assert.equal(artifact.frozenClockIso, FROZEN_CLOCK_ISO);
-    assert.deepEqual(artifact.envFlags, GOLDEN_ENV_FLAGS);
+    assert.equal(
+      artifact.scorerCacheIdentity.historyKeyPrefix,
+      RESILIENCE_HISTORY_KEY_PREFIX,
+      `the CRI history key prefix changed; ${REGENERATION_HINT}`,
+    );
+    assert.equal(
+      artifact.frozenClockIso,
+      FROZEN_CLOCK_ISO,
+      `the frozen clock constant changed without regenerating the golden baseline; ${REGENERATION_HINT}`,
+    );
+    assert.deepEqual(
+      artifact.envFlags,
+      GOLDEN_ENV_FLAGS,
+      `the pinned env flags changed without regenerating the golden baseline; ${REGENERATION_HINT}`,
+    );
   });
 });
