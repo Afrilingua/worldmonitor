@@ -164,6 +164,13 @@ type SettingsInternals = {
 let settings: InstanceType<typeof UnifiedSettings>;
 let internal: SettingsInternals;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 function mount(): void {
   settings = new UnifiedSettings({
     getPanelSettings: () => ({}),
@@ -275,7 +282,7 @@ describe('Settings -> Embeds key lifecycle', () => {
   };
 
   it('keeps one mint pending across repeated Enter and a rerender', async () => {
-    const pending = Promise.withResolvers<Awaited<ReturnType<typeof createEmbedKey>>>();
+    const pending = deferred<Awaited<ReturnType<typeof createEmbedKey>>>();
     createEmbedKey.mockImplementationOnce(() => pending.promise);
     openEmbedsTab();
     enter();
@@ -293,7 +300,7 @@ describe('Settings -> Embeds key lifecycle', () => {
   });
 
   it('allows retry after a failed mint, including a rerender while pending', async () => {
-    const pending = Promise.withResolvers<Awaited<ReturnType<typeof createEmbedKey>>>();
+    const pending = deferred<Awaited<ReturnType<typeof createEmbedKey>>>();
     createEmbedKey.mockImplementationOnce(() => pending.promise);
     openEmbedsTab();
     enter();
@@ -306,8 +313,8 @@ describe('Settings -> Embeds key lifecycle', () => {
   });
 
   it('does not let an old account completion unlock a new account mint or expose its key', async () => {
-    const first = Promise.withResolvers<Awaited<ReturnType<typeof createEmbedKey>>>();
-    const second = Promise.withResolvers<Awaited<ReturnType<typeof createEmbedKey>>>();
+    const first = deferred<Awaited<ReturnType<typeof createEmbedKey>>>();
+    const second = deferred<Awaited<ReturnType<typeof createEmbedKey>>>();
     createEmbedKey.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
     openEmbedsTab();
     enter('account-a');
