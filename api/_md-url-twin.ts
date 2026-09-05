@@ -332,6 +332,12 @@ export async function buildMarkdownTwinResponse(
     });
   }
 
+  if (!markdown.startsWith('---\n')) {
+    const title = markdown.match(/^# (.+)$/m)?.[1] ?? heading;
+    const canonical = new URL(markdownPath, req.url).href;
+    markdown = `---\ntitle: ${JSON.stringify(title)}\ncanonical: ${JSON.stringify(canonical)}\n---\n\n${markdown}`;
+  }
+
   return new Response(markdown, {
     status: siblingStatus,
     headers: markdownHeaders(req, markdownPath, responseHeaders),
