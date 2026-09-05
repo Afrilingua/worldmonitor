@@ -125,9 +125,7 @@ const outputPath = String(process.argv[1] ?? '');
 const overflowPath = String(process.argv[2] ?? '');
 const limit = 1024 * 1024;
 const output = fs.openSync(outputPath, 'wx', 0o600);
-const child = spawn('node', ['seed-cross-strait-activity.mjs'], {
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
+let child;
 let written = 0;
 let outcome;
 let killTimer;
@@ -141,9 +139,17 @@ const stop = (nextOutcome) => {
     }
   }
   outcome = nextOutcome;
-  child.kill('SIGTERM');
-  killTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+  if (child) {
+    child.kill('SIGTERM');
+    killTimer = setTimeout(() => child?.kill('SIGKILL'), 5000);
+  }
 };
+for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) {
+  process.on(signal, () => stop('signal'));
+}
+child = spawn('node', ['seed-cross-strait-activity.mjs'], {
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
 const capture = (chunk) => {
   if (outcome) return;
   const kept = Math.min(chunk.length, limit - written);
@@ -162,9 +168,6 @@ child.stderr.on('data', capture);
 child.stdout.on('error', () => stop('io_error'));
 child.stderr.on('error', () => stop('io_error'));
 child.once('error', () => stop('spawn_error'));
-for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) {
-  process.on(signal, () => stop('signal'));
-}
 child.once('close', (code) => {
   clearTimeout(killTimer);
   try {

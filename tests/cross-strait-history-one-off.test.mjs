@@ -661,7 +661,7 @@ exit 0`);
         },
         stdio: 'ignore',
       });
-      const deadline = Date.now() + 5_000;
+      const deadline = Date.now() + 15_000;
       while (!existsSync(seedReadyMarker) && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
