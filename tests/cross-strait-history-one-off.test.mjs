@@ -198,6 +198,17 @@ describe('Cross-Strait history Railway one-off', () => {
       lastRetracted: 2,
     };
     assert.doesNotThrow(() => validateHistoryPostflightRecord(healthy, 'run-42'));
+    assert.doesNotThrow(() => validateHistoryPostflightRecord({
+      ...healthy,
+      lastChunks: 8,
+      lastInputRecords: 367,
+      lastNormalizedRecords: 367,
+      lastDroppedRecords: 0,
+      lastAcceptedRecords: 367,
+      lastInserted: 367,
+      lastDeduped: 0,
+      lastRetracted: 0,
+    }, 'run-42'));
     for (const record of [
       { ...healthy, lastRunId: 'run-41' },
       { ...healthy, state: 'failing' },
