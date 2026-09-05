@@ -494,6 +494,9 @@ export function describeHistoryAppendOutcome(result, error) {
   const chunks = Number(result?.chunks) || 0;
   const abandoned = Number(result?.abandoned) || 0;
   const failedChunks = Number(result?.failedChunks) || 0;
+  const inputRecords = nonNegativeIntegerOrNull(result?.inputRecords);
+  const normalizedRecords = nonNegativeIntegerOrNull(result?.normalizedRecords);
+  const droppedRecords = nonNegativeIntegerOrNull(result?.droppedRecords);
 
   // `appendSeedHistory` RESOLVES rather than throws when its wall-clock budget
   // dies before a single chunk is POSTed — the embedding phase overran, or the
@@ -526,11 +529,18 @@ export function describeHistoryAppendOutcome(result, error) {
     chunks,
     abandoned,
     failedChunks,
+    inputRecords,
+    normalizedRecords,
+    droppedRecords,
   };
 }
 
 function finiteOr(value, fallback = null) {
   return Number.isFinite(value) ? value : fallback;
+}
+
+function nonNegativeIntegerOrNull(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 /**
@@ -593,6 +603,15 @@ export function projectHistoryIngestHealth(previous, { domain, resource, runId, 
     lastHealthyAt,
     lastSuccessAt,
     lastAcceptedRecords,
+    lastInputRecords: healthy
+      ? outcome.inputRecords
+      : finiteOr(prev?.lastInputRecords),
+    lastNormalizedRecords: healthy
+      ? outcome.normalizedRecords
+      : finiteOr(prev?.lastNormalizedRecords),
+    lastDroppedRecords: healthy
+      ? outcome.droppedRecords
+      : finiteOr(prev?.lastDroppedRecords),
     lastInserted: healthy ? outcome.inserted : finiteOr(prev?.lastInserted),
     lastDeduped: healthy ? outcome.deduped : finiteOr(prev?.lastDeduped),
     lastRetracted: healthy ? outcome.retracted : finiteOr(prev?.lastRetracted),
@@ -755,7 +774,8 @@ export async function recordHistoryIngestHealth({ domain, resource, runId, resul
  * @param {(ms: number) => Promise<void>} [deps.sleep] retry-delay seam
  * @param {number} [deps.budgetMs]         aggregate wall-clock budget override
  * @returns {Promise<{inserted: number, skipped: number, retracted: number,
- *   chunks: number, abandoned: number, failedChunks: number}
+ *   chunks: number, abandoned: number, failedChunks: number,
+ *   inputRecords: number, normalizedRecords: number, droppedRecords: number}
  *   | {skipped: 'unconfigured', missing: string[]}>}
  *
  * Throws SeedHistoryError on a hard runtime failure; propagates the
@@ -783,8 +803,21 @@ export async function appendSeedHistory({ domain, resource, runId, records }, de
   }
 
   const sanitized = normalizeHistoryRecords(records);
+  const inputRecords = Array.isArray(records) ? records.length : 0;
+  const normalizedRecords = sanitized.length;
+  const droppedRecords = Math.max(0, inputRecords - normalizedRecords);
   if (sanitized.length === 0) {
-    return { inserted: 0, skipped: 0, retracted: 0, chunks: 0, abandoned: 0, failedChunks: 0 };
+    return {
+      inserted: 0,
+      skipped: 0,
+      retracted: 0,
+      chunks: 0,
+      abandoned: 0,
+      failedChunks: 0,
+      inputRecords,
+      normalizedRecords,
+      droppedRecords,
+    };
   }
 
   const now = deps.now ?? (() => Date.now());
@@ -826,6 +859,9 @@ export async function appendSeedHistory({ domain, resource, runId, records }, de
       chunks: 0,
       abandoned: sanitized.length,
       failedChunks: 0,
+      inputRecords,
+      normalizedRecords,
+      droppedRecords,
     };
   }
 
@@ -837,6 +873,25 @@ export async function appendSeedHistory({ domain, resource, runId, records }, de
   let abandoned = 0;
   let failedChunks = 0;
   let lastError = null;
+
+  const validatedChunkCounts = (body, expectedRecords) => {
+    const count = (name, defaultValue) => {
+      const value = body?.[name] ?? defaultValue;
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new SeedHistoryError(`intel-history relay returned an invalid ${name} count`);
+      }
+      return value;
+    };
+    const counts = {
+      inserted: count('inserted'),
+      skipped: count('skipped'),
+      retracted: count('retracted', 0),
+    };
+    if (counts.inserted + counts.skipped + counts.retracted !== expectedRecords) {
+      throw new SeedHistoryError('intel-history relay counters did not account for the submitted chunk');
+    }
+    return counts;
+  };
 
   for (let start = 0; start < sanitized.length; start += HISTORY_CHUNK_SIZE) {
     const chunk = sanitized
@@ -866,9 +921,10 @@ export async function appendSeedHistory({ domain, resource, runId, records }, de
         now,
         sleep: deps.sleep,
       });
-      inserted += Number(body?.inserted) || 0;
-      skipped += Number(body?.skipped) || 0;
-      retracted += Number(body?.retracted) || 0;
+      const counts = validatedChunkCounts(body, chunk.length);
+      inserted += counts.inserted;
+      skipped += counts.skipped;
+      retracted += counts.retracted;
       chunks += 1;
     } catch (err) {
       if (err?.budgetExhausted || now() >= deadline) {
@@ -886,5 +942,15 @@ export async function appendSeedHistory({ domain, resource, runId, records }, de
 
   if (chunks === 0 && failedChunks > 0) throw lastError;
 
-  return { inserted, skipped, retracted, chunks, abandoned, failedChunks };
+  return {
+    inserted,
+    skipped,
+    retracted,
+    chunks,
+    abandoned,
+    failedChunks,
+    inputRecords,
+    normalizedRecords,
+    droppedRecords,
+  };
 }

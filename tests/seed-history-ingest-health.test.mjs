@@ -81,7 +81,17 @@ const AT = Date.UTC(2026, 6, 28, 12, 0, 0);
 const MINUTE = 60_000;
 
 /** One successful relay append. */
-const SUCCESS = { inserted: 7, skipped: 3, chunks: 1, abandoned: 0, failedChunks: 0 };
+const SUCCESS = {
+  inserted: 7,
+  skipped: 3,
+  retracted: 0,
+  chunks: 1,
+  abandoned: 0,
+  failedChunks: 0,
+  inputRecords: 10,
+  normalizedRecords: 10,
+  droppedRecords: 0,
+};
 
 function project(previous, { result = null, error = null, at = AT, runId = 'run-1' } = {}) {
   return projectHistoryIngestHealth(previous, {
@@ -112,6 +122,9 @@ describe('projectHistoryIngestHealth', () => {
     assert.equal(record.lastHealthyAt, AT);
     assert.equal(record.lastInserted, 7);
     assert.equal(record.lastDeduped, 3);
+    assert.equal(record.lastInputRecords, 10);
+    assert.equal(record.lastNormalizedRecords, 10);
+    assert.equal(record.lastDroppedRecords, 0);
     assert.equal(record.lastErrorCode, null);
 
     assert.equal(meta.fetchedAt, AT);
@@ -278,6 +291,24 @@ describe('projectHistoryIngestHealth', () => {
       'the relay is reachable, so this is not staleness',
     );
     assert.equal(projected.meta.sourceState, 'degraded', 'but the loss must surface');
+  });
+
+  it('records pre-upload drops without changing the scheduled health policy', () => {
+    const droppedBeforeUpload = {
+      ...SUCCESS,
+      inputRecords: 11,
+      normalizedRecords: 10,
+      droppedRecords: 1,
+    };
+    const first = project(null, { result: droppedBeforeUpload });
+    const second = project(first.record, {
+      result: droppedBeforeUpload,
+      at: AT + MINUTE,
+    });
+
+    assert.equal(second.record.lastDroppedRecords, 1);
+    assert.equal(second.record.consecutiveFailures, 0);
+    assert.equal(second.meta.sourceState, 'ok');
   });
 
   it('lets a clean run clear a lossy streak', () => {
