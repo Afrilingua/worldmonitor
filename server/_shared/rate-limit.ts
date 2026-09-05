@@ -634,6 +634,9 @@ export const FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED: Record<string, RateLimit
   '/api/embed/session': {
     reason: 'Grant minting amplifies into Convex embed-key validation and hands back a bearer credential; fail closed so a Redis outage cannot lift the per-IP budget on a credential-issuing path.',
   },
+  '/api/embed/map-frame': {
+    reason: 'The keyless map frame is fully anonymous and fans out across four seed reads. Fail closed rather than inherit the availability-first global fallback: those reads come from the same Redis that would be degraded, so a fail-open origin would serve empty layers at unbounded volume while the CDN copy keeps real data on screen for the stale-while-revalidate window.',
+  },
 };
 
 // Explicit examples of read-only gateway routes where the global per-IP

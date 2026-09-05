@@ -141,15 +141,16 @@ export default async function handler(req: Request): Promise<Response> {
     // who presented nothing.
     : `private, max-age=${Math.floor(refreshMsForTier('keyed') / 1000)}`;
 
-  return new Response(JSON.stringify(frame), {
-    status: 200,
-    headers: {
-      ...cors,
-      'Content-Type': 'application/json',
-      'Cache-Control': cacheControl,
-      // The tier is part of what makes this body correct; make it visible to
-      // caches and to anyone debugging a partner page.
-      Vary: 'X-WorldMonitor-Grant',
-    },
-  });
+  const headers: Record<string, string> = {
+    ...cors,
+    'Content-Type': 'application/json',
+    'Cache-Control': cacheControl,
+  };
+  // Only the keyed URL's body depends on the grant header. The public URL
+  // never reads it, so declaring a Vary there would fragment a shared cache on
+  // a header that cannot change the answer — the tier is in the cache key
+  // already, because it is in the URL.
+  if (tier === 'keyed') headers.Vary = 'X-WorldMonitor-Grant';
+
+  return new Response(JSON.stringify(frame), { status: 200, headers });
 }

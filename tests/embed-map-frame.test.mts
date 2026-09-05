@@ -224,6 +224,12 @@ describe('embed map frame', () => {
       assert.match(source, /`private, max-age=/);
     });
 
+    it('varies on the grant only where the body actually depends on it', () => {
+      // The public URL never reads the header, so a Vary there would fragment
+      // a shared cache on something that cannot change the answer.
+      assert.match(source, /if \(tier === 'keyed'\) headers\.Vary = 'X-WorldMonitor-Grant'/);
+    });
+
     it('accepts no knob other than layers', () => {
       for (const forbidden of ['sw_lat', 'ne_lat', 'bbox', 'page_size', 'pageSize:', 'start:', 'cursor:']) {
         const uses = source.split('\n').filter(
