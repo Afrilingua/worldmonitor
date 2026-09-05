@@ -1,3 +1,9 @@
+---
+title: "World Monitor AI search briefing"
+description: "Citable product facts, data coverage, and source attribution."
+canonical: "https://www.worldmonitor.app/ai-search.md"
+---
+
 # World Monitor AI Search Briefing
 
 Facts reconciled: 2026-09-05 — see Data Coverage below for how each figure is derived.

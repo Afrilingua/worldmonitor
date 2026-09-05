@@ -184,7 +184,7 @@ const USER_AGENT = 'WorldMonitor Cloudflare Cache Rule/1.0';
 /** Matches the ceiling scripts/_kv-storage.mjs uses for its Cloudflare API writes. */
 const REQUEST_TIMEOUT_MS = 15_000;
 
-async function cloudflareRequest(
+export async function cloudflareRequest(
   path,
   {
     token,
@@ -214,7 +214,7 @@ async function cloudflareRequest(
   return payload.result;
 }
 
-async function resolveZoneId(token, { env = process.env, fetchImpl } = {}) {
+export async function resolveZoneId(token, { env = process.env, fetchImpl } = {}) {
   if (env.CLOUDFLARE_ZONE_ID) {
     // Never take the id on trust. The credential that actually runs this locally
     // is account-wide, so a stale or mistyped id would aim every write at another
@@ -236,7 +236,7 @@ async function resolveZoneId(token, { env = process.env, fetchImpl } = {}) {
   return zone.id;
 }
 
-function resolveToken(env = process.env) {
+export function resolveToken(env = process.env) {
   const tokens = [env.CLOUDFLARE_API_TOKEN, env.CLOUDFLARE_ALL_ACCESS_TOKEN].filter(Boolean);
   if (tokens.length !== 1) {
     throw new Error(
