@@ -30,7 +30,7 @@ const add = (source, id, detail) => rules.push({ rule: `${source}:${id}`, source
 // 1. productCatalog — every (plan × gating field) pair
 {
   const s = R('convex/config/productCatalog.ts');
-  const FIELDS = ['tier','maxDashboards','apiRateLimit','prioritySupport','mcpAccess','dataExport','apiAccess','apiRequestsPerDay','apiBurstRequestsPerMinute','mcpCallsPerDay','mcpBurstRequestsPerMinute','apiDailyAllowance','exportFormats'];
+  const FIELDS = ['tier','maxDashboards','apiRateLimit','prioritySupport','mcpAccess','dataExport','apiAccess','embedAccess','apiRequestsPerDay','apiBurstRequestsPerMinute','mcpCallsPerDay','mcpBurstRequestsPerMinute','apiDailyAllowance','exportFormats'];
   for (const m of s.matchAll(/const (FREE|PRO|PRO_BUSINESS|API_STARTER|API_BUSINESS|ENTERPRISE)_FEATURES[^=]*=\s*\{([\s\S]*?)\n\};/g)) {
     const [, plan, body] = m;
     for (const f of FIELDS) {
@@ -72,7 +72,7 @@ for (const f of ['src/config/panels.ts','convex/constants.ts','src/services/gate
 
 
 // ------------------------------------------------------- code-site gates
-const PAT = "features\\.tier\\s*[<>=]|tier\\s*[<>]=?\\s*1|!hasPremiumAccess\\(\\)|features\\.apiAccess|features\\.mcpAccess|features\\.dataExport|requiresPremium|isCallerPremium\\(|resolvePremiumCallerIdentity\\(|!isProUser\\(\\)";
+const PAT = "features\\.tier\\s*[<>=]|tier\\s*[<>]=?\\s*1|!hasPremiumAccess\\(\\)|features\\.apiAccess|features\\.mcpAccess|features\\.dataExport|requiresPremium|isCallerPremium\\(|hasEmbedAccess\\(|resolvePremiumCallerIdentity\\(|!isProUser\\(\\)";
 const out = execSync(`grep -rnE "${PAT}" --include="*.ts" --include="*.js" src api convex server 2>/dev/null || true`, { encoding: 'utf8', maxBuffer: 1 << 26 });
 const sites = [];
 for (const ln of out.split('\n')) {
@@ -90,6 +90,7 @@ for (const ln of out.split('\n')) {
       /features\.apiAccess/.test(t)  ? 'apiAccess'
     : /features\.mcpAccess/.test(t)  ? 'mcpAccess'
     : /features\.dataExport/.test(t) ? 'dataExport'
+    : /hasEmbedAccess\(/.test(t)     ? 'embedAccess'
     : /requiresPremium/.test(t)      ? 'requiresPremium'
     : /isCallerPremium\(/.test(t)    ? 'isCallerPremium'
     : /resolvePremiumCallerIdentity\(/.test(t) ? 'resolvePremiumCallerIdentity'
@@ -108,6 +109,7 @@ const MAP = [
   [/^catalog:\w+\.exportFormats$/,           { cap: 'export.data', note: 'format allowlist' }],
   [/^catalog:\w+\.dataExport$/,              { cap: 'export.data' }],
   [/^catalog:\w+\.apiAccess$/,               { cap: 'api.keys' }],
+  [/^catalog:\w+\.embedAccess$/,             { cap: 'embed.panels', note: 'wme_ key issuance' }],
   [/^catalog:\w+\.apiRequestsPerDay$/,       { cap: 'api.rest' }],
   [/^catalog:\w+\.apiRateLimit$/,            { cap: 'api.rest', note: 'rate ceiling' }],
   [/^catalog:\w+\.apiBurstRequestsPerMinute$/,{ cap: 'api.rest', note: 'burst ceiling' }],
@@ -218,6 +220,7 @@ const SITE_MAP = [
   [/summarize-article\.ts/,                   { cap: 'news.summarization' , preds: ['requiresPremium','resolvePremiumCallerIdentity'] }],
   [/gates\/playback/,                         { cap: 'playback.historical' }], // NOTE: matches no current gate
   [/convex\/apiKeys\.ts/,                     { cap: 'api.keys' , preds: ['apiAccess'] }],
+  [/convex\/embedKeys\.ts/,                   { cap: 'embed.panels', note: 'wme_ key issuance — tier>=1 + embedAccess, deliberately not apiAccess' , preds: ['embedAccess'] }],
   [/pro-mcp-gate\.ts|api\/mcp-proxy\.ts|api\/mcp\//, { cap: 'mcp.access' , preds: ['isCallerPremium','resolvePremiumCallerIdentity','mcpAccess','tier'] }],
   [/gates\/export/,                           { cap: 'export.data' , preds: ['dataExport'] }],
   [/analysis-framework-store\.ts/,            { cap: 'analysis.frameworks' , preds: ['hasPremiumAccess'] }],
@@ -299,6 +302,7 @@ const SITE_BASELINE = {
   "api/widget-agent.ts::tier": 1,
   "convex/alertRules.ts::tier": 1,
   "convex/apiKeys.ts::apiAccess": 1,
+  "convex/embedKeys.ts::embedAccess": 1,
   "convex/apiPlanLimitUsage.ts::apiAccess": 1,
   "convex/apiPlanLimitUsage.ts::mcpAccess": 1,
   "convex/apiPlanLimitUsage.ts::tier": 2,
