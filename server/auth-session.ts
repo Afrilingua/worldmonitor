@@ -10,6 +10,7 @@
  */
 
 import { createRemoteJWKSet, jwtVerify } from 'jose';
+// @ts-expect-error — JS module, no declaration file
 import { captureSilentError } from '../api/_sentry-edge.js';
 
 // Clerk Backend API secret -- used to look up user metadata when the JWT
