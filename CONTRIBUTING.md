@@ -82,9 +82,19 @@ Variants share all code but differ in default panels, map layers, and RSS feeds.
    git clone https://github.com/<your-username>/worldmonitor.git
    cd worldmonitor
    ```
-3. **Create a branch** for your work:
+3. **Configure the remotes** in this new clone:
    ```bash
-   git checkout -b feature/your-feature-name
+   git remote rename origin fork
+   git remote add origin https://github.com/koala73/worldmonitor.git
+   git config remote.pushDefault fork
+   git fetch origin main
+   ```
+   Preflight and PR snapshots use `origin` to identify the repository hosting the
+   PR and its canonical `main`. Keep your contribution remote named `fork` and
+   make it the default push target.
+4. **Create a branch** for your work from current canonical `main`:
+   ```bash
+   git switch -c feature/your-feature-name origin/main
    ```
 
 ## Development Setup
@@ -192,6 +202,13 @@ See the [API dependencies docs](https://www.worldmonitor.app/docs/getting-starte
 Run commands from the worktree under test. Inspect `git status --short --branch`
 first. For new work, use a branch from current `origin/main`. For existing PR work,
 use its current head and existing safe worktree.
+
+Check `git remote -v` before preflight. `origin` must identify `koala73/worldmonitor`
+for an upstream PR. Fork contributors should use the [remote layout above](#getting-started).
+In an existing clone, preserve its remotes and push URLs while adapting that layout.
+Do not add a second `fork` remote or overwrite an existing destination. Keep the
+existing PR's head branch and fork repository as the push target. A full upstream
+PR URL cannot override a fork-valued `origin` in these tools.
 
 ```bash
 npm run --silent agent:preflight -- --mode review --pr 456
@@ -310,6 +327,10 @@ PR readiness, merge, deployment, production observation, and acceptance separate
 3. Refresh the base and remote PR head before pushing. Confirm no unmerged paths, reconcile current `main`, and verify that local HEAD is the captured PR head or contains it. Rerun affected checks after conflict resolution. Never bypass the pre-push gate with `--no-verify`.
 4. Open the PR ready for review. Keep one owner responsible for relevant review and CI repairs on the same PR. Requesting reviewers, invoking review automation, merge, auto-merge, and deployment each require the applicable explicit authorization.
 5. Base recovery and follow-up PRs on `main`. A stacked PR whose parent merges and auto-deletes its branch can report `MERGED` while its commits never reach `main`.
+
+For a new contribution using the fork setup above, publish the branch with
+`git push --set-upstream fork HEAD`. Open its PR against `koala73/worldmonitor` on
+`main`. For an existing PR, use the head repository and branch recorded in its snapshot.
 
 ### Read PR state once per phase
 
