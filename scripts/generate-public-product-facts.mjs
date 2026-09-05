@@ -28,6 +28,7 @@ import { PIPELINES } from '../shared/pipelines-data.ts';
 import { TOOL_REGISTRY, toolAccess } from '../api/mcp/registry/index.ts';
 import { publishedRankedCountries } from './build-ai-search.mjs';
 import { commandPaletteCommandCount } from './lib/command-palette-count.mjs';
+import { lngFacilityCount } from './_storage-facility-registry.mjs';
 import { computeStats } from './docs-stats.mjs';
 import { loadManifest, scanUpstreamHosts, sourceAttributionStats } from './source-attribution.mjs';
 
@@ -194,7 +195,7 @@ function buildDepthProofStats(hero) {
     instabilityCountries: stats.tier1Countries,
     resilienceRanked: publishedRankedCountries(ROOT).ranked,
     submarineCables: UNDERSEA_CABLES.length,
-    pipelinesLng: PIPELINES.length,
+    pipelinesLng: PIPELINES.length + lngFacilityCount(),
     aiDatacenters: AI_DATA_CENTERS.length,
     hotspots: INTEL_HOTSPOTS.length,
     stockExchanges: stats.stockExchangeCount,

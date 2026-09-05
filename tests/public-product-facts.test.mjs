@@ -682,6 +682,7 @@ describe('public product facts generation contract', () => {
     const { getCompleteLayerCatalogKeys } = await import('../src/config/map-layer-definitions.ts');
     const { INTEL_HOTSPOTS } = await import('../shared/geo-data.ts');
     const { PIPELINES } = await import('../shared/pipelines-data.ts');
+    const { lngFacilityCount } = await import('../scripts/_storage-facility-registry.mjs');
     const { publishedRankedCountries } = await import('../scripts/build-ai-search.mjs');
     const { commandPaletteCommandCount } = await import('../scripts/lib/command-palette-count.mjs');
     const facts = readJson('shared/product-facts.generated.json');
@@ -692,12 +693,20 @@ describe('public product facts generation contract', () => {
     assert.equal(depth.instabilityCountries, stats.tier1Countries);
     assert.equal(depth.resilienceRanked, publishedRankedCountries(ROOT).ranked);
     assert.equal(depth.submarineCables, UNDERSEA_CABLES.length);
-    assert.equal(depth.pipelinesLng, PIPELINES.length);
+    assert.equal(depth.pipelinesLng, PIPELINES.length + lngFacilityCount());
+    assert.match(
+      read('public/ai-search.md'),
+      new RegExp(`- ${PIPELINES.length + lngFacilityCount()} pipelines and LNG assets`),
+    );
     assert.equal(depth.aiDatacenters, AI_DATA_CENTERS.length);
     assert.equal(depth.hotspots, INTEL_HOTSPOTS.length);
     assert.equal(depth.stockExchanges, stats.stockExchangeCount);
     assert.equal(depth.mcpTools, TOOL_REGISTRY.length);
     assert.equal(depth.commands, commandPaletteCommandCount());
+    assert.equal(
+      readJson('pro-test/src/locales/en.json').welcome.depth.s13l,
+      '⌘K command definitions',
+    );
     assert.equal(depth.languages, stats.locales);
     // Slots whose labels match the hero rail publish the same figures.
     assert.equal(depth.feeds, facts.heroProofStats.feeds);

@@ -68,7 +68,7 @@ Coverage reconciled: 2026-09-05. Every figure below is generated from this repos
 - 196-country rankable universe for the Country Resilience Index, of which 170 are ranked in the published snapshot captured 2026-08-29
 - 13 maritime chokepoints with AIS-based transit intelligence
 - 86 submarine cable routes
-- 88 pipelines and LNG assets
+- 159 pipelines and LNG assets
 - 313 AI datacenters mapped
 - 29 scored geopolitical hotspots
 - 29 stock exchanges in the markets registry
