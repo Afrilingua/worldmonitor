@@ -138,6 +138,32 @@ describe('Railway registry sync CLI with unavailable source credentials', () => 
     assert.deepEqual(fixture.read().edits, []);
   });
 
+  it('separates runtime prerequisites from configuration drift in JSON output', (t) => {
+    const fixture = createFixture(t);
+    delete fixture.state.config.services[imdId].variables.IMD_API_KEY;
+    fixture.save();
+    const result = fixture.run(['--apply', '--json']);
+    assertSucceeded(result);
+    const report = JSON.parse(result.stdout.slice(result.stdout.indexOf('{\n')));
+    assert.deepEqual(report.drift, []);
+    assert.equal(report.requiredEnvironmentEvaluated, true);
+    assert.deepEqual(report.runtimePrerequisites, [{
+      service: 'seed-imd-cyclone-marine',
+      missingRequiredEnv: ['IMD_API_KEY'],
+    }]);
+  });
+
+  it('still refuses a missing managed service when another source is unavailable', (t) => {
+    const fixture = createFixture(t);
+    delete fixture.state.config.services[imdId].variables.IMD_API_KEY;
+    delete fixture.state.config.services[otherId];
+    fixture.save();
+    const result = fixture.run();
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /seed-insights not present in Railway production/);
+    assert.deepEqual(fixture.read().edits, []);
+  });
+
   it('still refuses an unsafe root change when a source is unavailable', (t) => {
     const fixture = createFixture(t);
     delete fixture.state.config.services[imdId].variables.IMD_API_KEY;
