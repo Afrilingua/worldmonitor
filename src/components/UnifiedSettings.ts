@@ -158,6 +158,7 @@ export class UnifiedSettings {
   // ---- Embeds tab (partner-embed `wme_` keys) ----
   private embedKeys: EmbedKeyInfo[] = [];
   private embedKeysLoading = false;
+  private embedKeyCreating = false;
   private embedKeysError = '';
   private newlyCreatedEmbedKey: string | null = null;
   private planLimitNotices: ApiPlanLimitNotice[] = [];
@@ -524,6 +525,7 @@ export class UnifiedSettings {
     this.newlyCreatedKey = null;
     this.embedKeys = [];
     this.embedKeysLoading = false;
+    this.embedKeyCreating = false;
     this.embedKeysError = '';
     this.newlyCreatedEmbedKey = null;
     this.planLimitNotices = [];
@@ -1997,11 +1999,11 @@ export class UnifiedSettings {
           <p class="embed-keys-desc">Embed keys authorise World Monitor panels on your site and nothing else, and each one is shown once at creation. Paste it into the <code>data-key</code> attribute of the <a class="embed-keys-docs-link" ${LEGAL_LINK_ATTR} href="${escapeHtml(`${WEB_APP_ORIGIN}/docs/embed-live-map`)}" target="_blank" rel="noopener noreferrer">embed loader</a>.</p>
         </div>
         <div class="embed-keys-note">
-          <strong>These are meant to be public.</strong> An embed key sits in your page's HTML where anyone can read it — that is the point, and it is why it exists as its own credential. Never put an API key (<code>wm_…</code>) there instead: that one carries your whole REST allowance. Revoking takes effect within a minute for the keyed panels; a live map already showing its paid tier holds a session grant for up to 30 more minutes, then drops to the free tier.
+          <strong>These are meant to be public.</strong> An embed key sits in your page's HTML where anyone can read it — that is the point, and it is why it exists as its own credential. Never put an API key (<code>wm_…</code>) there instead: that one carries your whole REST allowance. New reads with a revoked key are denied within about a minute. Already rendered paid-only panels remain visible until reload. A live map already showing its paid tier holds a session grant for up to 30 more minutes, then drops to the free tier.
         </div>
         <div class="embed-keys-create-form">
           <input type="text" class="embed-keys-name-input" placeholder="Key name (e.g. marketing-site)" aria-label="Embed key name" maxlength="64" />
-          <button class="btn btn-primary embed-keys-create-btn">Create Embed Key</button>
+          <button class="btn btn-primary embed-keys-create-btn" ${this.embedKeyCreating ? 'disabled' : ''}>${this.embedKeyCreating ? 'Creating...' : 'Create Embed Key'}</button>
         </div>
         <div class="embed-keys-created-banner" id="usEmbedKeysBanner" style="display:none;"></div>
         <div class="embed-keys-error" id="usEmbedKeysError" style="display:none;"></div>
@@ -2034,6 +2036,7 @@ export class UnifiedSettings {
   }
 
   private async handleCreateEmbedKey(): Promise<void> {
+    if (this.embedKeyCreating) return;
     const input = this.overlay.querySelector<HTMLInputElement>('.embed-keys-name-input');
     const btn = this.overlay.querySelector<HTMLButtonElement>('.embed-keys-create-btn');
     const name = input?.value.trim();
@@ -2041,6 +2044,7 @@ export class UnifiedSettings {
     const request = this.captureAccountRequest();
     if (!request) return;
 
+    this.embedKeyCreating = true;
     btn.disabled = true;
     btn.textContent = 'Creating...';
     this.embedKeysError = '';
@@ -2051,7 +2055,8 @@ export class UnifiedSettings {
       const result = await createEmbedKey(name);
       if (!this.isAccountRequestCurrent(request)) return;
       this.newlyCreatedEmbedKey = result.key;
-      input.value = '';
+      const currentInput = this.overlay.querySelector<HTMLInputElement>('.embed-keys-name-input');
+      if (currentInput) currentInput.value = '';
       this.showEmbedKeysCreatedBanner(result.key);
       await this.loadEmbedKeys();
     } catch (err) {
@@ -2065,8 +2070,12 @@ export class UnifiedSettings {
       this.renderEmbedKeysError();
     } finally {
       if (this.isAccountRequestCurrent(request)) {
-        btn.disabled = false;
-        btn.textContent = 'Create Embed Key';
+        this.embedKeyCreating = false;
+        const currentBtn = this.overlay.querySelector<HTMLButtonElement>('.embed-keys-create-btn');
+        if (currentBtn) {
+          currentBtn.disabled = false;
+          currentBtn.textContent = 'Create Embed Key';
+        }
       }
     }
   }
@@ -2076,7 +2085,7 @@ export class UnifiedSettings {
     if (!request) return;
     const keyInfo = this.embedKeys.find(k => k.id === keyId);
     const keyName = keyInfo?.name ?? 'this key';
-    if (!confirm(`Revoke "${keyName}"? This cannot be undone. Any page embedding a World Monitor panel with this key will stop rendering it.`)) return;
+    if (!confirm(`Revoke "${keyName}"? This cannot be undone. New reads with this key will be denied within about a minute. Already rendered paid-only panels remain visible until reload. A live map can retain its paid tier for up to 30 more minutes.`)) return;
 
     try {
       await revokeEmbedKey(keyId);

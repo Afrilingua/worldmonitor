@@ -30,8 +30,9 @@
   // validates and clamps each of these, so a malformed value falls back to the
   // same default it would have without the attribute.
   ['layers', 'center', 'zoom', 'variant'].forEach(function (name) {
-    var value = (script.getAttribute('data-' + name) || '').trim();
-    if (value) url += '&' + name + '=' + encodeURIComponent(value);
+    var raw = script.getAttribute('data-' + name);
+    var value = (raw || '').trim();
+    if (value || (name === 'layers' && raw !== null)) url += '&' + name + '=' + encodeURIComponent(value);
   });
   iframe.title = 'World Monitor embed';
   if (!hasKey) iframe.loading = 'lazy';

@@ -158,6 +158,7 @@ const { UnifiedSettings } = await import('@/components/UnifiedSettings');
 type SettingsInternals = {
   overlay: HTMLElement;
   render(loadAccountData?: boolean): void;
+  handleAccountIdentityChange(userId: string): void;
 };
 
 let settings: InstanceType<typeof UnifiedSettings>;
@@ -195,6 +196,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  session.user = { id: 'A', name: 'User A', email: 'a@example.com', role: 'pro' };
   document.body.replaceChildren();
   storageValues.clear();
   vi.stubGlobal('localStorage', storage);
@@ -246,15 +248,12 @@ describe('Settings -> Embeds tab gating', () => {
     expect(note).toContain('REST allowance');
   });
 
-  it('states both revocation windows rather than promising the shorter one', () => {
-    // A keyed panel presents the key on every read, so the 60s edge cache is
-    // the whole delay. A map frame already holds a 30-minute wmg_ grant, and
-    // revocation only stops the NEXT mint — saying "within a minute" flat
-    // would be a promise the grant TTL breaks.
+  it('distinguishes new reads, rendered panels, and existing map grants on revocation', () => {
     internal.render(false);
     const note = panel('embeds')?.querySelector('.embed-keys-note')?.textContent ?? '';
 
-    expect(note).toContain('within a minute');
+    expect(note).toContain('New reads with a revoked key are denied within about a minute');
+    expect(note).toContain('Already rendered paid-only panels remain visible until reload');
     expect(note).toContain('30 more minutes');
   });
 
@@ -268,6 +267,66 @@ describe('Settings -> Embeds tab gating', () => {
 });
 
 describe('Settings -> Embeds key lifecycle', () => {
+  const input = () => panel('embeds')!.querySelector<HTMLInputElement>('.embed-keys-name-input')!;
+  const button = () => panel('embeds')!.querySelector<HTMLButtonElement>('.embed-keys-create-btn')!;
+  const enter = (name = 'marketing-site') => {
+    input().value = name;
+    input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  };
+
+  it('keeps one mint pending across repeated Enter and a rerender', async () => {
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof createEmbedKey>>>();
+    createEmbedKey.mockImplementationOnce(() => pending.promise);
+    openEmbedsTab();
+    enter();
+    enter();
+    expect(createEmbedKey).toHaveBeenCalledTimes(1);
+    internal.render(false);
+    expect(button().disabled).toBe(true);
+    enter();
+    expect(createEmbedKey).toHaveBeenCalledTimes(1);
+
+    pending.resolve({ id: 'ek_1', name: 'marketing-site', keyPrefix: PLAINTEXT.slice(0, 9), key: PLAINTEXT });
+    await vi.waitFor(() => expect(button().disabled).toBe(false));
+    expect(input().value).toBe('');
+    expect(internal.overlay.querySelector('#usEmbedKeysBanner')?.textContent).toContain(PLAINTEXT);
+  });
+
+  it('allows retry after a failed mint, including a rerender while pending', async () => {
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof createEmbedKey>>>();
+    createEmbedKey.mockImplementationOnce(() => pending.promise);
+    openEmbedsTab();
+    enter();
+    internal.render(false);
+    pending.reject(new Error('Temporary failure'));
+    await vi.waitFor(() => expect(button().disabled).toBe(false));
+    expect(internal.overlay.querySelector('#usEmbedKeysError')?.textContent).toContain('Temporary failure');
+    enter();
+    await vi.waitFor(() => expect(createEmbedKey).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not let an old account completion unlock a new account mint or expose its key', async () => {
+    const first = Promise.withResolvers<Awaited<ReturnType<typeof createEmbedKey>>>();
+    const second = Promise.withResolvers<Awaited<ReturnType<typeof createEmbedKey>>>();
+    createEmbedKey.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+    openEmbedsTab();
+    enter('account-a');
+    session.user = { id: 'B', name: 'User B', email: 'b@example.com', role: 'pro' };
+    internal.handleAccountIdentityChange('B');
+    enter('account-b');
+    expect(createEmbedKey).toHaveBeenCalledTimes(2);
+    first.resolve({ id: 'a', name: 'account-a', keyPrefix: 'wme_a', key: 'wme_account_a' });
+    await first.promise;
+    await Promise.resolve();
+    expect(button().disabled).toBe(true);
+    enter('account-b');
+    expect(createEmbedKey).toHaveBeenCalledTimes(2);
+    expect(internal.overlay.textContent).not.toContain('wme_account_a');
+    second.resolve({ id: 'b', name: 'account-b', keyPrefix: 'wme_b', key: 'wme_account_b' });
+    await vi.waitFor(() => expect(button().disabled).toBe(false));
+    expect(internal.overlay.querySelector('#usEmbedKeysBanner')?.textContent).toContain('wme_account_b');
+  });
+
   it('mints a key, shows the plaintext once, and keeps it out of the list', async () => {
     openEmbedsTab();
     const input = panel('embeds')!.querySelector<HTMLInputElement>('.embed-keys-name-input')!;
@@ -307,9 +366,12 @@ describe('Settings -> Embeds key lifecycle', () => {
     internal.overlay.querySelector<HTMLButtonElement>('.embed-keys-revoke-btn')!.click();
     expect(revokeEmbedKey).not.toHaveBeenCalled();
 
-    vi.stubGlobal('confirm', () => true);
+    const confirmRevoke = vi.fn((_message: string) => true);
+    vi.stubGlobal('confirm', confirmRevoke);
     internal.overlay.querySelector<HTMLButtonElement>('.embed-keys-revoke-btn')!.click();
     await vi.waitFor(() => expect(revokeEmbedKey).toHaveBeenCalledWith('ek_9'));
+    expect(confirmRevoke.mock.calls[0]?.[0]).toContain('New reads with this key will be denied within about a minute');
+    expect(confirmRevoke.mock.calls[0]?.[0]).toContain('Already rendered paid-only panels remain visible until reload');
   });
 
   it('never sends a revoke to the API-key service, or a mint to the embed one', async () => {

@@ -35,7 +35,7 @@ Keyed panels add `data-key`, and the loader posts that key to the frame after lo
 <Warning>
 `data-key` sits in your page's public HTML, so treat it as published. Do not put a key there that can do more than embed: a World Monitor user API key (`wm_…`) unlocks your whole paid REST allowance, and an enterprise key bypasses entitlement checks entirely. Scoped embed keys (`wme_…`) exist for this — they authorise embedding and nothing else.
 
-Mint one yourself: World Monitor dashboard → **Settings → Embeds → Create Embed Key**. The tab appears on every paid plan (it is gated on embed access, not on API access). The key is shown once at creation and never again, so copy it then. Revoking takes effect within a minute on the keyed panels; a live map frame already on its paid tier holds its `POST /api/embed/session` grant for up to 30 more minutes, then falls back to the free tier.
+Mint one yourself: World Monitor dashboard → **Settings → Embeds → Create Embed Key**. The tab appears on every paid plan (it is gated on embed access, not on API access). The key is shown once at creation and never again, so copy it then. New reads with a revoked key are denied within about a minute. Already rendered paid-only panels remain visible until reload. A live map frame already on its paid tier holds its `POST /api/embed/session` grant for up to 30 more minutes, then falls back to the free tier.
 </Warning>
 
 ## Live map tiers

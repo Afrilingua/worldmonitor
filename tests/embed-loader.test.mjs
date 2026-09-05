@@ -3,11 +3,31 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const loader = readFileSync(resolve(__dirname, '../public/embed.js'), 'utf-8');
 
 describe('embed.js partner loader', () => {
+  for (const [layers, expected] of [[null, null], ['', ''], ['  ', ''], ['conflicts,weather', 'conflicts,weather']]) {
+    it(`forwards the layer selection ${JSON.stringify(layers)} without changing its meaning`, () => {
+      const attributes = { src: 'https://www.worldmonitor.app/embed.js', 'data-layers': layers };
+      let frame;
+      runInNewContext(loader, {
+        URL,
+        window: { location: { href: 'https://partner.example/' } },
+        document: {
+          currentScript: {
+            getAttribute: (name) => attributes[name] ?? null,
+            parentNode: { insertBefore: (iframe) => { frame = iframe; } },
+          },
+          createElement: () => ({ style: {}, setAttribute() {} }),
+        },
+      });
+      assert.equal(new URL(frame.src).searchParams.get('layers'), expected);
+    });
+  }
+
   it('creates an iframe without putting the API key in the URL, then posts the credential', () => {
     assert.match(loader, /document\.currentScript/);
     assert.match(loader, /iframe\.src = url/);
