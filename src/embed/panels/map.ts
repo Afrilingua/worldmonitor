@@ -69,10 +69,7 @@ export async function mountEmbedMapPanel(
   void (async () => {
     embeddingApiKey = await apiKeyPromise;
     if (!embeddingApiKey) return;
-    const result = await mintEmbedGrant('map', embeddingApiKey);
-    // A denial leaves the free tier rendering, which is the correct paid-embed
-    // fallback; an unavailable answer does the same until the next re-mint.
-    if (result.status === 'granted') await loader.upgrade(result.grant);
+    await loader.requestGrant();
   })();
 
   return () => {

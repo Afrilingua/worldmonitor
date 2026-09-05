@@ -31,6 +31,8 @@ export interface EmbedMapSurface {
   setWeatherAlerts(alerts: WeatherAlert[]): void;
   setLayerLoading(layer: keyof MapLayers, loading: boolean): void;
   setLayerReady(layer: keyof MapLayers, ready: boolean): void;
+  getState(): { layers: MapLayers };
+  setLayers(layers: MapLayers, options?: { bypassEntitlementSanitization?: boolean }): void;
 }
 
 /** Every embeddable layer's corresponding map layer. */
@@ -78,6 +80,8 @@ export class EmbedDataLoader {
   private refreshLoop: SmartPollLoopHandle | null = null;
   private grant: EmbedGrant | null = null;
   private refreshMs = EMBED_FREE_REFRESH_MS;
+  private grantRetryNotBefore = 0;
+  private grantRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private readonly fetchFrame: EmbedFrameFetcher;
   private readonly renewGrant: (() => Promise<EmbedGrantResult>) | null;
@@ -119,6 +123,20 @@ export class EmbedDataLoader {
   destroy(): void {
     this.destroyed = true;
     this.stopLoop();
+    if (this.grantRetryTimer !== null) clearTimeout(this.grantRetryTimer);
+  }
+
+  /** Exchange the embedding key after a free-tier boot, retrying transient failures. */
+  async requestGrant(): Promise<void> {
+    if (this.destroyed || !this.renewGrant) return;
+    const result = await this.renewGrant();
+    if (this.destroyed) return;
+    if (result.status === 'granted') {
+      this.grantRetryNotBefore = 0;
+      await this.upgrade(result.grant);
+      return;
+    }
+    if (result.status === 'unavailable') this.scheduleGrantRetry(result.retryAfterMs);
   }
 
   async loadOnce(): Promise<void> {
@@ -158,49 +176,80 @@ export class EmbedDataLoader {
    */
   private async renewIfExpiring(): Promise<'go' | 'hold'> {
     const grant = this.grant;
-    if (!grant || !this.renewGrant || !isEmbedGrantExpiring(grant, this.now())) return 'go';
+    const now = this.now();
+    if (!grant || !this.renewGrant || !isEmbedGrantExpiring(grant, now)) return 'go';
+    if (now < this.grantRetryNotBefore) return grant.expiresAt <= now ? 'hold' : 'go';
 
     const renewed = await this.renewGrant();
     if (renewed.status === 'granted') {
       this.grant = renewed.grant;
+      this.grantRetryNotBefore = 0;
       return 'go';
     }
     if (renewed.status === 'denied') {
       // Terminal: the account genuinely cannot embed any more. Fall back to
       // the free tier rather than freezing on a stale paid frame.
       this.grant = null;
+      this.grantRetryNotBefore = 0;
       return 'go';
     }
-    return grant.expiresAt <= this.now() ? 'hold' : 'go';
+    this.grantRetryNotBefore = now + renewed.retryAfterMs;
+    return grant.expiresAt <= now ? 'hold' : 'go';
   }
 
   private applyFrame(frame: EmbedMapFrameResponse): void {
     const data = frame.data;
-    if (data.conflicts && this.map.supportsLiveConflictEvents()) {
+    if (data.conflicts && isLayerRendered(frame.layers.conflicts) && this.map.supportsLiveConflictEvents()) {
       this.map.setConflictEvents(data.conflicts as AcledConflictEvent[]);
     }
-    if (data.earthquakes) {
+    if (data.earthquakes && isLayerRendered(frame.layers.earthquakes)) {
       this.map.setEarthquakes(data.earthquakes as Earthquake[]);
     }
-    if (data.naturalEvents) {
+    if (data.naturalEvents && isLayerRendered(frame.layers.earthquakes)) {
       this.map.setNaturalEvents(
         (data.naturalEvents as Parameters<typeof toNaturalEvent>[0][]).map(toNaturalEvent),
       );
     }
-    if (data.protests) {
+    if (data.protests && isLayerRendered(frame.layers.protests)) {
       this.map.setProtests(
         (data.protests as Parameters<typeof toSocialUnrestEvent>[0][]).map(toSocialUnrestEvent),
       );
     }
-    if (data.weatherAlerts) {
+    if (data.weatherAlerts && isLayerRendered(frame.layers.weather)) {
       this.map.setWeatherAlerts(
         (data.weatherAlerts as Parameters<typeof mapAlert>[0][]).map(mapAlert),
       );
     }
 
+    const nextLayers = { ...this.map.getState().layers };
+    const rejected: EmbedLayerId[] = [];
     for (const id of this.activeLayerIds) {
-      this.map.setLayerReady(MAP_LAYER_BY_EMBED_ID[id], isLayerRendered(frame.layers[id]));
+      const layer = MAP_LAYER_BY_EMBED_ID[id];
+      const rendered = isLayerRendered(frame.layers[id]);
+      if (!rendered) rejected.push(id);
+      nextLayers[layer] = rendered;
+      this.map.setLayerReady(layer, rendered);
     }
+    this.map.setLayers(nextLayers, { bypassEntitlementSanitization: true });
+    for (const id of rejected) this.clearLayerData(id);
+  }
+
+  private clearLayerData(id: EmbedLayerId): void {
+    if (id === 'conflicts') this.map.setConflictEvents([]);
+    if (id === 'earthquakes') {
+      this.map.setEarthquakes([]);
+      this.map.setNaturalEvents([]);
+    }
+    if (id === 'protests') this.map.setProtests([]);
+    if (id === 'weather') this.map.setWeatherAlerts([]);
+  }
+
+  private scheduleGrantRetry(retryAfterMs: number): void {
+    if (this.grantRetryTimer !== null) clearTimeout(this.grantRetryTimer);
+    this.grantRetryTimer = setTimeout(() => {
+      this.grantRetryTimer = null;
+      void this.requestGrant();
+    }, retryAfterMs);
   }
 
   private startLoop(): void {
