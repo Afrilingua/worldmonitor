@@ -25,7 +25,11 @@ const {
   energyIntelAfterPublish,
 } = await import('../scripts/seed-energy-intelligence.mjs');
 const {
+  CROSS_STRAIT_ACTIVITY_LOCK_TTL_MS,
+  CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS,
+  appendCrossStraitHistoryArchive,
   buildCrossStraitHistoryRecords,
+  crossStraitActivityLockTtlMs,
   crossStraitHistoryAfterPublish,
 } = await import('../scripts/seed-cross-strait-activity.mjs');
 
@@ -173,6 +177,115 @@ test('buildCrossStraitHistoryRecords drops observations without id or any date',
     ],
   });
   assert.deepEqual(records, []);
+});
+
+test('the guarded Cross-Strait recovery appends the full retained archive in bounded batches', async () => {
+  const batchSizes = [];
+  const result = await appendCrossStraitHistoryArchive({
+    domain: 'military',
+    resource: 'cross-strait-activity',
+    runId: 'run-full-archive',
+    records: Array.from({ length: 367 }, (_, index) => ({
+      dedupeKey: `military:cross-strait-activity:mnd-${index}`,
+      title: `Cross-Strait activity ${index}`,
+      occurredAt: Date.parse('2026-09-05') - index * 86_400_000,
+    })),
+  }, {
+    append: async ({ records }) => {
+      batchSizes.push(records.length);
+      return {
+        inserted: records.length,
+        skipped: 0,
+        retracted: 0,
+        chunks: Math.ceil(records.length / 50),
+        abandoned: 0,
+        failedChunks: 0,
+        inputRecords: records.length,
+        normalizedRecords: records.length,
+        droppedRecords: 0,
+      };
+    },
+  });
+
+  assert.deepEqual(batchSizes, [150, 150, 67]);
+  assert.deepEqual(result, {
+    inserted: 367,
+    skipped: 0,
+    retracted: 0,
+    chunks: 8,
+    abandoned: 0,
+    failedChunks: 0,
+    inputRecords: 367,
+    normalizedRecords: 367,
+    droppedRecords: 0,
+  });
+});
+
+test('the guarded Cross-Strait recovery rejects records beyond canonical retention', async () => {
+  let appendCalls = 0;
+  await assert.rejects(
+    appendCrossStraitHistoryArchive({
+      records: Array.from({ length: 368 }, () => ({})),
+    }, {
+      append: async () => { appendCalls += 1; },
+    }),
+    /368 records; maximum is 367/,
+  );
+  assert.equal(appendCalls, 0);
+});
+
+test('only the guarded one-off extends the Cross-Strait seed lock', () => {
+  assert.equal(crossStraitActivityLockTtlMs({}), CROSS_STRAIT_ACTIVITY_LOCK_TTL_MS);
+  assert.equal(
+    crossStraitActivityLockTtlMs({ WM_ONE_OFF_HISTORY_RECEIPT: '1' }),
+    CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS,
+  );
+  assert.ok(CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS >= 8 * 60_000);
+});
+
+test('the one-off history hook records one aggregate receipt for the full archive', async () => {
+  const previous = process.env.WM_ONE_OFF_HISTORY_RECEIPT;
+  const batchSizes = [];
+  const healthObservations = [];
+  process.env.WM_ONE_OFF_HISTORY_RECEIPT = '1';
+  try {
+    await crossStraitHistoryAfterPublish({
+      observations: Array.from({ length: 367 }, (_, index) => ({
+        ...CROSS_STRAIT_OBSERVATION,
+        id: `mnd-${index}`,
+        sourceId: index < 365 ? 'taiwan-mnd' : 'japan-mod',
+        reportingDay: new Date(Date.parse('2026-09-05') - index * 86_400_000)
+          .toISOString()
+          .slice(0, 10),
+      })),
+    }, { runId: 'run-full-hook' }, {
+      append: async ({ records }) => {
+        batchSizes.push(records.length);
+        return {
+          inserted: records.length,
+          skipped: 0,
+          retracted: 0,
+          chunks: Math.ceil(records.length / 50),
+          abandoned: 0,
+          failedChunks: 0,
+          inputRecords: records.length,
+          normalizedRecords: records.length,
+          droppedRecords: 0,
+        };
+      },
+      recordHealth: async (observation) => { healthObservations.push(observation); },
+    });
+  } finally {
+    if (previous === undefined) delete process.env.WM_ONE_OFF_HISTORY_RECEIPT;
+    else process.env.WM_ONE_OFF_HISTORY_RECEIPT = previous;
+  }
+
+  assert.deepEqual(batchSizes, [150, 150, 67]);
+  assert.equal(healthObservations.length, 1);
+  assert.equal(healthObservations[0].runId, 'run-full-hook');
+  assert.equal(healthObservations[0].result.inputRecords, 367);
+  assert.equal(healthObservations[0].result.normalizedRecords, 367);
+  assert.equal(healthObservations[0].result.droppedRecords, 0);
 });
 
 const HOOKS = [
