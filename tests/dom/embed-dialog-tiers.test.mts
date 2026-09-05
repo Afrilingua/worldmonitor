@@ -53,6 +53,7 @@ const js = ts.transpileModule(
 ).outputText;
 
 let embedAccess = false;
+let accountRole: 'free' | 'pro' = 'free';
 const openSettings = vi.fn();
 
 // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
@@ -62,6 +63,8 @@ const Harness = new Function(
   'embedLayerIdsFromMapLayers',
   'EMBED_KEY_PLACEHOLDER',
   'hasFeature',
+  'hasEmbedAccessForAccount',
+  'getAuthState',
   'getCurrentTheme',
   'SITE_VARIANT',
   `${js}\nreturn Harness;`,
@@ -71,6 +74,8 @@ const Harness = new Function(
   embedLayerIdsFromMapLayers,
   EMBED_KEY_PLACEHOLDER,
   (flag: string) => flag === 'embedAccess' && embedAccess,
+  (role: 'free' | 'pro' | undefined) => role === 'pro' || embedAccess,
+  () => ({ user: { role: accountRole } }),
   () => 'dark',
   'full',
 );
@@ -109,6 +114,7 @@ const snippets = () =>
 beforeEach(() => {
   document.body.replaceChildren();
   embedAccess = false;
+  accountRole = 'free';
   openSettings.mockClear();
 });
 
@@ -137,6 +143,14 @@ describe('embed dialog tiers', () => {
     expect(free).toContain('<iframe');
     expect(keyed).toContain(`src="${window.location.origin}/embed.js"`);
     expect(keyed).toContain(`data-key="${EMBED_KEY_PLACEHOLDER}"`);
+  });
+
+  it('offers the keyed snippet for a verified Clerk PRO role before entitlement hydration', () => {
+    accountRole = 'pro';
+    makeInstance().openEmbedDialog();
+
+    expect(tiers()).toHaveLength(2);
+    expect(snippets()[1]).toContain(`data-key="${EMBED_KEY_PLACEHOLDER}"`);
   });
 
   it('carries the current map view into the keyed snippet', () => {

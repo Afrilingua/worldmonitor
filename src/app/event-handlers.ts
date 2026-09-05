@@ -102,7 +102,7 @@ import { AuthHeaderWidget } from '@/components/AuthHeaderWidget';
 import { t } from '@/services/i18n';
 import { TvModeController } from '@/services/tv-mode';
 import { getAuthState, subscribeAuthState } from '@/services/auth-state';
-import { hasFeature, onEntitlementChange } from '@/services/entitlements';
+import { hasEmbedAccessForAccount, onEntitlementChange } from '@/services/entitlements';
 import { evaluateAvailableExportFormats, evaluateExportGate, exportLockToGateReason } from '@/services/gates/export';
 import { primeExportGateActivation } from '@/services/gates/export-resolver';
 import type { DataExportFormat } from '@/services/gates/export-resolver';
@@ -1597,7 +1597,7 @@ export class EventHandlerManager implements AppModule {
 
     // The keyed tier is offered only to an account that can actually mint a
     // key. Showing it to everyone else would be an upsell wearing a snippet.
-    if (hasFeature('embedAccess')) {
+    if (hasEmbedAccessForAccount(getAuthState().user?.role)) {
       const state = this.ctx.map?.getState();
       tiers.appendChild(this.buildEmbedTier({
         id: 'embedKeyedSnippetTextarea',

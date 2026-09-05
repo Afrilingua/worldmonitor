@@ -72,7 +72,7 @@ for (const f of ['src/config/panels.ts','convex/constants.ts','src/services/gate
 
 
 // ------------------------------------------------------- code-site gates
-const PAT = "features\\.tier\\s*[<>=]|tier\\s*[<>]=?\\s*1|!hasPremiumAccess\\(\\)|features\\.apiAccess|features\\.mcpAccess|features\\.dataExport|requiresPremium|isCallerPremium\\(|hasEmbedAccess\\(|resolvePremiumCallerIdentity\\(|!isProUser\\(\\)";
+const PAT = "features\\.tier\\s*[<>=]|tier\\s*[<>]=?\\s*1|!hasPremiumAccess\\(\\)|features\\.apiAccess|features\\.mcpAccess|features\\.dataExport|requiresPremium|isCallerPremium\\(|has(?:Account)?EmbedAccess\\(|resolvePremiumCallerIdentity\\(|!isProUser\\(\\)";
 const out = execSync(`grep -rnE "${PAT}" --include="*.ts" --include="*.js" src api convex server 2>/dev/null || true`, { encoding: 'utf8', maxBuffer: 1 << 26 });
 const sites = [];
 for (const ln of out.split('\n')) {
@@ -90,7 +90,7 @@ for (const ln of out.split('\n')) {
       /features\.apiAccess/.test(t)  ? 'apiAccess'
     : /features\.mcpAccess/.test(t)  ? 'mcpAccess'
     : /features\.dataExport/.test(t) ? 'dataExport'
-    : /hasEmbedAccess\(/.test(t)     ? 'embedAccess'
+    : /has(?:Account)?EmbedAccess\(/.test(t) ? 'embedAccess'
     : /requiresPremium/.test(t)      ? 'requiresPremium'
     : /isCallerPremium\(/.test(t)    ? 'isCallerPremium'
     : /resolvePremiumCallerIdentity\(/.test(t) ? 'resolvePremiumCallerIdentity'
@@ -226,6 +226,7 @@ const SITE_MAP = [
   [/gates\/playback/,                         { cap: 'playback.historical' }], // NOTE: matches no current gate
   [/convex\/apiKeys\.ts/,                     { cap: 'api.keys' , preds: ['apiAccess'] }],
   [/convex\/embedKeys\.ts/,                   { cap: 'embed.panels', note: 'wme_ key issuance — tier>=1 + embedAccess, deliberately not apiAccess' , preds: ['embedAccess'] }],
+  [/src\/services\/entitlements\.ts/,        { cap: 'embed.panels', note: 'browser account-level embed access predicate' , preds: ['embedAccess'] }],
   [/pro-mcp-gate\.ts|api\/mcp-proxy\.ts|api\/mcp\//, { cap: 'mcp.access' , preds: ['isCallerPremium','resolvePremiumCallerIdentity','mcpAccess','tier'] }],
   [/gates\/export/,                           { cap: 'export.data' , preds: ['dataExport'] }],
   [/analysis-framework-store\.ts/,            { cap: 'analysis.frameworks' , preds: ['hasPremiumAccess'] }],
@@ -321,8 +322,8 @@ const SITE_BASELINE = {
   "convex/notificationChannels.ts::tier": 1,
   "convex/payments/billing.ts::tier": 1,
   "server/_shared/direct-llm-quota.ts::tier": 1,
-  "server/_shared/embed-entitlement.ts::embedAccess": 1,
-  "server/_shared/embed-session.ts::embedAccess": 1,
+  "server/_shared/embed-entitlement.ts::embedAccess": 2,
+  "server/_shared/embed-session.ts::embedAccess": 2,
   "server/_shared/entitlement-check.ts::apiAccess": 1,
   "server/_shared/entitlement-check.ts::tier": 1,
   "server/_shared/premium-check.ts::apiAccess": 1,
@@ -334,6 +335,7 @@ const SITE_BASELINE = {
   "server/_shared/pro-mcp-gate.ts::tier": 1,
   "server/gateway.ts::apiAccess": 3,
   "server/gateway.ts::embedAccess": 1,
+  "src/services/entitlements.ts::embedAccess": 1,
   "server/gateway.ts::tier": 5,
   "server/worldmonitor/economic/v1/get-national-debt.ts::isCallerPremium": 1,
   "server/worldmonitor/intelligence/v1/deduct-situation.ts::isCallerPremium": 1,

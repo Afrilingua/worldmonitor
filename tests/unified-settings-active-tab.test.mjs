@@ -67,6 +67,7 @@ function extractOpen() {
     'getEntitlementState',
     'getEntitlementVerificationStatus',
     'hasFeature',
+    'hasEmbedAccessForAccount',
     'onEntitlementChange',
     'onEntitlementVerificationChange',
     'onSubscriptionChange',
@@ -83,16 +84,18 @@ function extractOpen() {
 
 let mcpAccess = false;
 let embedAccess = false;
+let accountRole = undefined;
 const Harness = extractOpen()(
   () => ({ planKey: mcpAccess || embedAccess ? 'pro_monthly' : 'free' }),
   () => 'ready',
   (feature) =>
     (feature === 'mcpAccess' && mcpAccess) || (feature === 'embedAccess' && embedAccess),
+  (role) => role === 'pro' || embedAccess,
   () => () => {},
   () => () => {},
   () => () => {},
   () => null,
-  () => ({ user: null }),
+  () => ({ user: accountRole ? { role: accountRole } : null }),
   () => {},
   (value) => value,
   () => {},
@@ -140,6 +143,7 @@ describe('UnifiedSettings.open active-tab availability (#5611)', () => {
   beforeEach(() => {
     mcpAccess = false;
     embedAccess = false;
+    accountRole = undefined;
     globalThis.localStorage = {
       getItem: () => null,
       setItem() {},
@@ -205,6 +209,16 @@ describe('UnifiedSettings.open active-tab availability (#5611)', () => {
 
   it('preserves Embeds when embedAccess is present', () => {
     embedAccess = true;
+    const instance = makeInstance();
+
+    instance.open('embeds');
+
+    assert.equal(instance.activeTab, 'embeds');
+    assert.deepEqual(instance.renderedTabs, ['embeds']);
+  });
+
+  it('preserves Embeds for a verified Clerk PRO role before entitlement hydration', () => {
+    accountRole = 'pro';
     const instance = makeInstance();
 
     instance.open('embeds');

@@ -60,6 +60,9 @@ vi.mock('@/services/entitlements', () => ({
   getEntitlementState: () => entitlementState,
   getEntitlementVerificationStatus: () => 'ready',
   hasFeature: (flag: string) => Boolean((features as Record<string, boolean>)[flag]),
+  hasEmbedAccessForAccount: (role: 'free' | 'pro' | undefined) => (
+    role === 'pro' || features.embedAccess
+  ),
   isEntitled: () => true,
   onEntitlementChange: () => () => {},
   onEntitlementVerificationChange: () => () => {},
@@ -236,7 +239,16 @@ describe('Settings -> Embeds tab gating', () => {
     expect(panel('api-keys')?.textContent).toContain('Upgrade to API Starter');
   });
 
+  it('shows the tab for a verified Clerk PRO role before Convex entitlement hydration', () => {
+    features.embedAccess = false;
+    internal.render(false);
+
+    expect(tabButton('embeds')).not.toBeNull();
+    expect(panel('embeds')?.textContent).toContain('Create Embed Key');
+  });
+
   it('hides the tab entirely without embedAccess, even with apiAccess', () => {
+    session.user = { id: 'A', name: 'User A', email: 'a@example.com', role: 'free' };
     features.embedAccess = false;
     features.apiAccess = true;
     internal.render(false);

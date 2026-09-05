@@ -36,6 +36,7 @@ import { track, trackApiAction } from '@/services/analytics';
 import {
   getEntitlementState,
   getEntitlementVerificationStatus,
+  hasEmbedAccessForAccount,
   hasFeature,
   isEntitled,
   onEntitlementChange,
@@ -561,7 +562,7 @@ export class UnifiedSettings {
     const requestedTab = tab ?? this.activeTab;
     const unavailable =
       (requestedTab === 'mcp-clients' && !hasFeature('mcpAccess')) ||
-      (requestedTab === 'embeds' && !hasFeature('embedAccess'));
+      (requestedTab === 'embeds' && !hasEmbedAccessForAccount(getAuthState().user?.role));
     this.activeTab = unavailable ? 'settings' : requestedTab;
     this.resetPanelDraft();
     // Only on a FRESH session. open() is re-entrant on an overlay that is
@@ -605,7 +606,7 @@ export class UnifiedSettings {
       const hasEmbedsTab = this.overlay.querySelector('[data-tab="embeds"]') !== null;
       if (
         hasMcpClientsTab !== hasFeature('mcpAccess') ||
-        hasEmbedsTab !== hasFeature('embedAccess')
+        hasEmbedsTab !== hasEmbedAccessForAccount(getAuthState().user?.role)
       ) {
         // Entitlements can legitimately progress from a free/default snapshot
         // to Pro after the account handoff's first non-null emission. Rebuild
@@ -627,7 +628,7 @@ export class UnifiedSettings {
       if (embedsPanel) {
         setTrustedHtml(embedsPanel, trustedHtml(this.renderEmbedKeysContent(), "legacy direct innerHTML migration"));
         this.attachEmbedKeysHandlers();
-        if (this.activeTab === 'embeds' && getAuthState().user && hasFeature('embedAccess')) {
+        if (this.activeTab === 'embeds' && getAuthState().user && hasEmbedAccessForAccount(getAuthState().user?.role)) {
           void this.loadEmbedKeys();
         }
       }
@@ -824,7 +825,7 @@ export class UnifiedSettings {
     // apiAccess gate would hide embed keys from most of the customers who
     // bought embedding. A tab of its own rather than a section of API Keys so
     // the two credential classes never look interchangeable.
-    const showEmbedsTab = hasFeature('embedAccess');
+    const showEmbedsTab = hasEmbedAccessForAccount(getAuthState().user?.role);
     const availableTabs: TabId[] = [
       'settings',
       ...(isSignedIn ? ['billing' as const] : []),
@@ -961,7 +962,7 @@ export class UnifiedSettings {
       if (this.activeTab === 'api-keys' && getAuthState().user && hasFeature('apiAccess')) {
         void this.loadApiKeys();
       }
-      if (this.activeTab === 'embeds' && getAuthState().user && hasFeature('embedAccess')) {
+      if (this.activeTab === 'embeds' && getAuthState().user && hasEmbedAccessForAccount(getAuthState().user?.role)) {
         void this.loadEmbedKeys();
       }
       if (this.activeTab === 'mcp-clients' && getAuthState().user && hasFeature('mcpAccess')) {
@@ -1007,7 +1008,7 @@ export class UnifiedSettings {
       void this.loadApiKeys();
     }
 
-    if (tab === 'embeds' && getAuthState().user && hasFeature('embedAccess')) {
+    if (tab === 'embeds' && getAuthState().user && hasEmbedAccessForAccount(getAuthState().user?.role)) {
       void this.loadEmbedKeys();
     }
 
@@ -1982,7 +1983,7 @@ export class UnifiedSettings {
         </div>`;
     }
 
-    if (!hasFeature('embedAccess')) {
+    if (!hasEmbedAccessForAccount(authState.user?.role)) {
       // Defensive — the tab is hidden entirely without embedAccess, so this
       // only shows if the subscription lapsed while the modal was open.
       const upgradeIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="16 12 12 8 8 12"/><line x1="12" y1="16" x2="12" y2="8"/></svg>`;
