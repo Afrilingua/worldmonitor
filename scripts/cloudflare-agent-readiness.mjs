@@ -91,7 +91,7 @@ export async function runAgentReadiness(mode, { env = process.env, fetchImpl } =
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const mode = process.argv[2];
-  if (!['--plan', '--check', '--apply'].includes(mode)) {
+  if (process.argv.length !== 3 || !['--plan', '--check', '--apply'].includes(mode)) {
     console.error('Usage: node scripts/cloudflare-agent-readiness.mjs --plan|--check|--apply');
     process.exitCode = 1;
   } else {

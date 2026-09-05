@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { buildAgentMarkdownCacheRule, planAgentReadiness, runAgentReadiness } from '../scripts/cloudflare-agent-readiness.mjs';
 import policy from '../shared/agent-request-policy.json' with { type: 'json' };
 
@@ -59,6 +61,15 @@ function fakeCloudflare(state, { drift = false } = {}) {
 }
 
 describe('Cloudflare agent readiness', () => {
+  it('rejects ambiguous CLI modes before loading credentials or making requests', () => {
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(new URL('../scripts/cloudflare-agent-readiness.mjs', import.meta.url)), '--apply', '--plan',
+    ], { encoding: 'utf8', env: {} });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Usage:/);
+    assert.equal(result.stdout, '');
+  });
+
   it('limits the cache bypass to homepage GET/HEAD and the declared AI user agents', () => {
     const rule = buildAgentMarkdownCacheRule();
     assert.match(rule.expression, /http\.host in \{"worldmonitor\.app" "www\.worldmonitor\.app"\}/);
