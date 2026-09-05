@@ -84,10 +84,10 @@ describe('embed entry boundary', () => {
     const mapPanel = readFileSync(resolve(root, 'src/embed/panels/map.ts'), 'utf-8');
     const attributionIdx = mapPanel.indexOf('buildWorldMonitorAttributionUrl');
     const loaderIdx = mapPanel.indexOf('new EmbedDataLoader');
-    const upgradeIdx = mapPanel.indexOf('loader.upgrade');
+    const requestGrantIdx = mapPanel.indexOf('loader.requestGrant');
     assert.ok(attributionIdx !== -1, 'the map panel must render an attribution link');
     assert.ok(
-      attributionIdx < loaderIdx && attributionIdx < upgradeIdx,
+      attributionIdx < loaderIdx && attributionIdx < requestGrantIdx,
       'attribution is appended before any tier decision, so free and keyed embeds both carry it',
     );
   });

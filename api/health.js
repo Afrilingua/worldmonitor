@@ -19,7 +19,8 @@ import {
 // as `.data`), so importing it is behavior-preserving.
 import { unwrapEnvelope } from './_seed-envelope.js';
 // @ts-expect-error — JS module, no declaration file
-import { redisPipeline, getRedisCredentials, readExistsFlags } from './_upstash-json.js';
+import { redisPipeline, applyRedisKeyPrefix, getRedisCredentials, readExistsFlags } from './_upstash-json.js';
+import { isAppOwnedRedisKey } from './_redis-key-ownership.js';
 import { CII_RISK_SCORE_CACHE_KEYS } from './_cii-risk-cache-keys.js';
 import { BOOTSTRAP_CACHE_KEYS } from './_bootstrap-tier-keys.js';
 import { CANADA_ALERTS_CUTOVER_FALLBACK_KEYS } from './_canada-alerts-cutover.js';
@@ -410,6 +411,7 @@ const STANDALONE_KEYS = {
   cyberThreatsRpc:       'cyber:threats:v2',
   militaryBases:         'military:bases:active',
   militaryFlights:       'military:flights:v1',
+  aisGaps:               'maritime:ais-gaps:v1',
   militaryFlightsStale:  'military:flights:stale:v1',
   // STANDALONE (not BOOTSTRAP) by design — value is a single keyed payload
   // (asOf + per-country aggregate), no per-record gating needed; health just
@@ -606,7 +608,14 @@ const SEED_META = {
   // churn while still detecting a stopped worker well before leases age out.
   companyMonitoringWorker: { key: 'seed-meta:company-monitoring:worker', maxStaleMin: 5, workerControl: true },
   earthquakes:      { key: 'seed-meta:seismology:earthquakes',  maxStaleMin: 30 },
-  wildfires:        { key: 'seed-meta:wildfire:fires',          maxStaleMin: 360 }, // FIRMS NRT resets at midnight UTC; new-day data takes 3-6h to accumulate
+  wildfires:        {
+    key: 'seed-meta:wildfire:fires',
+    maxStaleMin: 360,
+    sourceFailure: {
+      warnAfterConsecutive: 2,
+      failureCodePattern: /^FIRMS_PARTIAL_COVERAGE$/,
+    },
+  }, // FIRMS NRT resets at midnight UTC; new-day data takes 3-6h to accumulate
   wildfiresBootstrap: { key: 'seed-meta:wildfire:fires-bootstrap', maxStaleMin: 360 }, // Compact CDN payload is a distinct publish target; monitor it so canonical fallback cannot hide transform/write failures.
   outages:          { key: 'seed-meta:infra:outages',           maxStaleMin: 30 },
   climateAnomalies: { key: 'seed-meta:climate:anomalies',       maxStaleMin: 540 }, // bundled into seed-bundle-climate (cron `0 */3 * * *`, every 3h); 540 = 3× cron cadence per project convention. Prior 240 (1.33× cron) flipped to silent-EMPTY between minute 180 (TTL_DATA expiry) and 240 (alarm trigger) on every routine cron-jitter cycle — see scripts/seed-climate-anomalies.mjs CACHE_TTL comment.
@@ -849,7 +858,7 @@ const SEED_META = {
   militaryCii:      { key: 'seed-meta:intelligence:military-cii',  maxStaleMin: 45 }, // seed-military-cii cron ~10min; 45 = generous grace (relay-dependent; preserve-last-good runs still refresh meta)
   defensePatents:   { key: 'seed-meta:military:defense-patents',  maxStaleMin: 25200 },
   satellites:       { key: 'seed-meta:intelligence:satellites',    maxStaleMin: 240 }, // CelesTrak every 120min; 240min = absorbs one missed cycle
-  temporalAnomalies:{ key: 'seed-meta:temporal:anomalies',          maxStaleMin: 45 }, // rebuild-stamped ONLY (TEMPORAL_ANOMALIES_REBUILD_AFTER_MS=20min in infrastructure/v1/_shared.ts) — only producer-route traffic can rebuild and refresh this request-driven stamp, so a traffic lull can age it past 45min; 45min leaves ~2.25x margin. Data TTL is 60min so health reaches STALE_SEED before EMPTY. Content freshness is a separate clock: the producer stamps newestItemAt/maxContentAgeMin from the news+FIRMS payloads (TEMPORAL_ANOMALIES_MAX_CONTENT_AGE_MIN); a frozen-but-200 upstream keeps fetchedAt fresh and reads STALE_CONTENT.
+  temporalAnomalies:{ key: 'seed-meta:temporal:anomalies',          maxStaleMin: 45 }, // rebuild-stamped ONLY (TEMPORAL_ANOMALIES_REBUILD_AFTER_MS=20min in infrastructure/v1/_shared.ts) — only producer-route traffic can rebuild and refresh this request-driven stamp, so a traffic lull can age it past 45min; 45min leaves ~2.25x margin. Data TTL is 60min so health reaches STALE_SEED before EMPTY. Content freshness is a separate clock: the producer stamps newestItemAt/maxContentAgeMin from all five COUNT_SOURCE_KEYS payloads (news, FIRMS, military flights, theater-posture vessels, AIS gaps — TEMPORAL_ANOMALIES_MAX_CONTENT_AGE_MIN); a frozen-but-200 upstream keeps fetchedAt fresh and reads STALE_CONTENT.
   weatherAlerts:    { key: 'seed-meta:weather:alerts',             maxStaleMin: 45 }, // relay loop every 15min; 45 = 3× interval (was 30 = 2×, too tight on relay hiccup)
   // Planned/key-gated seeder (#7005). Live fetch requires IMD_API_KEY, so this
   // is an activation-marker cutover rather than a 24h expiring acknowledgement.
@@ -1053,6 +1062,19 @@ const SEED_META = {
   chokepointTransits:  { key: 'seed-meta:supply_chain:chokepoint_transits',  maxStaleMin: 30 }, // relay every 10min; 30min = 3x interval,
   transitSummaries:    { key: 'seed-meta:supply_chain:transit-summaries',    maxStaleMin: 30 }, // relay every 10min; 30min = 3x interval,
   usniFleet:           { key: 'seed-meta:military:usni-fleet',               maxStaleMin: 720 }, // relay loop every 6h; 720 = 2× interval (was 480 = 1.3×, too tight)
+  aisGaps:             {
+    key: 'seed-meta:maritime:ais-gaps',
+    maxStaleMin: 30, // relay loop every 10min; feeds the temporal anomalies ais_gaps count source (COUNT_SOURCE_KEYS #7574). 30min = 3× interval, matching militaryFlights' budget style.
+    cutover: {
+      mode: 'expiring-ack',
+      fromKey: null,
+      issue: 7574,
+      // Bounded deploy-order window: until the Railway relay's first publish,
+      // the data key is absent and reads plain EMPTY. Acknowledged with an
+      // expiry bounded to the first scheduled producer run.
+      status: 'EMPTY',
+    },
+  },
   securityAdvisories:  { key: 'seed-meta:intelligence:advisories',           maxStaleMin: 120 },
   secCikMap:           { key: 'seed-meta:intelligence:sec-cik-map',          maxStaleMin: 2880, minRecordCount: 5000 }, // daily bundle section; 2880min = 48h = 2x interval. minRecordCount mirrors MIN_CIK_ENTRIES in scripts/seed-sec-cik-map.mjs.
   sec8kStream:         { key: 'seed-meta:intelligence:sec-8k-stream',        maxStaleMin: 120, minRecordCount: 50 }, // 30min bundle section; 120min = 4x interval. minRecordCount mirrors MIN_STREAM_EVENTS in scripts/seed-sec-8k-stream.mjs — a drained window means Atom-parse decay, not a quiet market.
@@ -1931,6 +1953,10 @@ const ZERO_RECORD_DATA_OK_KEYS = new Set([
   // activation marker exists.
   'torontoTfs',
   'torontoTps',
+  // The relay publishes the dark-ship envelope with zeroOk — zero dark ships
+  // is a legitimate peaceful state, not a failed publish. A MISSING key still
+  // reads EMPTY (absence is not peaceful).
+  'aisGaps',
   'globalTendersSam', 'globalTendersTed', 'globalTendersContractsFinder', 'globalTendersCanadaBuys', 'globalTendersGets', 'globalTendersWorldBank',
   // retailer-spread is SUPPRESSED to an explicit 0 by the aggregate job when a
   // market's retailers share < MIN_SPREAD_ITEMS (4) common basket items —
@@ -2167,14 +2193,40 @@ function parseFiniteRecordCount(raw) {
   return null;
 }
 
+function projectSourceFailure(meta, policy) {
+  if (!policy || meta?.sourceState !== 'degraded') return null;
+  const errorCode = typeof meta?.errorCode === 'string'
+    && policy.failureCodePattern.test(meta.errorCode)
+    ? meta.errorCode
+    : null;
+  if (!errorCode) return null;
+  const lastSourceFailureCode = typeof meta?.lastSourceFailureCode === 'string'
+    && policy.failureCodePattern.test(meta.lastSourceFailureCode)
+    ? meta.lastSourceFailureCode
+    : null;
+  const consecutiveSourceFailures = Number.isInteger(meta?.consecutiveSourceFailures)
+    && meta.consecutiveSourceFailures >= 1
+    ? Math.min(meta.consecutiveSourceFailures, 100)
+    : null;
+  const pending = lastSourceFailureCode === errorCode
+    && consecutiveSourceFailures !== null
+    && consecutiveSourceFailures < policy.warnAfterConsecutive;
+  return {
+    errorCode,
+    consecutiveSourceFailures,
+    lastSourceFailureCode,
+    pending,
+  };
+}
+
 function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
   if (!seedCfg) {
-    return { hasMeta: false, seedAge: null, seedStale: null, seedError: false, sourceUnavailable: false, sourceBlocked: false, metaReadFailed: false, metaCount: null, contentAge: null, coverage: null, synthesisFailure: null, dominantFailureMode: null, chinaRow: null, workerControl: null, resilienceCacheState: null };
+    return { hasMeta: false, seedAge: null, seedStale: null, seedError: false, sourceUnavailable: false, sourceBlocked: false, metaReadFailed: false, metaCount: null, contentAge: null, coverage: null, sourceFailure: null, synthesisFailure: null, dominantFailureMode: null, chinaRow: null, workerControl: null, resilienceCacheState: null };
   }
   // Per-command Redis errors on the GET seed-meta half of the pipeline must
   // not silently fall through to STALE_SEED — promote to REDIS_PARTIAL.
   if (keyMetaErrors.get(seedCfg.key)) {
-    return { hasMeta: false, seedAge: null, seedStale: null, seedError: false, sourceUnavailable: false, sourceBlocked: false, metaReadFailed: true, metaCount: null, contentAge: null, coverage: null, synthesisFailure: null, dominantFailureMode: null, chinaRow: null, workerControl: null, resilienceCacheState: null };
+    return { hasMeta: false, seedAge: null, seedStale: null, seedError: false, sourceUnavailable: false, sourceBlocked: false, metaReadFailed: true, metaCount: null, contentAge: null, coverage: null, sourceFailure: null, synthesisFailure: null, dominantFailureMode: null, chinaRow: null, workerControl: null, resilienceCacheState: null };
   }
   // Unwrap through the envelope helper. Legacy seed-meta is a bare
   // `{ fetchedAt, recordCount, sourceVersion, status? }` object with no `_seed`
@@ -2231,6 +2283,7 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
       decisionGroups: null,
       coverage: null,
       errorCode,
+      sourceFailure: null,
       synthesisFailure: null,
       dominantFailureMode: null,
       // A producer that reported `status: 'error'` never got far enough to
@@ -2260,6 +2313,7 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
   // transport path is externally blocked. Keep that state visible without
   // treating it as a broken producer that can be repaired by another retry.
   const sourceBlocked = meta?.sourceState === 'blocked';
+  const sourceFailure = projectSourceFailure(meta, seedCfg.sourceFailure);
   // Source-specific producers can preserve usable last-good records while a
   // current upstream attempt is degraded. Surface that state immediately as a
   // warning without discarding the retained record count from health output.
@@ -2270,7 +2324,8 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
   const sourceDegraded = inputFreshnessExpired || (typeof meta?.sourceState === 'string'
     && meta.sourceState !== 'ok'
     && !sourceUnavailable
-    && !sourceBlocked);
+    && !sourceBlocked
+    && sourceFailure?.pending !== true);
   // Content-age trio (2026-05-04 health-readiness plan). Presence of
   // maxContentAgeMin is the opt-in signal — legacy seeders without it
   // get contentAge: null and skip the STALE_CONTENT branch in classifyKey.
@@ -2420,6 +2475,7 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
     decisionGroups,
     coverage,
     errorCode,
+    sourceFailure,
     synthesisFailure,
     dominantFailureMode,
     chinaRow,
@@ -2525,6 +2581,7 @@ function classifyKey(name, redisKey, opts, ctx) {
     decisionGroups,
     coverage,
     errorCode,
+    sourceFailure,
     synthesisFailure,
     dominantFailureMode,
     chinaRow,
@@ -2816,7 +2873,16 @@ function classifyKey(name, redisKey, opts, ctx) {
   // becomes EMPTY, and gating the code on SEED_ERROR would trade the operator's
   // "why" for the severity bump — leaving a bare crit whose explanation is
   // sitting unread in seed-meta.
-  if (fault === 'SEED_ERROR' && errorCode) entry.errorCode = errorCode;
+  if ((fault === 'SEED_ERROR' || sourceFailure) && errorCode) entry.errorCode = errorCode;
+  if (sourceFailure) {
+    if (sourceFailure.consecutiveSourceFailures !== null) {
+      entry.consecutiveSourceFailures = sourceFailure.consecutiveSourceFailures;
+    }
+    if (sourceFailure.lastSourceFailureCode) {
+      entry.lastSourceFailureCode = sourceFailure.lastSourceFailureCode;
+    }
+    if (sourceFailure.pending) entry.sourceFailurePending = true;
+  }
   // Coarse producer-run diagnostic, relayed whenever the producer recorded it —
   // the whole point of #6323 is that a coverage shortfall's dominant cause is
   // visible on /api/health without Railway logs or a raw index read, so gating
@@ -3117,13 +3183,15 @@ function parseHealthVerdictSnapshot(raw, now, { requireChecks = true } = {}) {
 
 async function releaseHealthVerdictRefreshLock(lockToken) {
   if (!lockToken) return;
+  // The lock key is already deployment-prefixed via healthVerdictRedisKey —
+  // send the command verbatim (#7674).
   await redisPipeline([[
     'EVAL',
     HEALTH_VERDICT_RELEASE_LOCK_SCRIPT,
     '1',
     HEALTH_VERDICT_REFRESH_LOCK_KEY,
     lockToken,
-  ]], 4_000).catch(() => null);
+  ]], 4_000, true).catch(() => null);
 }
 
 // Single source of truth for "is this check a problem?", shared by the compact
@@ -3439,6 +3507,11 @@ export async function handleHealth(req, ctx, options = {}) {
   // See WM 2026-05-10 — added after a night of UptimeRobot flips that needed
   // direct Upstash inspection to diagnose.
   if (wantsHistory) {
+    // App-owned incident log (#7674): health.js is the only writer of these
+    // keys, so the read below and the persist/clear pipelines after the sweep
+    // all ride the deployment-prefixed helper default — a preview
+    // deployment's failure history stays inside its own namespace, and
+    // production keeps the bare historical shape.
     const results = await redisPipeline(
       [
         ['GET', 'health:last-failure'],
@@ -3473,7 +3546,9 @@ export async function handleHealth(req, ctx, options = {}) {
     // browser poll, ~115k/day — reads the ~1 KB compact key instead of dragging the
     // full ~20 KB check map out of Redis to show a tenth of it (#5300).
     const snapshotKey = compact ? HEALTH_VERDICT_COMPACT_SNAPSHOT_KEY : HEALTH_VERDICT_SNAPSHOT_KEY;
-    const snapshotResult = await redisPipeline([['GET', snapshotKey]], 4_000);
+    // Snapshot/lock keys are already deployment-prefixed via
+    // healthVerdictRedisKey — read and write them verbatim (#7674).
+    const snapshotResult = await redisPipeline([['GET', snapshotKey]], 4_000, true);
     if (!snapshotResult) throw new Error('Redis request failed');
     if (snapshotResult[0]?.error) throw new Error('Redis snapshot read failed');
     const cachedSnapshot = parseHealthVerdictSnapshot(snapshotResult[0]?.result, snapshotNow(), { requireChecks: !compact });
@@ -3493,7 +3568,7 @@ export async function handleHealth(req, ctx, options = {}) {
       'EX',
       String(HEALTH_VERDICT_REFRESH_LOCK_TTL_SECONDS),
       'NX',
-    ]], 4_000);
+    ]], 4_000, true);
     if (!lockResult || lockResult[0]?.error) throw new Error('Redis snapshot lock failed');
     ownsSnapshotRefreshLock = lockResult[0]?.result === 'OK';
 
@@ -3515,7 +3590,7 @@ export async function handleHealth(req, ctx, options = {}) {
         const remainingMs = waitDeadline - Date.now();
         if (remainingMs < HEALTH_VERDICT_MIN_REDIS_TIMEOUT_MS) break;
         const redisTimeoutMs = Math.min(4_000, remainingMs);
-        const refreshedResult = await redisPipeline([['GET', snapshotKey]], redisTimeoutMs);
+        const refreshedResult = await redisPipeline([['GET', snapshotKey]], redisTimeoutMs, true);
         if (!refreshedResult || refreshedResult[0]?.error) throw new Error('Redis snapshot wait failed');
         const refreshedSnapshot = parseHealthVerdictSnapshot(refreshedResult[0]?.result, snapshotNow(), { requireChecks: !compact });
         if (
@@ -3532,7 +3607,7 @@ export async function handleHealth(req, ctx, options = {}) {
           'EX',
           String(HEALTH_VERDICT_REFRESH_LOCK_TTL_SECONDS),
           'NX',
-        ]], redisTimeoutMs);
+        ]], redisTimeoutMs, true);
         if (!lockResult || lockResult[0]?.error) throw new Error('Redis snapshot lock retry failed');
         ownsSnapshotRefreshLock = lockResult[0]?.result === 'OK';
         if (ownsSnapshotRefreshLock) break;
@@ -3566,19 +3641,28 @@ export async function handleHealth(req, ctx, options = {}) {
   // NEG_SENTINEL ('__WM_NEG__') is 10 bytes — strlenIsData() rejects exactly
   // that length while accepting any other non-zero strlen as data. List-typed
   // keys (LIST_DATA_KEYS) take LLEN instead; STRLEN would WRONGTYPE on them.
+  // Mixed-ownership sweep (#7674): registry data keys, seed-meta, and
+  // activation markers are written by the Railway seeder fleet and are read
+  // RAW (the fleet does not know the deployment prefix scheme). The two
+  // route-owned temporal keys are stamped by the prefix-aware
+  // list-temporal-anomalies route, so they must be read from this
+  // deployment's own namespace — otherwise preview health classifies the
+  // producer against the production stamp. Each key is finalized here and
+  // the pipeline below is sent verbatim.
+  const sweepKey = (key) => (isAppOwnedRedisKey(key) ? applyRedisKeyPrefix(key) : key);
   let results;
   try {
     const commands = [
-      ...allDataKeys.map(dataLenCommand),
-      ...allMetaKeys.map(k => ['GET', k]),
-      ...activationEntries.map(([, marker]) => ['EXISTS', marker]),
-      ['GET', CHINA_COVERAGE_SUMMARY_KEY],
-      ['GET', STANDALONE_KEYS.educationAttainment],
-      ['HEXISTS', FIVE_FACTOR_SCORECARD_READ_MODEL_KEY, 'metadata'],
+      ...allDataKeys.map((k) => dataLenCommand(sweepKey(k))),
+      ...allMetaKeys.map(k => ['GET', sweepKey(k)]),
+      ...activationEntries.map(([, marker]) => ['EXISTS', sweepKey(marker)]),
+      ['GET', sweepKey(CHINA_COVERAGE_SUMMARY_KEY)],
+      ['GET', sweepKey(STANDALONE_KEYS.educationAttainment)],
+      ['HEXISTS', sweepKey(FIVE_FACTOR_SCORECARD_READ_MODEL_KEY), 'metadata'],
       ...fredRolloutCommands,
     ];
     if (!getRedisCredentials()) throw new Error('Redis not configured');
-    results = await redisPipeline(commands, 8_000);
+    results = await redisPipeline(commands, 8_000, true);
     if (!results) throw new Error('Redis request failed');
   } catch (err) {
     if (ownsSnapshotRefreshLock) await releaseHealthVerdictRefreshLock(refreshLockToken);
@@ -3712,7 +3796,9 @@ export async function handleHealth(req, ctx, options = {}) {
     // `parseStaleContentGraceUntil` returns an empty map for anything that is
     // not a well-formed reply array. Both roads lead to "no grace, keep the
     // warning", which is the fail-closed direction.
-    const graceResults = await redisPipeline(graceStatePlan.claimCommands, 4_000).catch(() => null);
+    // The grace state hash key is deployment-prefixed via
+    // healthVerdictRedisKey — send the plan verbatim (#7674).
+    const graceResults = await redisPipeline(graceStatePlan.claimCommands, 4_000, true).catch(() => null);
     applyStaleContentGrace(
       checks,
       graceEvidenceByName,
@@ -3721,7 +3807,7 @@ export async function handleHealth(req, ctx, options = {}) {
     );
   }
   if (graceStatePlan.cleanupCommands.length > 0) {
-    const graceCleanup = redisPipeline(graceStatePlan.cleanupCommands, 4_000).catch(() => {});
+    const graceCleanup = redisPipeline(graceStatePlan.cleanupCommands, 4_000, true).catch(() => {});
     if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(graceCleanup);
   }
 
@@ -3821,6 +3907,8 @@ export async function handleHealth(req, ctx, options = {}) {
   // Both keys share one TTL for the same reason they share one sweep: they
   // carry the same deadlines, so they must stop being servable together.
   const snapshotTtl = String(snapshotTtlSeconds(verdictSnapshot, snapshotNow()));
+  // Both snapshot keys are deployment-prefixed via healthVerdictRedisKey —
+  // write them verbatim (#7674).
   const snapshotWriteResult = await redisPipeline([
     [
       'SET',
@@ -3836,7 +3924,7 @@ export async function handleHealth(req, ctx, options = {}) {
       'EX',
       snapshotTtl,
     ],
-  ], 4_000).catch(() => null);
+  ], 4_000, true).catch(() => null);
   const snapshotWriteFailed = !snapshotWriteResult
     || snapshotWriteResult.length !== 2
     || snapshotWriteResult.some((entry) => entry?.error);
