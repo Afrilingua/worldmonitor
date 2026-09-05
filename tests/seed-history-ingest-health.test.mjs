@@ -396,7 +396,13 @@ describe('historyIngestErrorCode', () => {
  * Upstash stub. `getResult` is the raw string the record GET returns (null =
  * key absent). Captures every pipeline body so key names and TTLs are testable.
  */
-function stubUpstash({ getResult = null, getStatus = 200, pipelineStatus = 200, pipelineBody } = {}) {
+function stubUpstash({
+  getResult = null,
+  getStatus = 200,
+  pipelineStatus = 200,
+  pipelineBody,
+  pipelineBodies,
+} = {}) {
   const calls = { gets: [], pipelines: [] };
   const fetchImpl = async (url, init) => {
     if (String(url).includes('/pipeline')) {
@@ -405,7 +411,9 @@ function stubUpstash({ getResult = null, getStatus = 200, pipelineStatus = 200, 
       return {
         ok: pipelineStatus >= 200 && pipelineStatus < 300,
         status: pipelineStatus,
-        json: async () => pipelineBody ?? commands.map(() => ({ result: 'OK' })),
+        json: async () => pipelineBodies?.[calls.pipelines.length - 1]
+          ?? pipelineBody
+          ?? commands.map(() => ({ result: 'OK' })),
       };
     }
     calls.gets.push(String(url));
@@ -481,7 +489,10 @@ describe('recordHistoryIngestHealth', () => {
         { domain: DOMAIN, resource: RESOURCE, runId, result: SUCCESS },
         { env: { ...ENV, WM_ONE_OFF_HISTORY_RECEIPT: '1' }, fetchImpl, now: () => AT },
       );
-      receipts.push(calls.pipelines[0][3]);
+      assert.equal(calls.pipelines.length, 2);
+      assert.equal(calls.pipelines[0].length, 3, 'shared health must land before the receipt');
+      assert.equal(calls.pipelines[1].length, 1, 'the receipt uses a separate confirmed write');
+      receipts.push(calls.pipelines[1][0]);
     }
 
     assert.notEqual(receipts[0][1], receipts[1][1]);
@@ -491,6 +502,58 @@ describe('recordHistoryIngestHealth', () => {
     ]);
     assert.equal(JSON.parse(receipts[0][2]).lastRunId, 'run-9');
     assert.deepEqual(receipts[0].slice(3), ['EX', HISTORY_INGEST_RUN_RECEIPT_TTL_SECONDS]);
+  });
+
+  it('does not write a one-off receipt when the shared pipeline partially fails', async () => {
+    const { fetchImpl, calls } = stubUpstash({
+      pipelineBodies: [[
+        { error: 'ERR record rejected' },
+        { result: 'OK' },
+        { result: 'OK' },
+      ]],
+    });
+
+    const { value, warns } = await withCapturedWarn(() => recordHistoryIngestHealth(
+      { domain: DOMAIN, resource: RESOURCE, runId: 'run-partial', result: SUCCESS },
+      { env: { ...ENV, WM_ONE_OFF_HISTORY_RECEIPT: '1' }, fetchImpl, now: () => AT },
+    ));
+
+    assert.equal(value, null);
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /pipeline command failed/);
+    assert.equal(calls.pipelines.length, 1, 'a failed shared write must stop before the receipt request');
+    assert.equal(
+      calls.pipelines.flat().some((command) => command[1] === historyIngestRunReceiptKey(
+        DOMAIN,
+        RESOURCE,
+        'run-partial',
+      )),
+      false,
+    );
+  });
+
+  it('does not write a one-off receipt for malformed or incomplete shared results', async () => {
+    for (const pipelineBody of [
+      [],
+      {},
+      [{ result: 'OK' }],
+      [null, { result: 'OK' }, { result: 'OK' }],
+      [{ result: 'OK' }, {}, { result: 'OK' }],
+      [{ result: 'OK' }, { result: 'OK' }, { result: null }],
+      [{ result: 'QUEUED' }, { result: 'OK' }, { result: 'OK' }],
+    ]) {
+      const { fetchImpl, calls } = stubUpstash({ pipelineBody });
+
+      const { value, warns } = await withCapturedWarn(() => recordHistoryIngestHealth(
+        { domain: DOMAIN, resource: RESOURCE, runId: 'run-malformed', result: SUCCESS },
+        { env: { ...ENV, WM_ONE_OFF_HISTORY_RECEIPT: '1' }, fetchImpl, now: () => AT },
+      ));
+
+      assert.equal(value, null);
+      assert.equal(warns.length, 1);
+      assert.equal(calls.pipelines.length, 1, 'unconfirmed shared writes must stop before the receipt');
+      assert.equal(calls.pipelines[0].length, 3);
+    }
   });
 
   it('continues the failure streak from the persisted record', async () => {

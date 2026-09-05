@@ -25,6 +25,23 @@ const PREFLIGHT_TIMEOUT_MS = 90_000;
 const SEED_TIMEOUT_MS = 900_000;
 const CLEANUP_TIMEOUT_MS = 90_000;
 const PREFLIGHT_STATUS_MARKER = '__WM_ONE_OFF_PREFLIGHT__';
+const SEED_STATUS_MARKER = '__WM_ONE_OFF_SEED__';
+const SEED_FAILURE_CODES = new Set([
+  'workspace_setup_failed',
+  'revision_fetch_failed',
+  'revision_checkout_failed',
+  'revision_mismatch',
+  'dependency_install_failed',
+  'seed_output_overflow',
+  'seed_process_failed',
+  'seed_lock_unavailable',
+  'seed_already_running',
+  'seed_validation_failed',
+  'seed_no_source',
+  'seed_incomplete',
+  'run_id_missing',
+  'history_postflight_failed',
+]);
 
 export const CROSS_STRAIT_ONE_OFF_REQUIREMENTS = Object.freeze([
   Object.freeze({ names: Object.freeze(['UPSTASH_REDIS_REST_URL']) }),
@@ -186,6 +203,13 @@ export const SANDBOX_SEED_PROGRAM = `
 set -eu
 workspace="$(mktemp -d)"
 seed_pid=''
+emit_seed_result() {
+  printf '%s{"status":"%s","code":"%s"}\\n' '${SEED_STATUS_MARKER}' "$1" "$2"
+}
+reject_seed() {
+  emit_seed_result rejected "$1"
+  exit "\${2:-75}"
+}
 cleanup_workspace() {
   rm -rf "$workspace"
 }
@@ -207,17 +231,18 @@ handle_signal() {
 }
 trap cleanup_workspace EXIT
 trap handle_signal HUP INT TERM
-git init --quiet "$workspace"
-git -C "$workspace" remote add origin https://github.com/koala73/worldmonitor.git
-git -C "$workspace" fetch --quiet --depth=1 origin "$WM_ONE_OFF_DEPLOYED_COMMIT"
-git -C "$workspace" checkout --quiet --detach FETCH_HEAD
-actual_commit="$(git -C "$workspace" rev-parse HEAD)"
+git init --quiet "$workspace" >/dev/null 2>&1 || reject_seed workspace_setup_failed 75
+git -C "$workspace" remote add origin https://github.com/koala73/worldmonitor.git >/dev/null 2>&1 || reject_seed workspace_setup_failed 75
+git -C "$workspace" fetch --quiet --depth=1 origin "$WM_ONE_OFF_DEPLOYED_COMMIT" >/dev/null 2>&1 || reject_seed revision_fetch_failed 75
+git -C "$workspace" checkout --quiet --detach FETCH_HEAD >/dev/null 2>&1 || reject_seed revision_checkout_failed 75
+if ! actual_commit="$(git -C "$workspace" rev-parse HEAD 2>/dev/null)"; then
+  reject_seed revision_mismatch 78
+fi
 if [ "$actual_commit" != "$WM_ONE_OFF_DEPLOYED_COMMIT" ]; then
-  echo '[cross-strait-one-off] fetched revision did not match the deployed revision' >&2
-  exit 78
+  reject_seed revision_mismatch 78
 fi
 cd "$workspace/scripts"
-npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+npm ci --ignore-scripts --omit=dev --no-audit --no-fund >/dev/null 2>&1 || reject_seed dependency_install_failed 75
 seed_output="$workspace/seed-output.log"
 overflow_marker="$workspace/seed-output.overflow"
 set +e
@@ -228,22 +253,24 @@ exit_code=$?
 seed_pid=''
 set -e
 if [ -f "$overflow_marker" ]; then
-  echo '[cross-strait-one-off] the seeder output exceeded the safety limit' >&2
-  exit 75
+  reject_seed seed_output_overflow 75
 fi
 if [ "$exit_code" -ne 0 ]; then
-  exit "$exit_code"
+  reject_seed seed_process_failed "$exit_code"
 fi
-if grep -Eq 'SKIPPED: (Redis unavailable during lock acquisition|another seed run in progress|validation failed)|NO SOURCE:|RETRY:' "$seed_output"; then
-  echo '[cross-strait-one-off] the seeder did not publish a complete run' >&2
-  exit 75
-fi
+grep -q 'SKIPPED: Redis unavailable during lock acquisition' "$seed_output" && reject_seed seed_lock_unavailable 75
+grep -q 'SKIPPED: another seed run in progress' "$seed_output" && reject_seed seed_already_running 75
+grep -q 'SKIPPED: validation failed' "$seed_output" && reject_seed seed_validation_failed 75
+grep -q 'NO SOURCE:' "$seed_output" && reject_seed seed_no_source 75
+grep -q 'RETRY:' "$seed_output" && reject_seed seed_incomplete 75
 run_id="$(sed -n 's/^[[:space:]]*Run ID:[[:space:]]*//p' "$seed_output" | head -n 1)"
 if [ -z "$run_id" ]; then
-  echo '[cross-strait-one-off] the seeder did not report a run ID' >&2
-  exit 75
+  reject_seed run_id_missing 75
 fi
-node --eval ${shellSingleQuote(HISTORY_POSTFLIGHT_PROGRAM)} "$run_id"
+if ! node --eval ${shellSingleQuote(HISTORY_POSTFLIGHT_PROGRAM)} "$run_id" >/dev/null 2>&1; then
+  reject_seed history_postflight_failed 1
+fi
+emit_seed_result accepted accepted
 `.trim();
 
 function requireIdentifier(value, label) {
@@ -329,10 +356,30 @@ function sanitizedPreflightFailure(stdout) {
     : '';
 }
 
+function sanitizedSeedResult(stdout) {
+  const line = stdout
+    .split(/\r?\n/)
+    .findLast((candidate) => candidate.startsWith(SEED_STATUS_MARKER));
+  if (!line) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(line.slice(SEED_STATUS_MARKER.length));
+  } catch {
+    return null;
+  }
+  if (parsed?.status === 'accepted' && parsed?.code === 'accepted') {
+    return { status: 'accepted' };
+  }
+  if (parsed?.status === 'rejected' && SEED_FAILURE_CODES.has(parsed?.code)) {
+    return { status: 'rejected', code: parsed.code };
+  }
+  return null;
+}
+
 export function createRailwayExecutor(spawnImpl = spawn, env = process.env) {
   let activeInterrupt = null;
   const execute = (args, { stage, timeoutMs }) => new Promise((resolve, reject) => {
-    const captureResponse = stage === 'create' || stage === 'preflight';
+    const captureResponse = stage === 'create' || stage === 'preflight' || stage === 'seed';
     const child = spawnImpl('railway', args, {
       env: createRailwayCliEnv(env),
       stdio: captureResponse ? ['ignore', 'pipe', 'ignore'] : 'ignore',
@@ -383,10 +430,17 @@ export function createRailwayExecutor(spawnImpl = spawn, env = process.env) {
       } else if (signal) {
         finish(new Error(`Railway ${stage} stopped by ${signal}; remote output suppressed`));
       } else if (code !== 0) {
-        const detail = stage === 'preflight' ? sanitizedPreflightFailure(stdout) : '';
+        const seedResult = stage === 'seed' ? sanitizedSeedResult(stdout) : null;
+        const detail = stage === 'preflight'
+          ? sanitizedPreflightFailure(stdout)
+          : seedResult?.status === 'rejected'
+            ? `; reason ${seedResult.code}`
+            : '';
         finish(new Error(`Railway ${stage} failed (exit ${code})${detail}; remote output suppressed`));
+      } else if (stage === 'seed' && sanitizedSeedResult(stdout)?.status !== 'accepted') {
+        finish(new Error('Railway seed returned no accepted status; remote output suppressed'));
       } else {
-        finish(null, captureResponse ? stdout : '');
+        finish(null, stage === 'create' || stage === 'preflight' ? stdout : '');
       }
     });
     timer = setTimeout(() => {
