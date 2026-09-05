@@ -19,6 +19,10 @@ import {
   EMBED_MAP_FRAME_PATH,
 } from '../shared/embed-map-frame';
 import { EMBED_LAYER_IDS, EMBED_KEYED_REFRESH_MS, EMBED_FREE_REFRESH_MS } from '../shared/embed-panels';
+import {
+  handleEmbedMapFrame,
+  type EmbedMapFrameHandlerDeps,
+} from '../api/embed/map-frame';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const NOW = 1_700_000_000_000;
@@ -331,7 +335,7 @@ describe('embed map frame', () => {
       // that a body may be shared must not depend on one.
       const classifyIdx = source.indexOf('classifyPublicEmbedFrameRequest(req.url');
       // The call site, not the import line, which sorts above everything.
-      const grantIdx = source.indexOf('verifyEmbedGrant(grantFromHeaders');
+      const grantIdx = source.indexOf('deps.verifyGrant(grantFromHeaders');
       assert.ok(classifyIdx !== -1, 'the handler must classify the public shape');
       assert.ok(grantIdx !== -1, 'the handler must verify the grant');
       assert.ok(classifyIdx < grantIdx, 'classification must precede credential reading');
@@ -363,9 +367,71 @@ describe('embed map frame', () => {
       assert.deepEqual([...new Set(reads)].sort(), ['layers']);
     });
 
-    it('rate limits the keyless path', () => {
+    it('rate limits both keyless and keyed paths', () => {
       assert.match(source, /checkEndpointRateLimit/);
-      assert.match(source, /tier === 'free'/);
+      assert.match(source, /principalUserId \? \{ principalUserId \} : \{\}/);
+    });
+
+    it('uses the verified account as the paid-frame rate-limit principal before source reads', async () => {
+      const calls: string[] = [];
+      let options: { principalUserId?: string } | undefined;
+      const deps: EmbedMapFrameHandlerDeps = {
+        getCorsHeaders: () => ({}),
+        verifyGrant: async () => ({
+          panel: 'map',
+          accountId: 'user_partner',
+          issuedAt: NOW,
+          expiresAt: NOW + 60_000,
+        }),
+        checkRateLimit: async (_req, _path, _cors, opts) => {
+          calls.push('limit');
+          options = opts;
+          return new Response('', { status: 503, headers: { 'Retry-After': '60' } });
+        },
+        composeFrame: async () => {
+          calls.push('compose');
+          return composeEmbedMapFrame(['conflicts'], 'keyed', sources(), NOW);
+        },
+      };
+
+      const response = await handleEmbedMapFrame(
+        new Request('https://www.worldmonitor.app/api/embed/map-frame?layers=conflicts', {
+          headers: { 'X-WorldMonitor-Grant': 'wmg_test' },
+        }),
+        deps,
+      );
+
+      assert.equal(response.status, 503);
+      assert.deepEqual(options, { principalUserId: 'user_partner' });
+      assert.deepEqual(calls, ['limit']);
+    });
+
+    it('ignores an attached grant on the canonical public URL and keeps the IP budget', async () => {
+      let grantReads = 0;
+      let options: { principalUserId?: string } | undefined;
+      const deps: EmbedMapFrameHandlerDeps = {
+        getCorsHeaders: () => ({}),
+        verifyGrant: async () => {
+          grantReads += 1;
+          return null;
+        },
+        checkRateLimit: async (_req, _path, _cors, opts) => {
+          options = opts;
+          return new Response('', { status: 429 });
+        },
+        composeFrame: async () => composeEmbedMapFrame(['conflicts'], 'free', sources(), NOW),
+      };
+
+      const response = await handleEmbedMapFrame(
+        new Request('https://www.worldmonitor.app/api/embed/map-frame?layers=conflicts&public=1', {
+          headers: { 'X-WorldMonitor-Grant': 'wmg_attached' },
+        }),
+        deps,
+      );
+
+      assert.equal(response.status, 429);
+      assert.equal(grantReads, 0);
+      assert.deepEqual(options, {});
     });
 
     it('accepts only the grant, never a wm_ key or a viewer cookie', () => {

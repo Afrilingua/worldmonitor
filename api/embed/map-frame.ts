@@ -26,10 +26,16 @@ export const config = { runtime: 'edge' };
 
 // @ts-expect-error — JS module, no declaration file
 import { getCorsHeaders } from '../_cors.js';
-import { checkEndpointRateLimit } from '../../server/_shared/rate-limit';
+import {
+  checkEndpointRateLimit,
+  type EndpointRateLimitOptions,
+} from '../../server/_shared/rate-limit';
 import { getCachedJson } from '../../server/_shared/redis';
 import { BOOTSTRAP_CACHE_KEYS } from '../../shared/bootstrap-tier-keys.js';
-import { verifyEmbedGrant } from '../../server/_shared/embed-grant';
+import {
+  verifyEmbedGrant,
+  type EmbedGrantClaims,
+} from '../../server/_shared/embed-grant';
 import {
   cacheControlForEmbedFrame,
   composeEmbedMapFrame,
@@ -40,7 +46,9 @@ import {
 import {
   classifyPublicEmbedFrameRequest,
   EMBED_MAP_FRAME_PATH,
+  type EmbedMapFrameResponse,
 } from '../../shared/embed-map-frame';
+import type { EmbedLayerId } from '../../shared/embed-panels';
 import { listAcledEvents } from '../../server/worldmonitor/conflict/v1/list-acled-events';
 import { listEarthquakes } from '../../server/worldmonitor/seismology/v1/list-earthquakes';
 import { listNaturalEvents } from '../../server/worldmonitor/natural/v1/list-natural-events';
@@ -97,8 +105,34 @@ function grantFromHeaders(headers: Headers): string | null {
   return grant || null;
 }
 
-export default async function handler(req: Request): Promise<Response> {
-  const cors = getCorsHeaders(req);
+export interface EmbedMapFrameHandlerDeps {
+  getCorsHeaders: (req: Request) => Record<string, string>;
+  verifyGrant: (grant: string | null) => Promise<EmbedGrantClaims | null>;
+  checkRateLimit: (
+    req: Request,
+    pathname: string,
+    cors: Record<string, string>,
+    options?: EndpointRateLimitOptions,
+  ) => Promise<Response | null>;
+  composeFrame: (
+    layers: readonly EmbedLayerId[],
+    tier: EmbedMapFrameTier,
+    req: Request,
+  ) => Promise<EmbedMapFrameResponse>;
+}
+
+const defaultDeps: EmbedMapFrameHandlerDeps = {
+  getCorsHeaders,
+  verifyGrant: verifyEmbedGrant,
+  checkRateLimit: checkEndpointRateLimit,
+  composeFrame: (layers, tier, req) => composeEmbedMapFrame(layers, tier, buildSources(req)),
+};
+
+export async function handleEmbedMapFrame(
+  req: Request,
+  deps: EmbedMapFrameHandlerDeps = defaultDeps,
+): Promise<Response> {
+  const cors = deps.getCorsHeaders(req);
 
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: cors });
@@ -115,26 +149,29 @@ export default async function handler(req: Request): Promise<Response> {
   const sharedLayers = classifyPublicEmbedFrameRequest(req.url, req.method);
 
   let tier: EmbedMapFrameTier = 'free';
+  let principalUserId: string | undefined;
   if (sharedLayers === null) {
-    const claims = await verifyEmbedGrant(grantFromHeaders(req.headers));
+    const claims = await deps.verifyGrant(grantFromHeaders(req.headers));
     // An absent or expired grant is not an error: it drops to the free tier,
     // which is what the frame renders while it re-mints. A grant minted for a
     // different panel does not unlock this one.
-    if (claims && claims.panel === 'map') tier = 'keyed';
+    if (claims && claims.panel === 'map') {
+      tier = 'keyed';
+      principalUserId = claims.accountId;
+    }
   }
 
-  // Per-IP budget on the keyless path only. A keyed frame polls on a
-  // grant-scoped cadence and shares an egress IP with every other viewer of
-  // the same partner page, so metering it per IP would throttle the customer
-  // rather than an abuser.
-  if (tier === 'free') {
-    const limited = await checkEndpointRateLimit(req, EMBED_MAP_FRAME_PATH, cors);
-    if (limited) return limited;
-  }
+  const limited = await deps.checkRateLimit(
+    req,
+    EMBED_MAP_FRAME_PATH,
+    cors,
+    principalUserId ? { principalUserId } : {},
+  );
+  if (limited) return limited;
 
   const url = new URL(req.url);
   const layers = sharedLayers ?? parseRequestedLayers(url.searchParams.get('layers'));
-  const frame = await composeEmbedMapFrame(layers, tier, buildSources(req));
+  const frame = await deps.composeFrame(layers, tier, req);
 
   const headers: Record<string, string> = {
     ...cors,
@@ -148,4 +185,8 @@ export default async function handler(req: Request): Promise<Response> {
   if (sharedLayers === null) headers.Vary = 'X-WorldMonitor-Grant';
 
   return new Response(JSON.stringify(frame), { status: 200, headers });
+}
+
+export default function handler(req: Request): Promise<Response> {
+  return handleEmbedMapFrame(req);
 }
