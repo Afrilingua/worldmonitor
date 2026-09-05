@@ -5,12 +5,19 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  cacheControlForEmbedFrame,
   composeEmbedMapFrame,
   entitledLayersForTier,
   parseRequestedLayers,
   refreshMsForTier,
   type EmbedMapFrameSources,
 } from '../server/_shared/embed-map-frame';
+import {
+  buildPublicEmbedFrameSearch,
+  canonicalizeEmbedLayers,
+  classifyPublicEmbedFrameRequest,
+  EMBED_MAP_FRAME_PATH,
+} from '../shared/embed-map-frame';
 import { EMBED_LAYER_IDS, EMBED_KEYED_REFRESH_MS, EMBED_FREE_REFRESH_MS } from '../shared/embed-panels';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -207,27 +214,140 @@ describe('embed map frame', () => {
     });
   });
 
+  describe('shared-cache contract', () => {
+    const url = (search: string) => `https://www.worldmonitor.app${EMBED_MAP_FRAME_PATH}${search}`;
+
+    it('accepts the canonical free shape and returns its layers', () => {
+      assert.deepEqual(
+        classifyPublicEmbedFrameRequest(url('?layers=conflicts,earthquakes,weather&public=1')),
+        ['conflicts', 'earthquakes', 'weather'],
+      );
+      assert.deepEqual(
+        classifyPublicEmbedFrameRequest(url('?layers=conflicts&public=1')),
+        ['conflicts'],
+      );
+    });
+
+    it('bounds the shared key space to the free tier’s seven non-empty subsets', () => {
+      const free = ['conflicts', 'earthquakes', 'weather'] as const;
+      const accepted = new Set<string>();
+      for (let mask = 1; mask < 8; mask++) {
+        const subset = free.filter((_, i) => (mask >> i) & 1);
+        const search = buildPublicEmbedFrameSearch(subset);
+        assert.ok(classifyPublicEmbedFrameRequest(url(`?${search}`)), `${search} must be cacheable`);
+        accepted.add(search);
+      }
+      assert.equal(accepted.size, 7);
+    });
+
+    it('rejects every near-miss rather than widening the key space', () => {
+      const rejected = [
+        // Reordered — a second spelling of the same set would double the entries.
+        '?layers=weather,conflicts&public=1',
+        // Parameter order swapped.
+        '?public=1&layers=conflicts',
+        // Percent-encoded separator: a re-serialised URLSearchParams compare
+        // would normalise this into the accepted form.
+        '?layers=conflicts%2Cweather&public=1',
+        // Duplicated ids and duplicated params.
+        '?layers=conflicts,conflicts&public=1',
+        '?layers=conflicts&layers=weather&public=1',
+        '?layers=conflicts&public=1&public=1',
+        // A paid layer must never reach a shared entry.
+        '?layers=conflicts,protests&public=1',
+        '?layers=cables&public=1',
+        // Extra, empty, and wrong-valued parameters.
+        '?layers=conflicts&public=1&bbox=1,2,3,4',
+        '?layers=&public=1',
+        '?layers=conflicts&public=true',
+        '?public=1',
+        '?layers=conflicts',
+        '',
+        // The Vercel filesystem router's `?rpc=` echo does not reach this
+        // static route, and if it ever did it must fail toward no-store.
+        '?layers=conflicts&public=1&rpc=map-frame',
+      ];
+      for (const search of rejected) {
+        assert.equal(
+          classifyPublicEmbedFrameRequest(url(search)),
+          null,
+          `${search || '(no query)'} must not be shared-cacheable`,
+        );
+      }
+    });
+
+    it('refuses a non-GET method and a foreign path', () => {
+      const good = '?layers=conflicts&public=1';
+      assert.ok(classifyPublicEmbedFrameRequest(url(good), 'HEAD'));
+      assert.equal(classifyPublicEmbedFrameRequest(url(good), 'POST'), null);
+      assert.equal(
+        classifyPublicEmbedFrameRequest(`https://www.worldmonitor.app/api/bootstrap${good}`),
+        null,
+      );
+    });
+
+    it('builds only URLs it will itself accept', () => {
+      // Builder and validator are the pairing that keeps an emitted URL and a
+      // cacheable URL from drifting apart.
+      const search = buildPublicEmbedFrameSearch(['weather', 'conflicts']);
+      assert.equal(search, 'layers=conflicts,weather&public=1');
+      assert.deepEqual(classifyPublicEmbedFrameRequest(url(`?${search}`)), ['conflicts', 'weather']);
+      assert.throws(() => buildPublicEmbedFrameSearch([]));
+      assert.throws(() => buildPublicEmbedFrameSearch(['protests']));
+    });
+
+    it('canonicalises to registry order and drops duplicates', () => {
+      assert.deepEqual(
+        canonicalizeEmbedLayers(['weather', 'conflicts', 'weather', 'earthquakes']),
+        ['conflicts', 'earthquakes', 'weather'],
+      );
+    });
+
+    it('never lets a non-public response carry a shared-cacheable directive', () => {
+      const keyed = cacheControlForEmbedFrame(false);
+      assert.equal(keyed, 'private, no-store');
+      for (const directive of ['public', 's-maxage', 'stale-while-revalidate', 'max-age=']) {
+        assert.equal(
+          keyed.includes(directive),
+          false,
+          `keyed Cache-Control must not contain ${directive}`,
+        );
+      }
+    });
+
+    it('gives the exact public shape a real shared lifetime', () => {
+      const shared = cacheControlForEmbedFrame(true);
+      assert.match(shared, /(^|[\s,])public([\s,]|$)/);
+      assert.match(shared, new RegExp(`s-maxage=${Math.floor(EMBED_FREE_REFRESH_MS / 1000)}\\b`));
+      assert.match(shared, /stale-while-revalidate=\d+/);
+    });
+  });
+
   describe('edge handler', () => {
     const source = readFileSync(resolve(__dirname, '../api/embed/map-frame.ts'), 'utf-8');
 
-    it('selects the tier from the URL marker, not from a header alone', () => {
-      // A CDN hit happens before the function sees a header, so the public URL
-      // must mean one thing for every caller.
-      assert.match(source, /searchParams\.get\('public'\) === '1'/);
-      assert.match(source, /verifyEmbedGrant/);
+    it('classifies the shared shape from the URL before reading any credential', () => {
+      // A CDN hit happens before the function sees a header, so the decision
+      // that a body may be shared must not depend on one.
+      const classifyIdx = source.indexOf('classifyPublicEmbedFrameRequest(req.url');
+      // The call site, not the import line, which sorts above everything.
+      const grantIdx = source.indexOf('verifyEmbedGrant(grantFromHeaders');
+      assert.ok(classifyIdx !== -1, 'the handler must classify the public shape');
+      assert.ok(grantIdx !== -1, 'the handler must verify the grant');
+      assert.ok(classifyIdx < grantIdx, 'classification must precede credential reading');
       assert.match(source, /claims\.panel === 'map'/);
     });
 
-    it('gives the free tier a shared lifetime and the keyed tier a private one', () => {
-      assert.match(source, /public, max-age=60, s-maxage=/);
-      assert.match(source, /stale-while-revalidate/);
-      assert.match(source, /`private, max-age=/);
+    it('derives Cache-Control from the shared classification, never from the tier', () => {
+      // Tier and shareability are different questions: a keyless caller on a
+      // near-miss URL is still `free`, and must still be uncacheable.
+      assert.match(source, /cacheControlForEmbedFrame\(sharedLayers !== null\)/);
+      assert.equal(source.includes("tier === 'keyed' ?"), false);
+      assert.equal(source.includes('s-maxage'), false, 'the literal belongs in the shared helper');
     });
 
     it('varies on the grant only where the body actually depends on it', () => {
-      // The public URL never reads the header, so a Vary there would fragment
-      // a shared cache on something that cannot change the answer.
-      assert.match(source, /if \(tier === 'keyed'\) headers\.Vary = 'X-WorldMonitor-Grant'/);
+      assert.match(source, /if \(sharedLayers === null\) headers\.Vary = 'X-WorldMonitor-Grant'/);
     });
 
     it('accepts no knob other than layers', () => {
@@ -237,8 +357,10 @@ describe('embed map frame', () => {
         );
         assert.deepEqual(uses, [], `${forbidden} must not be read from the request`);
       }
+      // `public` is not read here at all — the shared classifier owns it, so
+      // the handler's only direct query read is the layer list.
       const reads = [...source.matchAll(/searchParams\.get\('([^']+)'\)/g)].map((m) => m[1]);
-      assert.deepEqual([...new Set(reads)].sort(), ['layers', 'public']);
+      assert.deepEqual([...new Set(reads)].sort(), ['layers']);
     });
 
     it('rate limits the keyless path', () => {

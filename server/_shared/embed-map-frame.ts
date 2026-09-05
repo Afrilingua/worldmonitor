@@ -71,6 +71,24 @@ export function entitledLayersForTier(tier: EmbedMapFrameTier): readonly EmbedLa
   return tier === 'free' ? free.layers : EMBED_LAYER_IDS;
 }
 
+/**
+ * The `Cache-Control` for a response.
+ *
+ * `shared` is granted ONLY to the exact public URL shape — the keyed tier gets
+ * `private, no-store` unconditionally, matching `api/embed/entitlement.ts`.
+ * There is no middle setting: #5386 is the incident where a body that was
+ * merely "not public" still landed in a warm shared entry and answered a
+ * different caller's request.
+ */
+export function cacheControlForEmbedFrame(shared: boolean): string {
+  if (!shared) return 'private, no-store';
+  const seconds = Math.floor(refreshMsForTier('free') / 1000);
+  // The free tier stops costing us anything only if the CDN can actually hold
+  // it; `stale-while-revalidate` keeps a wall display rendering through an
+  // origin blip.
+  return `public, max-age=60, s-maxage=${seconds}, stale-while-revalidate=600`;
+}
+
 export function refreshMsForTier(tier: EmbedMapFrameTier): number {
   const free = getEmbedPanelFreeTier('map');
   if (!free) throw new Error('map panel lost its free tier');

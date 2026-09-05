@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EmbedDataLoader, type EmbedMapSurface } from '@/embed/embed-data-loader';
-import type { EmbedGrant, EmbedGrantResult } from '@/embed/embed-fetch';
+import { fetchEmbedMapFrame, type EmbedGrant, type EmbedGrantResult } from '@/embed/embed-fetch';
+import { classifyPublicEmbedFrameRequest } from '../../shared/embed-map-frame';
 import {
   EMBED_FREE_REFRESH_MS,
   EMBED_KEYED_REFRESH_MS,
@@ -88,6 +89,56 @@ function protestEvent() {
     confidence: 'CONFIDENCE_LEVEL_HIGH',
   };
 }
+
+describe('embed map frame request', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  function captureUrl(): { urls: string[]; headers: Record<string, string>[] } {
+    const urls: string[] = [];
+    const headers: Record<string, string>[] = [];
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      urls.push(String(input));
+      headers.push((init?.headers ?? {}) as Record<string, string>);
+      return new Response(JSON.stringify(frame()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    return { urls, headers };
+  }
+
+  it('emits a keyless URL the edge will shared-cache', async () => {
+    // Builder and validator are the same module, so this proves the URL the
+    // client actually sends is the one that gets a shared entry — the failure
+    // mode is silent: a near-miss still renders, just never from cache.
+    const { urls, headers } = captureUrl();
+    await fetchEmbedMapFrame(['weather', 'conflicts'], null);
+
+    expect(urls[0]).toContain('?layers=conflicts,weather&public=1');
+    expect(classifyPublicEmbedFrameRequest(urls[0] as string)).toEqual(['conflicts', 'weather']);
+    expect(headers[0]).not.toHaveProperty('X-WorldMonitor-Grant');
+  });
+
+  it('drops paid layers from the keyless URL instead of fragmenting the key space', async () => {
+    const { urls } = captureUrl();
+    await fetchEmbedMapFrame(['conflicts', 'protests', 'cables'], null);
+
+    expect(urls[0]).toContain('?layers=conflicts&public=1');
+    expect(classifyPublicEmbedFrameRequest(urls[0] as string)).toEqual(['conflicts']);
+  });
+
+  it('sends the grant on a URL that can never be shared-cached', async () => {
+    const { urls, headers } = captureUrl();
+    await fetchEmbedMapFrame(['conflicts', 'protests'], { token: 'wmg_x', expiresAt: NOW });
+
+    expect(headers[0]).toMatchObject({ 'X-WorldMonitor-Grant': 'wmg_x' });
+    expect(urls[0]).not.toContain('public=1');
+    expect(
+      classifyPublicEmbedFrameRequest(urls[0] as string),
+      'a credentialed URL must never match the shared shape',
+    ).toBeNull();
+  });
+});
 
 describe('embed data loader', () => {
   it('renders the free tier from one request and marks its layers ready', async () => {

@@ -1,5 +1,10 @@
-import type { EmbedLayerId, EmbedPanelId } from '../../shared/embed-panels';
-import type { EmbedMapFrameResponse } from '../../shared/embed-map-frame';
+import { getEmbedPanelFreeTier, type EmbedLayerId, type EmbedPanelId } from '../../shared/embed-panels';
+import {
+  buildPublicEmbedFrameSearch,
+  canonicalizeEmbedLayers,
+  EMBED_MAP_FRAME_PATH,
+  type EmbedMapFrameResponse,
+} from '../../shared/embed-map-frame';
 
 export interface EmbedGrant {
   token: string;
@@ -126,25 +131,58 @@ export function isEmbedGrantExpiring(grant: EmbedGrant, now = Date.now()): boole
 /**
  * Fetch the composed map frame.
  *
- * With no grant the request carries the `public=1` marker, which is what makes
- * the response shared-cacheable — a header cannot do that job, because a CDN
- * hit is decided before the origin sees one.
+ * Keyless requests are built through `buildPublicEmbedFrameSearch`, the same
+ * module the edge validates against, so the URL this client emits is exactly
+ * the one that may be shared-cached. A header could not do that job: a CDN hit
+ * is decided before the origin ever sees one (#5386).
+ *
+ * A keyless request for a layer outside the free tier has no cacheable shape,
+ * so it falls through to the uncached URL and the edge answers `not-entitled`
+ * for that layer — correct, just not shared.
  */
 export async function fetchEmbedMapFrame(
   layerIds: readonly EmbedLayerId[],
   grant: EmbedGrant | null,
 ): Promise<EmbedMapFrameResponse> {
-  const url = new URL('/api/embed/map-frame', window.location.origin);
-  url.searchParams.set('layers', [...new Set(layerIds)].join(','));
+  const origin = window.location.origin;
   const headers: Record<string, string> = { Accept: 'application/json' };
-  if (grant) headers['X-WorldMonitor-Grant'] = grant.token;
-  else url.searchParams.set('public', '1');
 
-  const resp = await globalThis.fetch(url.toString(), {
+  let target: string;
+  if (grant) {
+    headers['X-WorldMonitor-Grant'] = grant.token;
+    const url = new URL(EMBED_MAP_FRAME_PATH, origin);
+    url.searchParams.set('layers', canonicalizeEmbedLayers(layerIds).join(','));
+    target = url.toString();
+  } else {
+    target = `${origin}${EMBED_MAP_FRAME_PATH}?${publicFrameSearch(layerIds)}`;
+  }
+
+  const resp = await globalThis.fetch(target, {
     method: 'GET',
     headers,
     credentials: 'omit',
   });
   if (!resp.ok) throw new Error(`Embed map frame request failed: ${resp.status}`);
   return await resp.json() as EmbedMapFrameResponse;
+}
+
+/**
+ * The cacheable query for the free layers among `layerIds`, falling back to
+ * the plain uncacheable query when none qualify.
+ *
+ * Paid layers are dropped from the keyless URL rather than carried into it:
+ * a keyless caller cannot receive them either way, and naming them would
+ * multiply the shared key space past its seven free subsets. The frame marks
+ * them un-ready from their absence in the response, which is the same outcome
+ * an explicit `not-entitled` would produce.
+ */
+function publicFrameSearch(layerIds: readonly EmbedLayerId[]): string {
+  const free = getEmbedPanelFreeTier('map');
+  const eligible = free
+    ? canonicalizeEmbedLayers(layerIds).filter((id) => free.layers.includes(id))
+    : [];
+  if (eligible.length === 0) {
+    return `layers=${canonicalizeEmbedLayers(layerIds).join(',')}`;
+  }
+  return buildPublicEmbedFrameSearch(eligible);
 }

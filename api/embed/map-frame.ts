@@ -6,19 +6,20 @@
  * radius equal to the set of paths that accept it, so there is one path and it
  * accepts one parameter.
  *
- * Two tiers, and the URL — not a header — decides which:
+ * The URL — never a header — decides what a shared cache may hold, because a
+ * CDN hit is answered before this function sees a header. That is #5386:
  *
- *   `?public=1`   keyless. Three layers, hourly, shared-cacheable, per-IP
- *                 rate limited. Attached credentials are IGNORED on this URL,
- *                 because a CDN hit happens before this function sees them and
- *                 a cached body must mean the same thing for every caller.
- *                 Same marker convention as the public bootstrap read (#5386).
- *   no marker     keyed. Requires a valid `wmg_` grant for the map panel;
- *                 all fourteen layers at the ten-minute cadence, and the
- *                 response is `private` so no shared cache can hold it.
+ *   exact public shape   `layers=<canonical free subset>&public=1`, and
+ *                        nothing else. Keyless, hourly, shared-cacheable.
+ *                        Attached credentials are IGNORED here, so one cached
+ *                        body means the same thing for every caller.
+ *   everything else      served `private, no-store`. A valid map-scoped `wmg_`
+ *                        grant unlocks all fourteen layers at ten minutes; no
+ *                        grant still renders the free tier, just uncached.
  *
- * The keyless tier is a deliberate growth surface, not a degraded error state:
- * it must keep working with no credential at all.
+ * So a near-miss URL degrades to "correct but uncached" rather than to a
+ * shared entry that could answer the wrong caller. The keyless tier is a
+ * deliberate growth surface and must keep working with no credential at all.
  */
 
 export const config = { runtime: 'edge' };
@@ -30,18 +31,21 @@ import { getCachedJson } from '../../server/_shared/redis';
 import { BOOTSTRAP_CACHE_KEYS } from '../../shared/bootstrap-tier-keys.js';
 import { verifyEmbedGrant } from '../../server/_shared/embed-grant';
 import {
+  cacheControlForEmbedFrame,
   composeEmbedMapFrame,
   parseRequestedLayers,
-  refreshMsForTier,
   type EmbedMapFrameSources,
   type EmbedMapFrameTier,
 } from '../../server/_shared/embed-map-frame';
+import {
+  classifyPublicEmbedFrameRequest,
+  EMBED_MAP_FRAME_PATH,
+} from '../../shared/embed-map-frame';
 import { listAcledEvents } from '../../server/worldmonitor/conflict/v1/list-acled-events';
 import { listEarthquakes } from '../../server/worldmonitor/seismology/v1/list-earthquakes';
 import { listNaturalEvents } from '../../server/worldmonitor/natural/v1/list-natural-events';
 import { listUnrestEvents } from '../../server/worldmonitor/unrest/v1/list-unrest-events';
 
-const MAP_FRAME_PATH = '/api/embed/map-frame';
 const WEATHER_CACHE_KEY = BOOTSTRAP_CACHE_KEYS.weatherAlerts;
 
 /**
@@ -106,11 +110,12 @@ export default async function handler(req: Request): Promise<Response> {
     });
   }
 
-  const url = new URL(req.url);
-  const isPublicUrl = url.searchParams.get('public') === '1';
+  // Classify BEFORE reading any credential. This is the only branch that may
+  // produce a shared-cacheable body, and it is decided purely by the URL.
+  const sharedLayers = classifyPublicEmbedFrameRequest(req.url, req.method);
 
   let tier: EmbedMapFrameTier = 'free';
-  if (!isPublicUrl) {
+  if (sharedLayers === null) {
     const claims = await verifyEmbedGrant(grantFromHeaders(req.headers));
     // An absent or expired grant is not an error: it drops to the free tier,
     // which is what the frame renders while it re-mints. A grant minted for a
@@ -123,34 +128,24 @@ export default async function handler(req: Request): Promise<Response> {
   // the same partner page, so metering it per IP would throttle the customer
   // rather than an abuser.
   if (tier === 'free') {
-    const limited = await checkEndpointRateLimit(req, MAP_FRAME_PATH, cors);
+    const limited = await checkEndpointRateLimit(req, EMBED_MAP_FRAME_PATH, cors);
     if (limited) return limited;
   }
 
-  const layers = parseRequestedLayers(url.searchParams.get('layers'));
+  const url = new URL(req.url);
+  const layers = sharedLayers ?? parseRequestedLayers(url.searchParams.get('layers'));
   const frame = await composeEmbedMapFrame(layers, tier, buildSources(req));
-
-  const cacheControl = tier === 'free'
-    // Shared-cacheable for the full hourly window, with a stale-serve grace so
-    // a wall display keeps rendering through an origin blip. These responses
-    // are `cf-cache-status: DYNAMIC` today precisely because nothing declared
-    // a shared lifetime.
-    ? `public, max-age=60, s-maxage=${Math.floor(refreshMsForTier('free') / 1000)}, stale-while-revalidate=600`
-    // Never shared: the URL without the marker is the one a credential rides,
-    // and a shared cache keyed on it would serve fourteen layers to a caller
-    // who presented nothing.
-    : `private, max-age=${Math.floor(refreshMsForTier('keyed') / 1000)}`;
 
   const headers: Record<string, string> = {
     ...cors,
     'Content-Type': 'application/json',
-    'Cache-Control': cacheControl,
+    'Cache-Control': cacheControlForEmbedFrame(sharedLayers !== null),
   };
-  // Only the keyed URL's body depends on the grant header. The public URL
-  // never reads it, so declaring a Vary there would fragment a shared cache on
-  // a header that cannot change the answer — the tier is in the cache key
-  // already, because it is in the URL.
-  if (tier === 'keyed') headers.Vary = 'X-WorldMonitor-Grant';
+  // Only the uncacheable branch reads the grant header, and only there can the
+  // body depend on it. Declaring Vary on the shared entry would fragment it on
+  // a header that cannot change the answer — the tier is already in the cache
+  // key, because it is in the URL.
+  if (sharedLayers === null) headers.Vary = 'X-WorldMonitor-Grant';
 
   return new Response(JSON.stringify(frame), { status: 200, headers });
 }
