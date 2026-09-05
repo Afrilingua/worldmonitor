@@ -1,13 +1,25 @@
 ---
 title: "Embed World Monitor Panels"
-description: "Embed allowlisted World Monitor panels in a partner product with a script tag or iframe. Live map is public; keyed panels check the embedding account's API key, not the page visitor."
+description: "Embed allowlisted World Monitor panels in a partner product with a script tag or iframe. The live map has a free keyless tier; keyed panels check the embedding account, not the page visitor."
 ---
 
 World Monitor exposes partner embeds at `/embed`. [WebMCP](/webmcp) is not an embedding mechanism—it registers tools so a browser agent can drive the top-level World Monitor site, while embed routes explicitly expose no WebMCP tools. Use `/embed` (or the loader below) to pull an allowlisted panel into another product.
 
 ## Copy-paste loader
 
-Partners should ship one script tag. The loader creates the iframe and posts the embedding account's API key after load. **Never put the API key in the iframe URL.**
+Partners should ship one script tag. The live map needs no credential at all:
+
+```html
+<script
+  src="https://www.worldmonitor.app/embed.js"
+  data-panel="map"
+  data-theme="dark"
+  data-height="420"
+  async
+></script>
+```
+
+Keyed panels add `data-key`, and the loader posts that key to the frame after load. **Never put a key in the iframe URL** — query-string keys are rejected.
 
 ```html
 <script
@@ -20,29 +32,36 @@ Partners should ship one script tag. The loader creates the iframe and posts the
 ></script>
 ```
 
-Replace `YOUR_WM_API_KEY` with a World Monitor user API key (`wm_…`) or enterprise key from the embedding account. Rotate that key independently of dashboard login. Query-string keys are rejected.
+<Warning>
+`data-key` sits in your page's public HTML, so treat it as published. Do not put a key there that can do more than embed: a World Monitor user API key (`wm_…`) unlocks your whole paid REST allowance, and an enterprise key bypasses entitlement checks entirely. Scoped embed keys (`wme_…`) exist for this — they authorise embedding and nothing else, and the live map's paid tier already uses them. Self-serve minting is not available yet; ask us for one rather than publishing a key with broader reach.
+</Warning>
 
-Public live map (no key):
+## Live map tiers
 
-```html
-<script
-  src="https://www.worldmonitor.app/embed.js"
-  data-panel="map"
-  data-theme="dark"
-  data-height="420"
-  async
-></script>
-```
+The map is the one panel that renders without a credential, and the keyless tier is a supported product surface, not a trial.
+
+| | Free (keyless) | Paid (embed key) |
+| --- | --- | --- |
+| Layers | `conflicts`, `earthquakes`, `weather` | all fourteen, including `protests` and the static infrastructure and market layers |
+| Refresh | hourly | every 10 minutes |
+| Credential | none | `wme_…` embed key on the embedding account |
+| Attribution | required | required |
+
+Both tiers read one endpoint, `GET /api/embed/map-frame`, and every embed carries a permanent attribution link back to World Monitor. A paid frame exchanges its `wme_` key for a short-lived grant at `POST /api/embed/session` once per session, so the key itself never rides the refresh loop. A frame whose key is missing, lapsed, or unreachable keeps rendering the free tier rather than going blank.
+
+Layers you request but are not entitled to are reported back as `not-entitled` and simply do not draw; the rest of the frame still renders.
 
 ## Allowlisted panels
 
 | `panel` | Label | Entitlement |
 | --- | --- | --- |
-| `map` (aliases: `live-map`, `live_map`, `livemap`) | Live Map | Public. No API key. Default when `panel` is omitted. |
-| `chokepoint-strip` (aliases: `chokepoints`, `chokepoint`, `chokepoint-monitor`) | Chokepoint Monitor | Embedding API key with API access. |
-| `fear-greed` (aliases: `feargreed`, `fear_greed`, `markets-fear-greed`) | Fear & Greed | Embedding API key with API access. |
+| `map` (aliases: `live-map`, `live_map`, `livemap`) | Live Map | Free tier needs no key; the full layer set needs an embed key. Default when `panel` is omitted. |
+| `chokepoint-strip` (aliases: `chokepoints`, `chokepoint`, `chokepoint-monitor`) | Chokepoint Monitor | Embedding key with embed access. No free tier. |
+| `fear-greed` (aliases: `feargreed`, `fear_greed`, `markets-fear-greed`) | Fear & Greed | Embedding key with embed access. No free tier. |
 
 Unknown `panel` values do not render. X / tweet-body panels are not embeddable: partners receive derived facts plus permalinks only, never post text.
+
+The two paid panels have not moved to `wme_` embed keys yet: `/api/embed/entitlement` still resolves a `wm_` user key or an enterprise key. The live map's paid tier is the one that takes `wme_` today. Until the migration lands, talk to us before publishing a key for a keyed panel.
 
 ## Iframe (live map)
 
@@ -66,7 +85,7 @@ Keyed panels can also use an iframe at `/embed?panel=fear-greed`, but the partne
 | Parameter | Example | Notes |
 | --- | --- | --- |
 | `panel` | `chokepoint-strip` | Allowlisted panel id. Default `map`. |
-| `layers` | `conflicts,earthquakes,weather` | Map only. Allow-listed public layers: `conflicts`, `earthquakes`, `protests`, `weather`, plus the documented static map layers. Unknown, premium, authenticated, or high-frequency layers are ignored. |
+| `layers` | `conflicts,earthquakes,weather` | Map only. Keyless: `conflicts`, `earthquakes`, `weather`. An embed key adds `protests` and the static infrastructure and market layers. Unknown ids are ignored; unentitled ids come back `not-entitled` and do not draw. |
 | `center` | `25.2,55.3` | Map only. Latitude and longitude, clamped to valid ranges. |
 | `zoom` | `4` | Map only. Clamped between `1` and `10`. |
 | `theme` | `dark` | `dark` or `light`. |
@@ -78,7 +97,7 @@ Loader `data-*` attributes:
 | Attribute | Example | Notes |
 | --- | --- | --- |
 | `data-panel` | `fear-greed` | Same allowlist as `?panel=`. |
-| `data-key` | `YOUR_WM_API_KEY` | Embedding account key. Omitted for the public map. |
+| `data-key` | `YOUR_WM_API_KEY` | Embed key for the embedding account. Omitted for the free live map. |
 | `data-theme` | `dark` | Passed through to the iframe. |
 | `data-height` | `360` | Iframe height in pixels, clamped 120–1200. |
 
@@ -88,7 +107,8 @@ Keyed panels check the **embedding account**, not the person viewing the host pa
 
 - The iframe fetches `/api/embed/entitlement?panel=` with `credentials: 'omit'` and `X-WorldMonitor-Key`.
 - Viewer cookies and anonymous `wms_` session tokens are ignored.
-- Enterprise keys in `WORLDMONITOR_VALID_KEYS` and user keys (`wm_`) whose owner has `features.apiAccess` are accepted.
+- A panel with a free tier answers `public` without reading the credential at all, so a lapsed key never costs you the free render.
+- For paid panels, enterprise keys in `WORLDMONITOR_VALID_KEYS` and keys whose owner has active `features.embedAccess` are accepted.
 - Use the dashboard **Embed** button to generate a snippet for the current public map view.
 
 Each embed includes a permanent attribution link back to World Monitor with source campaign parameters.
