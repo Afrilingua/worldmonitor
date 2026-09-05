@@ -1174,7 +1174,10 @@ canvas,
   width: min(720px, 100%);
   max-height: calc(100vh - 48px);
   display: grid;
-  grid-template-rows: auto minmax(180px, 320px) auto minmax(96px, auto) auto;
+  /* header, preview, then one row holding every snippet tier. Tiers are a
+     single grid child so adding the keyed one cannot shift the preview's
+     sizing row. */
+  grid-template-rows: auto minmax(180px, 320px) auto;
   gap: 14px;
   overflow: auto;
   border: 1px solid var(--border);
@@ -1256,9 +1259,55 @@ canvas,
   outline: none;
 }
 
+.embed-modal-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+}
+
+.embed-modal-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.embed-modal-tier + .embed-modal-tier {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.embed-tier-detail {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: calc(12px * var(--wm-panel-effective-scale, 1));
+  line-height: 1.5;
+}
+
 .embed-modal-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
+}
+
+.embed-manage-keys-btn {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: calc(12px * var(--wm-panel-effective-scale, 1));
+  font-weight: 600;
+}
+
+.embed-manage-keys-btn:hover,
+.embed-manage-keys-btn:focus-visible {
+  color: var(--text);
+  border-color: var(--accent);
+  outline: none;
 }
 
 .embed-copy-btn {
@@ -1288,7 +1337,7 @@ canvas,
 
   .embed-modal {
     max-height: calc(100vh - 24px);
-    grid-template-rows: auto minmax(160px, 260px) auto minmax(112px, auto) auto;
+    grid-template-rows: auto minmax(160px, 260px) auto;
     padding: 14px;
   }
 }

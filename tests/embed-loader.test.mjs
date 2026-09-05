@@ -19,6 +19,25 @@ describe('embed.js partner loader', () => {
     assert.match(loader, /YOUR_WM_API_KEY/);
   });
 
+  it('treats both documented placeholders as "no key"', () => {
+    // The docs shipped YOUR_WM_API_KEY before YOUR_WME_EMBED_KEY existed, so
+    // partners have unedited snippets carrying the old one. Either literal
+    // reaching postMessage would be a handshake with a placeholder string.
+    assert.match(loader, /key !== 'YOUR_WM_API_KEY'/);
+    assert.match(loader, /key !== 'YOUR_WME_EMBED_KEY'/);
+  });
+
+  it('forwards the map view to the iframe URL so a keyed embed is not stuck on defaults', () => {
+    assert.match(loader, /\['layers', 'center', 'zoom', 'variant'\]/);
+    assert.match(loader, /getAttribute\('data-' \+ name\)/);
+    assert.match(loader, /encodeURIComponent\(value\)/);
+    // The view attributes must be appended BEFORE src is assigned, or the
+    // iframe loads the default view and then never reloads.
+    const viewIdx = loader.indexOf("'layers', 'center', 'zoom', 'variant'");
+    const srcIdx = loader.indexOf('iframe.src = url');
+    assert.ok(viewIdx !== -1 && viewIdx < srcIdx, 'view params must be built before iframe.src');
+  });
+
   it('attaches handshake listeners before assigning iframe.src and retries the credential', () => {
     const loadIdx = loader.indexOf("iframe.addEventListener('load'");
     const readyIdx = loader.indexOf("data.type !== 'ready'");
