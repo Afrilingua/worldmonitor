@@ -246,6 +246,18 @@ describe('Settings -> Embeds tab gating', () => {
     expect(note).toContain('REST allowance');
   });
 
+  it('states both revocation windows rather than promising the shorter one', () => {
+    // A keyed panel presents the key on every read, so the 60s edge cache is
+    // the whole delay. A map frame already holds a 30-minute wmg_ grant, and
+    // revocation only stops the NEXT mint — saying "within a minute" flat
+    // would be a promise the grant TTL breaks.
+    internal.render(false);
+    const note = panel('embeds')?.querySelector('.embed-keys-note')?.textContent ?? '';
+
+    expect(note).toContain('within a minute');
+    expect(note).toContain('30 more minutes');
+  });
+
   it('says the key is shown once BEFORE anyone clicks create', () => {
     // The banner says it after the fact, which is too late to be a warning.
     internal.render(false);

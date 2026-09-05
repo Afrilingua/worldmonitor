@@ -131,6 +131,10 @@ export async function listEmbedKeys(): Promise<EmbedKeyInfo[]> {
  * no ownership-checked invalidation route for `embedKeys` yet, so a revoked key
  * keeps validating for at most the 60s `CACHE_TTL_SECONDS` in
  * `server/_shared/embed-key.ts`.
+ *
+ * A map frame is slower still: it already holds a `wmg_` grant good for up to
+ * `EMBED_GRANT_TTL_MS` (30 minutes), and revocation only stops the NEXT mint.
+ * The UI copy states both windows rather than promising one.
  */
 export async function revokeEmbedKey(keyId: string): Promise<void> {
   const userId = getCurrentClerkUser()?.id;
