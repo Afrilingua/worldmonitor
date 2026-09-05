@@ -469,12 +469,8 @@ const RPC_CACHE_TIER: Record<string, CacheTier> = {
 import { PREMIUM_RPC_PATHS } from '../src/shared/premium-paths';
 
 export const PUBLIC_NO_AUTH_RPC_PATHS = new Set<string>([
-  '/api/conflict/v1/list-acled-events',
-  '/api/natural/v1/list-natural-events',
   '/api/intelligence/v1/get-china-decision-signals',
   '/api/resilience/v1/get-runtime-manifest',
-  '/api/seismology/v1/list-earthquakes',
-  '/api/unrest/v1/list-unrest-events',
   // Lead-capture RPCs serve ANONYMOUS prospects by definition: the /pro
   // marketing page contact form and the waitlist/desktop signup both POST
   // without a wms_ session or API key (see pro-test/src/App.tsx onSubmit and
