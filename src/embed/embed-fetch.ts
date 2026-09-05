@@ -25,8 +25,24 @@ export type EmbedGrantResult =
   | { status: 'unavailable'; retryAfterMs: number };
 
 const DEFAULT_GRANT_RETRY_MS = 60_000;
+const DEFAULT_FRAME_RETRY_MS = 60_000;
+const MIN_FRAME_RETRY_MS = 1_000;
+const MAX_FRAME_RETRY_MS = 60_000;
 /** Re-mint slightly early so a poll never races the expiry. */
 const GRANT_RENEW_SKEW_MS = 60_000;
+
+export class EmbedMapFrameUnavailableError extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super('Embed map frame temporarily unavailable');
+    this.name = 'EmbedMapFrameUnavailableError';
+  }
+}
+
+function frameRetryAfterMs(response: Response): number {
+  const seconds = Number(response.headers.get('Retry-After'));
+  if (!Number.isFinite(seconds) || seconds <= 0) return DEFAULT_FRAME_RETRY_MS;
+  return Math.min(MAX_FRAME_RETRY_MS, Math.max(MIN_FRAME_RETRY_MS, seconds * 1_000));
+}
 
 export interface EmbedEntitlementResponse {
   allowed: boolean;
@@ -164,6 +180,9 @@ export async function fetchEmbedMapFrame(
     headers,
     credentials: 'omit',
   });
+  if (resp.status === 429 || resp.status >= 500) {
+    throw new EmbedMapFrameUnavailableError(frameRetryAfterMs(resp));
+  }
   if (!resp.ok) throw new Error(`Embed map frame request failed: ${resp.status}`);
   return await resp.json() as EmbedMapFrameResponse;
 }

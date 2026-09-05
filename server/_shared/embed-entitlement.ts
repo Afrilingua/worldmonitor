@@ -8,7 +8,8 @@ import {
   getEmbedPanelFreeTier,
   type EmbedPanelId,
 } from '../../shared/embed-panels';
-import { hasEmbedAccess } from '../../shared/embed-access';
+import { hasAccountEmbedAccess, hasEmbedAccess } from '../../shared/embed-access';
+import type { ClerkPlanLookupResult } from '../auth-session';
 import type { CachedEntitlements } from './entitlement-check';
 import { isUserApiKeyUnavailableError } from './user-api-key';
 import { isEmbedKeyUnavailableError } from './embed-key';
@@ -42,6 +43,7 @@ export interface EmbedEntitlementDeps {
   validateUserApiKey: (key: string) => Promise<{ userId: string } | null>;
   validateEmbedKey: (key: string) => Promise<{ userId: string } | null>;
   getEntitlements: (userId: string) => Promise<CachedEntitlements | null>;
+  getAccountPlan: (userId: string) => Promise<ClerkPlanLookupResult>;
   isEntitlementBackendConfigured: () => boolean;
 }
 
@@ -140,17 +142,18 @@ async function answerForAccount(
   deprecatedCredential?: 'user_api_key' | 'enterprise_key',
 ): Promise<EmbedEntitlementResult> {
   const entitlements = await deps.getEntitlements(accountId);
-  if (entitlements?.verificationUnavailable) {
-    return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
-  }
-  if (!entitlements) {
-    if (!deps.isEntitlementBackendConfigured()) {
-      return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
+  const now = Date.now();
+  if (!hasEmbedAccess(entitlements, now)) {
+    const accountPlan = await deps.getAccountPlan(accountId);
+    if (accountPlan === 'unavailable') {
+      return { status: 503, body: { allowed: false, error: 'account_verification_unavailable' } };
     }
-    return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
-  }
-  if (!hasEmbedAccess(entitlements, Date.now())) {
-    return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
+    if (!hasAccountEmbedAccess(accountPlan, entitlements, now)) {
+      if (entitlements?.verificationUnavailable || (!entitlements && !deps.isEntitlementBackendConfigured())) {
+        return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
+      }
+      return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
+    }
   }
   return {
     status: 200,

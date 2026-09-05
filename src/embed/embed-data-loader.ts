@@ -10,6 +10,7 @@ import { toSocialUnrestEvent } from '@/services/unrest';
 
 import { startSmartPollLoop, type SmartPollLoopHandle } from '@/services/smart-poll-loop';
 import {
+  EmbedMapFrameUnavailableError,
   fetchEmbedMapFrame,
   isEmbedGrantExpiring,
   type EmbedGrant,
@@ -82,6 +83,7 @@ export class EmbedDataLoader {
   private refreshMs = EMBED_FREE_REFRESH_MS;
   private grantRetryNotBefore = 0;
   private grantRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private frameRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private readonly fetchFrame: EmbedFrameFetcher;
   private readonly renewGrant: (() => Promise<EmbedGrantResult>) | null;
@@ -124,6 +126,7 @@ export class EmbedDataLoader {
     this.destroyed = true;
     this.stopLoop();
     if (this.grantRetryTimer !== null) clearTimeout(this.grantRetryTimer);
+    if (this.frameRetryTimer !== null) clearTimeout(this.frameRetryTimer);
   }
 
   /** Exchange the embedding key after a free-tier boot, retrying transient failures. */
@@ -150,6 +153,10 @@ export class EmbedDataLoader {
       const nextRefreshMs = frame.refreshMs > 0 ? frame.refreshMs : this.refreshMs;
       const cadenceChanged = nextRefreshMs !== this.refreshMs;
       this.refreshMs = nextRefreshMs;
+      if (this.frameRetryTimer !== null) {
+        clearTimeout(this.frameRetryTimer);
+        this.frameRetryTimer = null;
+      }
       this.applyFrame(frame);
       // A tier change (an upgrade, or a lapse dropping us back to free) moves
       // the cadence, and the running timer is still on the old one.
@@ -158,6 +165,9 @@ export class EmbedDataLoader {
       // A failed poll leaves the previous frame on screen — the map keeps
       // whatever it was already showing, and only the loading flag clears.
       console.warn('[embed] map frame request failed:', error);
+      if (error instanceof EmbedMapFrameUnavailableError) {
+        this.scheduleFrameRetry(error.retryAfterMs);
+      }
       for (const id of live) this.map.setLayerLoading(MAP_LAYER_BY_EMBED_ID[id], false);
       return;
     }
@@ -249,6 +259,14 @@ export class EmbedDataLoader {
     this.grantRetryTimer = setTimeout(() => {
       this.grantRetryTimer = null;
       void this.requestGrant();
+    }, retryAfterMs);
+  }
+
+  private scheduleFrameRetry(retryAfterMs: number): void {
+    if (this.frameRetryTimer !== null) clearTimeout(this.frameRetryTimer);
+    this.frameRetryTimer = setTimeout(() => {
+      this.frameRetryTimer = null;
+      if (!this.destroyed) void this.loadOnce();
     }, retryAfterMs);
   }
 

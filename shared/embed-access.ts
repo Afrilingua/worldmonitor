@@ -53,3 +53,11 @@ export function hasEmbedAccess(
     entitlement.validUntil >= now
   );
 }
+
+export function hasAccountEmbedAccess(
+  role: 'free' | 'pro' | undefined,
+  entitlement: EmbedAccessEntitlement | null | undefined,
+  now: number,
+): boolean {
+  return role === 'pro' || hasEmbedAccess(entitlement, now);
+}

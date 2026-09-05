@@ -16,6 +16,7 @@ function deps(overrides: Partial<EmbedEntitlementDeps> = {}): EmbedEntitlementDe
     validateUserApiKey: async () => null,
     validateEmbedKey: async () => null,
     getEntitlements: async () => null,
+    getAccountPlan: async () => 'free',
     isEntitlementBackendConfigured: () => true,
     ...overrides,
   };
@@ -80,6 +81,48 @@ describe('embed entitlement', () => {
     }));
     assert.equal(result.status, 200);
     assert.equal(result.body.accountId, 'user_pro');
+  });
+
+  it('accepts a Clerk-role PRO account without a Convex entitlement row', async () => {
+    const result = await evaluateEmbedEntitlement('fear-greed', 'wm_0123456789abcdef0123456789abcdef01234567', deps({
+      validateUserApiKey: async () => ({ userId: 'user_role_pro' }),
+      getEntitlements: async () => null,
+      getAccountPlan: async () => 'pro',
+    }));
+
+    assert.equal(result.status, 200);
+    assert.equal(result.body.accountId, 'user_role_pro');
+  });
+
+  it('lets current embed coverage win before verification markers', async () => {
+    let roleLookups = 0;
+    const result = await evaluateEmbedEntitlement('chokepoint-strip', 'wm_0123456789abcdef0123456789abcdef01234567', deps({
+      validateUserApiKey: async () => ({ userId: 'user_current_embed' }),
+      getEntitlements: async () => ({
+        planKey: 'pro_monthly',
+        features: { tier: 1, apiAccess: false, embedAccess: true, apiRateLimit: 0, maxDashboards: 1, prioritySupport: false, exportFormats: [] },
+        validUntil: Date.now() + 86_400_000,
+        verificationUnavailable: true,
+      }),
+      getAccountPlan: async () => {
+        roleLookups += 1;
+        return 'unavailable';
+      },
+    }));
+
+    assert.equal(result.status, 200);
+    assert.equal(roleLookups, 0);
+  });
+
+  it('returns 503 when Clerk role lookup is unavailable and Convex cannot prove access', async () => {
+    const result = await evaluateEmbedEntitlement('fear-greed', 'wm_0123456789abcdef0123456789abcdef01234567', deps({
+      validateUserApiKey: async () => ({ userId: 'user_unknown' }),
+      getEntitlements: async () => null,
+      getAccountPlan: async () => 'unavailable',
+    }));
+
+    assert.equal(result.status, 503);
+    assert.equal(result.body.error, 'account_verification_unavailable');
   });
 
   it('denies an apiAccess row that does not carry embedAccess', async () => {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { EmbedDataLoader, type EmbedMapSurface } from '@/embed/embed-data-loader';
 import {
+  EmbedMapFrameUnavailableError,
   fetchEmbedMapFrame,
   mintEmbedGrant,
   type EmbedGrant,
@@ -170,6 +171,17 @@ describe('embed map frame request', () => {
       retryAfterMs: 60_000,
     });
   });
+
+  it('surfaces a bounded retry delay for an unavailable map frame', async () => {
+    vi.stubGlobal('fetch', async () => new Response('', {
+      status: 503,
+      headers: { 'Retry-After': '3600' },
+    }));
+
+    await expect(fetchEmbedMapFrame(['conflicts'], grant(NOW + 30 * 60_000))).rejects.toMatchObject({
+      retryAfterMs: 60_000,
+    });
+  });
 });
 
 describe('embed data loader', () => {
@@ -294,6 +306,36 @@ describe('embed data loader', () => {
     expect(map.conflicts, 'no second render').toHaveLength(1);
     expect(map.ready.get('conflicts'), 'the layer stays marked ready').toBe(true);
     expect(map.loading[map.loading.length - 1], 'the loading flag still clears').toBe('conflicts:false');
+  });
+
+  it('keeps a paid frame and retries a retryable frame failure before the free cadence', async () => {
+    vi.useFakeTimers();
+    try {
+      const map = recordingMap();
+      let attempts = 0;
+      const loader = new EmbedDataLoader(map, ['conflicts'], {
+        fetchFrame: async () => {
+          attempts += 1;
+          if (attempts === 1) return frame({ tier: 'keyed', refreshMs: EMBED_KEYED_REFRESH_MS });
+          if (attempts === 2) throw new EmbedMapFrameUnavailableError(10_000);
+          return frame({ tier: 'keyed', refreshMs: EMBED_KEYED_REFRESH_MS });
+        },
+        now: () => NOW,
+      });
+
+      await loader.upgrade(grant(NOW + 30 * 60_000));
+      await loader.loadOnce();
+      expect(attempts).toBe(2);
+      expect(map.ready.get('conflicts')).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(attempts).toBe(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(attempts).toBe(3);
+      loader.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('upgrades in place: the grant reaches the next request and unlocks the paid layer', async () => {

@@ -547,10 +547,13 @@ async function _getEntitlementsImpl(userId: string): Promise<CachedEntitlements 
 
     if (cached && typeof cached === 'object') {
       const ent = cached as CachedEntitlements;
+      const hasCurrentEmbedAccessShape = typeof ent.features?.embedAccess === 'boolean';
       // Verification markers have their own short Redis TTL. Serve them even
       // though validUntil is expired so cooldown requests stop at Redis instead
-      // of repeating the Convex action/claim chain.
-      if (entitlementMarkerTtlSeconds(ent) !== null) return ent;
+      // of repeating the Convex action/claim chain. The cache-shape check must
+      // run first: a pre-embedAccess marker is still an authorization row, and
+      // serving it would bypass the canonical Convex merge below.
+      if (hasCurrentEmbedAccessShape && entitlementMarkerTtlSeconds(ent) !== null) return ent;
       // Only use cached data if it hasn't expired AND has the post-U10 shape.
       //
       // Legacy cache entries written before plan 2026-05-10-001 U10 lack the
@@ -585,6 +588,7 @@ async function _getEntitlementsImpl(userId: string): Promise<CachedEntitlements 
       if (
         ent.validUntil >= Date.now() &&
         typeof (ent.features as { mcpAccess?: boolean }).mcpAccess === 'boolean' &&
+        hasCurrentEmbedAccessShape &&
         ent.features.planLimits?.dashboardAiCallsPerDay !== undefined &&
         !legacySharedBudgetShape
       ) {
