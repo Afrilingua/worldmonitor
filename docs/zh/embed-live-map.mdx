@@ -25,7 +25,7 @@ World Monitor 在 `/embed` 提供合作方嵌入。[WebMCP](/zh/webmcp) 不是�
 <script
   src="https://www.worldmonitor.app/embed.js"
   data-panel="chokepoint-strip"
-  data-key="YOUR_WM_API_KEY"
+  data-key="YOUR_WME_EMBED_KEY"
   data-theme="dark"
   data-height="360"
   async
@@ -33,7 +33,9 @@ World Monitor 在 `/embed` 提供合作方嵌入。[WebMCP](/zh/webmcp) 不是�
 ```
 
 <Warning>
-`data-key` 位于你页面的公开 HTML 中，因此应当视为已经公开。不要在那里放置权限超出嵌入范围的密钥：World Monitor 用户 API 密钥（`wm_…`）会解锁你的全部付费 REST 额度，而企业密钥则完全绕过授权校验。作用域受限的嵌入密钥（`wme_…`）正是为此而设——它们只授权嵌入，实时地图的付费层级已经在使用。自助签发尚未上线；请联系我们获取，而不要发布权限更广的密钥。
+`data-key` 位于你页面的公开 HTML 中，因此应当视为已经公开。不要在那里放置权限超出嵌入范围的密钥：World Monitor 用户 API 密钥（`wm_…`）会解锁你的全部付费 REST 额度，而企业密钥则完全绕过授权校验。作用域受限的嵌入密钥（`wme_…`）正是为此而设——它们只授权嵌入，不授权其他任何能力。
+
+你可以自助签发：World Monitor 仪表盘 → **设置 → Embeds → Create Embed Key**。该标签页对所有付费套餐可见（它按嵌入权限而非 API 权限开放）。密钥只在创建时显示一次，之后无法找回，请当场复制；吊销会在一分钟内生效。
 </Warning>
 
 ## 实时地图层级
@@ -61,7 +63,7 @@ World Monitor 在 `/embed` 提供合作方嵌入。[WebMCP](/zh/webmcp) 不是�
 
 未知 `panel` 不会渲染。X / 推文正文面板不可嵌入：合作方只获得派生事实和永久链接，不会获得帖子正文。
 
-两个付费面板尚未迁移到 `wme_` 嵌入密钥：`/api/embed/entitlement` 目前仍然校验 `wm_` 用户密钥或企业密钥。今天只有实时地图的付费层级接受 `wme_`。在迁移完成之前，为需密钥的面板发布密钥前请先联系我们。
+上表中的每个面板现在都接受 `wme_` 嵌入密钥。为了不打断正在运行的集成，两个付费面板仍然接受 `wm_` 用户密钥和企业密钥，但它们在这里已被弃用：帧会向你的浏览器控制台输出迁移警告，而且这两种凭据的权限都远超嵌入所需。请改用「设置 → Embeds」中签发的嵌入密钥。目前没有设定下线日期。
 
 ## iframe（实时地图）
 
@@ -97,9 +99,13 @@ World Monitor 在 `/embed` 提供合作方嵌入。[WebMCP](/zh/webmcp) 不是�
 | 属性 | 示例 | 说明 |
 | --- | --- | --- |
 | `data-panel` | `fear-greed` | 与 `?panel=` 相同的允许列表。 |
-| `data-key` | `YOUR_WM_API_KEY` | 嵌入账户的嵌入密钥。免费实时地图可省略。 |
+| `data-key` | `wme_…` | 嵌入账户的嵌入密钥。免费实时地图可省略。字面量 `YOUR_WME_EMBED_KEY` 与 `YOUR_WM_API_KEY` 都会被视为「没有密钥」，因此未经编辑的代码片段会渲染免费层级，而不是拿占位符去做凭据握手。 |
 | `data-theme` | `dark` | 传到 iframe。 |
 | `data-height` | `360` | iframe 高度（像素），限制在 120–1200。 |
+| `data-layers` | `conflicts,protests,cables` | 仅地图。转发到 `?layers=`。 |
+| `data-center` | `25.2,55.3` | 仅地图。转发到 `?center=`。 |
+| `data-zoom` | `4` | 仅地图。转发到 `?zoom=`。 |
+| `data-variant` | `finance` | 转发到 `?variant=`。 |
 
 ## 授权
 
@@ -108,7 +114,8 @@ World Monitor 在 `/embed` 提供合作方嵌入。[WebMCP](/zh/webmcp) 不是�
 - iframe 以 `credentials: 'omit'` 和 `X-WorldMonitor-Key` 请求 `/api/embed/entitlement?panel=`。
 - 访客 cookie 和匿名 `wms_` 会话令牌会被忽略。
 - 具有免费层级的面板会直接返回 `public`，完全不读取凭据，因此密钥过期也不会让你失去免费渲染。
-- 对付费面板，`WORLDMONITOR_VALID_KEYS` 中的企业密钥，以及所有者具有有效 `features.embedAccess` 的密钥可通过。
-- 使用仪表盘的 **Embed（嵌入）** 按钮，即可为当前的公开地图视图生成代码片段。
+- 对付费面板，所有者具有有效 `features.embedAccess` 的嵌入密钥可通过；已弃用的 `wm_` 用户密钥和企业密钥同样可通过。
+- 两个付费面板会用同一个密钥读取各自的数据端点。嵌入密钥只授权这些端点，不授权 REST API 的任何其他部分。
+- 使用地图上的 **Embed（嵌入）** 按钮即可同时生成两段代码：免费 iframe，以及——若你的套餐包含嵌入权限——针对当前视图的带密钥加载器。
 
 每个嵌入都包含一个指向 World Monitor 的永久归属链接，并带有来源活动参数。
