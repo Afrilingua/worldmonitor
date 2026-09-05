@@ -72,7 +72,7 @@ for (const f of ['src/config/panels.ts','convex/constants.ts','src/services/gate
 
 
 // ------------------------------------------------------- code-site gates
-const PAT = "features\\.tier\\s*[<>=]|tier\\s*[<>]=?\\s*1|!hasPremiumAccess\\(\\)|features\\.apiAccess|features\\.mcpAccess|features\\.dataExport|requiresPremium|isCallerPremium\\(|has(?:Account)?EmbedAccess\\(|resolvePremiumCallerIdentity\\(|!isProUser\\(\\)";
+const PAT = "features\\.tier\\s*[<>=]|tier\\s*[<>]=?\\s*1|!hasPremiumAccess\\(\\)|features\\.apiAccess|features\\.mcpAccess|features\\.dataExport|requiresPremium|isCallerPremium\\(|has(Account)?EmbedAccess\\(|resolvePremiumCallerIdentity\\(|!isProUser\\(\\)";
 const out = execSync(`grep -rnE "${PAT}" --include="*.ts" --include="*.js" src api convex server 2>/dev/null || true`, { encoding: 'utf8', maxBuffer: 1 << 26 });
 const sites = [];
 for (const ln of out.split('\n')) {
