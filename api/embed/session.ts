@@ -20,6 +20,7 @@ import { getEntitlements, isEntitlementBackendConfigured } from '../../server/_s
 import { validateEmbedKey } from '../../server/_shared/embed-key';
 import { mintEmbedGrant } from '../../server/_shared/embed-grant';
 import { evaluateEmbedSession } from '../../server/_shared/embed-session';
+import { lookupClerkPlan } from '../../server/auth-session';
 
 const SESSION_PATH = '/api/embed/session';
 
@@ -61,6 +62,7 @@ export default async function handler(req: Request): Promise<Response> {
     {
       validateEmbedKey,
       getEntitlements,
+      getAccountPlan: lookupClerkPlan,
       isEntitlementBackendConfigured,
       mintGrant: (claims) => mintEmbedGrant(claims),
       now: () => Date.now(),

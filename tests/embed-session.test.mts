@@ -33,6 +33,7 @@ function deps(overrides: Partial<EmbedSessionDeps> = {}): EmbedSessionDeps {
   return {
     validateEmbedKey: async () => ({ userId: 'user_partner' }),
     getEntitlements: async () => entitled(),
+    getAccountPlan: async () => 'free',
     isEntitlementBackendConfigured: () => true,
     mintGrant: async ({ panel, accountId }) => ({
       token: `wmg_test.${panel}.${accountId}`,
@@ -53,6 +54,42 @@ describe('embed grant exchange', () => {
     assert.equal(result.body.expiresAt, NOW + 30 * 60 * 1000);
     assert.equal(result.body.accountId, 'user_partner');
     assert.equal(result.retryAfterSeconds, undefined);
+  });
+
+  it('mints for a Clerk-role PRO account without a Convex entitlement row', async () => {
+    const result = await evaluateEmbedSession('map', EMBED_KEY, deps({
+      getEntitlements: async () => null,
+      getAccountPlan: async () => 'pro',
+    }));
+
+    assert.equal(result.status, 200);
+    assert.equal(result.body.grant, 'wmg_test.map.user_partner');
+  });
+
+  it('lets current embed coverage win before stronger-plan billing markers', async () => {
+    let roleLookups = 0;
+    for (const billingStatus of ['subscription_lapsed', 'renewal_verification_pending'] as const) {
+      const result = await evaluateEmbedSession('map', EMBED_KEY, deps({
+        getEntitlements: async () => entitled({ billingStatus }),
+        getAccountPlan: async () => {
+          roleLookups += 1;
+          return 'unavailable';
+        },
+      }));
+      assert.equal(result.status, 200, billingStatus);
+    }
+    assert.equal(roleLookups, 0);
+  });
+
+  it('returns retryable 503 when neither account authority can be verified', async () => {
+    const result = await evaluateEmbedSession('map', EMBED_KEY, deps({
+      getEntitlements: async () => null,
+      getAccountPlan: async () => 'unavailable',
+    }));
+
+    assert.equal(result.status, 503);
+    assert.equal(result.body.error, 'account_verification_unavailable');
+    assert.ok((result.retryAfterSeconds ?? 0) > 0);
   });
 
   it('scopes the grant to the requested panel', async () => {
@@ -147,7 +184,10 @@ describe('embed grant exchange', () => {
   describe('lapse handling', () => {
     it('treats subscription_lapsed as terminal so the frame can drop to the free tier', async () => {
       const result = await evaluateEmbedSession('map', EMBED_KEY, deps({
-        getEntitlements: async () => entitled({ billingStatus: 'subscription_lapsed' }),
+        getEntitlements: async () => entitled({
+          billingStatus: 'subscription_lapsed',
+          validUntil: NOW - 1,
+        }),
       }));
       assert.equal(result.status, 403);
       assert.equal(result.body.error, 'subscription_lapsed');
@@ -159,6 +199,7 @@ describe('embed grant exchange', () => {
         getEntitlements: async () => entitled({
           billingStatus: 'renewal_verification_pending',
           retryAfterSeconds: 30,
+          validUntil: NOW - 1,
         }),
       }));
       assert.equal(result.status, 503);
@@ -171,6 +212,7 @@ describe('embed grant exchange', () => {
         getEntitlements: async () => entitled({
           billingStatus: 'renewal_verification_pending',
           retryAfterSeconds: 3_600,
+          validUntil: NOW - 1,
         }),
       }));
       assert.equal(result.retryAfterSeconds, 60);
@@ -181,6 +223,7 @@ describe('embed grant exchange', () => {
         getEntitlements: async () => entitled({
           verificationUnavailable: true,
           retryAfterSeconds: 30,
+          validUntil: NOW - 1,
         }),
       }));
       assert.equal(result.status, 503);
@@ -212,10 +255,16 @@ describe('embed grant exchange', () => {
     it('every 503 carries a Retry-After budget', async () => {
       const retryables = await Promise.all([
         evaluateEmbedSession('map', EMBED_KEY, deps({
-          getEntitlements: async () => entitled({ billingStatus: 'renewal_verification_pending' }),
+          getEntitlements: async () => entitled({
+            billingStatus: 'renewal_verification_pending',
+            validUntil: NOW - 1,
+          }),
         })),
         evaluateEmbedSession('map', EMBED_KEY, deps({
-          getEntitlements: async () => entitled({ verificationUnavailable: true }),
+          getEntitlements: async () => entitled({
+            verificationUnavailable: true,
+            validUntil: NOW - 1,
+          }),
         })),
         evaluateEmbedSession('map', EMBED_KEY, deps({
           getEntitlements: async () => null,
@@ -238,10 +287,16 @@ describe('embed grant exchange', () => {
         evaluateEmbedSession('map', EMBED_KEY, deps({ validateEmbedKey: async () => null })),
         evaluateEmbedSession('map', EMBED_KEY, deps({ getEntitlements: async () => null })),
         evaluateEmbedSession('map', EMBED_KEY, deps({
-          getEntitlements: async () => entitled({ billingStatus: 'subscription_lapsed' }),
+          getEntitlements: async () => entitled({
+            billingStatus: 'subscription_lapsed',
+            validUntil: NOW - 1,
+          }),
         })),
         evaluateEmbedSession('map', EMBED_KEY, deps({
-          getEntitlements: async () => entitled({ verificationUnavailable: true }),
+          getEntitlements: async () => entitled({
+            verificationUnavailable: true,
+            validUntil: NOW - 1,
+          }),
         })),
       ]);
       for (const result of denials) {

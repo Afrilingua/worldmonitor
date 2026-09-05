@@ -8,7 +8,8 @@ import {
   getEmbedPanelFreeTier,
   type EmbedPanelId,
 } from '../../shared/embed-panels';
-import { hasEmbedAccess } from '../../shared/embed-access';
+import { hasAccountEmbedAccess, hasEmbedAccess } from '../../shared/embed-access';
+import type { ClerkPlanLookupResult } from '../auth-session';
 import type { CachedEntitlements } from './entitlement-check';
 import { isUserApiKeyUnavailableError } from './user-api-key';
 
@@ -30,6 +31,7 @@ export interface EmbedEntitlementDeps {
   timingSafeIncludes: (candidate: string, keys: readonly string[]) => Promise<boolean>;
   validateUserApiKey: (key: string) => Promise<{ userId: string } | null>;
   getEntitlements: (userId: string) => Promise<CachedEntitlements | null>;
+  getAccountPlan: (userId: string) => Promise<ClerkPlanLookupResult>;
   isEntitlementBackendConfigured: () => boolean;
 }
 
@@ -75,22 +77,20 @@ export async function evaluateEmbedEntitlement(
       return { status: 401, body: { allowed: false, error: 'invalid_embedding_api_key' } };
     }
     const entitlements = await deps.getEntitlements(userKey.userId);
-    if (entitlements?.verificationUnavailable) {
-      return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
-    }
-    if (!entitlements) {
-      if (!deps.isEntitlementBackendConfigured()) {
-        return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
-      }
-      return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
-    }
-    // `hasEmbedAccess` rather than `apiAccess`: embedding is now its own
-    // catalog entitlement, so any paid tier carrying it may embed even without
-    // REST API access. It keeps the coverage rule the previous `apiAccess`
-    // check encoded — a lapsed row with the flag still true fails on
-    // `validUntil` and 403s rather than 200s.
-    if (hasEmbedAccess(entitlements, Date.now())) {
+    const now = Date.now();
+    if (hasEmbedAccess(entitlements, now)) {
       return { status: 200, body: { allowed: true, panel, public: false, accountId: userKey.userId } };
+    }
+
+    const accountPlan = await deps.getAccountPlan(userKey.userId);
+    if (accountPlan === 'unavailable') {
+      return { status: 503, body: { allowed: false, error: 'account_verification_unavailable' } };
+    }
+    if (hasAccountEmbedAccess(accountPlan, entitlements, now)) {
+      return { status: 200, body: { allowed: true, panel, public: false, accountId: userKey.userId } };
+    }
+    if (entitlements?.verificationUnavailable || (!entitlements && !deps.isEntitlementBackendConfigured())) {
+      return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
     }
     return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
   } catch (error) {

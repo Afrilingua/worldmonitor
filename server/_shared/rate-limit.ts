@@ -518,9 +518,9 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // way the entitlement lookup does. A frame mints once per 30-minute grant,
   // which leaves this budget almost entirely as headroom for shared egress IPs.
   '/api/embed/session': { limit: 60, window: '60 s' },
-  // Keyless map frame. Applied on the `?public=1` path only (the keyed path is
-  // grant-scoped), where an hourly cadence means a legitimate frame spends one
-  // request per hour and the CDN absorbs the rest.
+  // Partner map frame. Public traffic uses the client IP; a verified grant uses
+  // its account owner so every display for one partner shares the same budget.
+  // The CDN absorbs most canonical public requests before this policy runs.
   '/api/embed/map-frame': { limit: 120, window: '60 s' },
 };
 
