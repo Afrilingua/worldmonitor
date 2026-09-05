@@ -266,8 +266,8 @@ const CROSS_STRAIT_HISTORY_MAX_RECORDS =
 /**
  * The production one-off may need to recover the complete retained archive,
  * while natural seed runs must keep the shared per-run embedding cost limit.
- * Reuse that limit as a batch boundary and return one aggregate receipt for
- * the strict same-run postflight.
+ * Reuse that limit as a batch boundary and return one aggregate result for
+ * the strict same-run postflight receipt.
  */
 export async function appendCrossStraitHistoryArchive(
   args,
