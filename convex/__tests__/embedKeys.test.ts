@@ -16,6 +16,7 @@ const FUTURE = NOW + 86400000 * 30; // 30 days
 const PAST = NOW - 86400000; // 1 day ago
 
 const PRO_USER = { subject: "user-pro", tokenIdentifier: "clerk|user-pro" };
+const ROLE_ONLY_PRO_USER = { subject: "user-role-only-pro", tokenIdentifier: "clerk|user-role-only-pro", plan: "pro" as const };
 const BUSINESS_USER = { subject: "user-business", tokenIdentifier: "clerk|user-business" };
 const API_USER = { subject: "user-api", tokenIdentifier: "clerk|user-api" };
 const FREE_USER = { subject: "user-free", tokenIdentifier: "clerk|user-free" };
@@ -138,6 +139,14 @@ describe("read-time merge", () => {
 // ---------------------------------------------------------------------------
 
 describe("createEmbedKey entitlement gate", () => {
+  test("succeeds for a verified Clerk PRO identity without an entitlement row", async () => {
+    const t = convexTest(schema, modules);
+
+    await expect(
+      t.withIdentity(ROLE_ONLY_PRO_USER).mutation(api.embedKeys.createEmbedKey, makeKeyArgs(1)),
+    ).resolves.toMatchObject({ keyPrefix: "wme_00001" });
+  });
+
   test("succeeds for a Pro user (tier 1, apiAccess:false)", async () => {
     const t = convexTest(schema, modules);
     await seedEntitlement(t, "user-pro", "pro_monthly");

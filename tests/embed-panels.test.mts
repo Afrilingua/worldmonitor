@@ -4,6 +4,7 @@ import {
   DEFAULT_EMBED_PANEL_ID,
   EMBED_FREE_REFRESH_MS,
   EMBED_KEYED_REFRESH_MS,
+  EMBED_KEY_RPC_PATHS,
   EMBED_LAYER_IDS,
   EMBED_PANEL_IDS,
   getEmbedPanelAccess,
@@ -25,6 +26,28 @@ describe('embed panel allowlist', () => {
     assert.equal(getEmbedPanelAccess('fear-greed').kind, 'paid-only');
     assert.equal(getEmbedPanelFreeTier('chokepoint-strip'), null);
     assert.equal(getEmbedPanelFreeTier('fear-greed'), null);
+  });
+
+  it('derives the gateway embed-key surface from the paid panels themselves', () => {
+    // EMBED_KEY_RPC_PATHS is what server/gateway.ts will accept a wme_ key on.
+    // Deriving it from the registry means the surface cannot grow without a
+    // panel owning the path; asserting the exact set means it cannot grow
+    // silently either.
+    assert.deepEqual([...EMBED_KEY_RPC_PATHS].sort(), [
+      '/api/market/v1/get-fear-greed-index',
+      '/api/supply-chain/v1/get-chokepoint-status',
+    ]);
+
+    // A tiered panel declares none: it polls the composed /api/embed/map-frame,
+    // which authenticates a wmg_ grant rather than a key.
+    for (const panel of listEmbeddablePanels()) {
+      if (panel.access.kind !== 'paid-only') continue;
+      assert.ok(panel.access.rpcPaths.length > 0, `${panel.id} must declare its RPC paths`);
+      for (const path of panel.access.rpcPaths) {
+        assert.ok(path.startsWith('/api/'), `${path} is not an API path`);
+        assert.ok(EMBED_KEY_RPC_PATHS.has(path));
+      }
+    }
   });
 
   it("publishes the map's free tier as three layers refreshed hourly", () => {

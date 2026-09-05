@@ -25,7 +25,7 @@ Keyed panels add `data-key`, and the loader posts that key to the frame after lo
 <script
   src="https://www.worldmonitor.app/embed.js"
   data-panel="chokepoint-strip"
-  data-key="YOUR_WM_API_KEY"
+  data-key="YOUR_WME_EMBED_KEY"
   data-theme="dark"
   data-height="360"
   async
@@ -33,7 +33,9 @@ Keyed panels add `data-key`, and the loader posts that key to the frame after lo
 ```
 
 <Warning>
-`data-key` sits in your page's public HTML, so treat it as published. Do not put a key there that can do more than embed: a World Monitor user API key (`wm_…`) unlocks your whole paid REST allowance, and an enterprise key bypasses entitlement checks entirely. Scoped embed keys (`wme_…`) exist for this — they authorise embedding and nothing else, and the live map's paid tier already uses them. Self-serve minting is not available yet; ask us for one rather than publishing a key with broader reach.
+`data-key` sits in your page's public HTML, so treat it as published. Do not put a key there that can do more than embed: a World Monitor user API key (`wm_…`) unlocks your whole paid REST allowance, and an enterprise key bypasses entitlement checks entirely. Scoped embed keys (`wme_…`) exist for this — they authorise embedding and nothing else.
+
+Mint one yourself: World Monitor dashboard → **Settings → Embeds → Create Embed Key**. The tab appears on every paid plan (it is gated on embed access, not on API access). The key is shown once at creation and never again, so copy it then. New reads with a revoked key are denied within about a minute. Already rendered paid-only panels remain visible until reload. A live map frame already on its paid tier holds its `POST /api/embed/session` grant for up to 30 more minutes, then falls back to the free tier.
 </Warning>
 
 ## Live map tiers
@@ -61,7 +63,7 @@ Layers you request but are not entitled to are reported back as `not-entitled` a
 
 Unknown `panel` values do not render. X / tweet-body panels are not embeddable: partners receive derived facts plus permalinks only, never post text.
 
-The two paid panels have not moved to `wme_` embed keys yet: `/api/embed/entitlement` still resolves a `wm_` user key or an enterprise key. The live map's paid tier is the one that takes `wme_` today. Until the migration lands, talk to us before publishing a key for a keyed panel.
+Every panel in the table above now takes `wme_` embed keys. `wm_` user keys and enterprise keys still work on the two paid panels so nothing breaks mid-flight, but they are deprecated there: the frame logs a migration warning to your browser console, and both credentials do far more than embed. Replace them with an embed key from Settings → Embeds. No removal date is set.
 
 ## Iframe (live map)
 
@@ -97,9 +99,13 @@ Loader `data-*` attributes:
 | Attribute | Example | Notes |
 | --- | --- | --- |
 | `data-panel` | `fear-greed` | Same allowlist as `?panel=`. |
-| `data-key` | `YOUR_WM_API_KEY` | Embed key for the embedding account. Omitted for the free live map. |
+| `data-key` | `wme_…` | Embed key for the embedding account. Omitted for the free live map. The literals `YOUR_WME_EMBED_KEY` and `YOUR_WM_API_KEY` both read as "no key", so an unedited snippet renders the free tier instead of handshaking with a placeholder. |
 | `data-theme` | `dark` | Passed through to the iframe. |
 | `data-height` | `360` | Iframe height in pixels, clamped 120–1200. |
+| `data-layers` | `conflicts,protests,cables` | Map only. Forwarded to `?layers=`. |
+| `data-center` | `25.2,55.3` | Map only. Forwarded to `?center=`. |
+| `data-zoom` | `4` | Map only. Forwarded to `?zoom=`. |
+| `data-variant` | `finance` | Forwarded to `?variant=`. |
 
 ## Entitlement
 
@@ -108,7 +114,8 @@ Keyed panels check the **embedding account**, not the person viewing the host pa
 - The iframe fetches `/api/embed/entitlement?panel=` with `credentials: 'omit'` and `X-WorldMonitor-Key`.
 - Viewer cookies and anonymous `wms_` session tokens are ignored.
 - A panel with a free tier answers `public` without reading the credential at all, so a lapsed key never costs you the free render.
-- For paid panels, enterprise keys in `WORLDMONITOR_VALID_KEYS` and keys whose owner has active `features.embedAccess` are accepted.
-- Use the dashboard **Embed** button to generate a snippet for the current public map view.
+- For paid panels, an embed key whose owner has active `features.embedAccess` is accepted, as are the deprecated `wm_` user key and enterprise key.
+- The two paid panels read their own data endpoint with the same key. An embed key authorises exactly those endpoints and no other part of the REST API.
+- Use the dashboard **Embed** button on the map to generate both snippets: the free iframe, and — if your plan carries embed access — the keyed loader for the view you are looking at.
 
 Each embed includes a permanent attribution link back to World Monitor with source campaign parameters.

@@ -15,6 +15,7 @@ import { timingSafeIncludes } from '../_crypto.js';
 import { checkEndpointRateLimit } from '../../server/_shared/rate-limit';
 import { getEntitlements, isEntitlementBackendConfigured } from '../../server/_shared/entitlement-check';
 import { validateUserApiKey } from '../../server/_shared/user-api-key';
+import { validateEmbedKey } from '../../server/_shared/embed-key';
 import { lookupClerkPlan } from '../../server/auth-session';
 import {
   evaluateEmbedEntitlement,
@@ -60,6 +61,7 @@ export default async function handler(req: Request): Promise<Response> {
       getValidEnterpriseKeys: () => parseEnterpriseApiKeys(process.env.WORLDMONITOR_VALID_KEYS),
       timingSafeIncludes,
       validateUserApiKey,
+      validateEmbedKey,
       getEntitlements,
       getAccountPlan: lookupClerkPlan,
       isEntitlementBackendConfigured,

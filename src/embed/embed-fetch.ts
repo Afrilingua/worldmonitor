@@ -50,6 +50,8 @@ export interface EmbedEntitlementResponse {
   public?: boolean;
   accountId?: string;
   error?: string;
+  /** Mirrors `EmbedEntitlementBody.deprecatedCredential` on the edge. */
+  deprecatedCredential?: 'user_api_key' | 'enterprise_key';
 }
 
 /**

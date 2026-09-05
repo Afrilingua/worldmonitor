@@ -1,8 +1,8 @@
 import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
-import { requireUserId, resolveUserId } from "./lib/auth";
+import { requireUserId, resolveUserId, resolveUserIdentity } from "./lib/auth";
 import { mergeEntitlementFeatures } from "./lib/entitlements";
-import { hasEmbedAccess } from "../shared/embed-access";
+import { hasAccountEmbedAccess } from "../shared/embed-access";
 import { TOUCH_DEBOUNCE_MS } from "./apiKeys";
 
 /** Maximum number of active (non-revoked) embed keys per user. */
@@ -46,10 +46,10 @@ function normalizeAllowedOrigins(origins: string[] | undefined): string[] | unde
  * random key client-side and passes the SHA-256 hex hash + the display prefix.
  * The plaintext key is NEVER stored in Convex.
  *
- * The gate is `hasEmbedAccess` — any live paid tier — NOT `apiAccess`. An embed
- * key is published in the partner's HTML, so it must be mintable by every paid
- * tier; Pro and Pro Business are `apiAccess: false` and `createApiKey` rejects
- * them outright.
+ * The gate is the shared account embed predicate — a verified Clerk PRO role
+ * or active paid embed entitlement — NOT `apiAccess`. An embed key is
+ * published in the partner's HTML, so it must be mintable by every paid tier;
+ * Pro and Pro Business are `apiAccess: false` and `createApiKey` rejects them.
  */
 export const createEmbedKey = mutation({
   args: {
@@ -59,7 +59,8 @@ export const createEmbedKey = mutation({
     allowedOrigins: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
-    const userId = await requireUserId(ctx);
+    const identity = await resolveUserIdentity(ctx);
+    const userId = identity?.subject ?? await requireUserId(ctx);
 
     const entitlement = await ctx.db
       .query("entitlements")
@@ -77,7 +78,7 @@ export const createEmbedKey = mutation({
           validUntil: entitlement.validUntil,
         }
       : null;
-    if (!hasEmbedAccess(merged, Date.now())) {
+    if (!hasAccountEmbedAccess(identity?.plan, merged, Date.now())) {
       throw new ConvexError("EMBED_ACCESS_REQUIRED");
     }
 
