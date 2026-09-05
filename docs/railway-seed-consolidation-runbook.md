@@ -816,13 +816,23 @@ npm run railway:cross-strait-history:force -- \
   --confirm-production
 ```
 
+The recovery contract is the full retained archive (365 MND reporting days plus
+reviewed Japan rows), not the newest 150 history rows. Scheduled ticks still
+cap each append at 150. The one-off batches through that same boundary so
+embedding cost stays bounded per batch, then requires a lossless same-run
+receipt: validation drops (blank title, missing `occurredAt`, over-limit
+fields) still fail postflight. Confirm `seed-bundle-derived-signals` has
+deployed this batching revision before running; an older seeder will slice the
+archive and the command will exit 75.
+
 The Railway sandbox also has a 15-minute server idle timeout as a cleanup
 backstop if the local process loses its response before it can read the sandbox
-ID. Verify the terminal run plus seed metadata and compact health after the
-authorized execution. Other immediate long-cron backfills still require a
-controlled temporary Railway cron execution, captured command and schedule
-restoration, and a repeated operational-config audit. The full rollback-safe
-sequence is documented in
+ID. Verify the terminal run, the same-run ingest-health receipt, Convex
+intel-history for `domain=military` `resource=cross-strait-activity`, and
+compact health after the authorized execution. Other immediate long-cron
+backfills still require a controlled temporary Railway cron execution, captured
+command and schedule restoration, and a repeated operational-config audit. The
+full rollback-safe sequence is documented in
 [A merged seeder fix is not live until its cron fires](solutions/integration-issues/merged-is-not-ran-long-cron-seeders.md).
 
 ---
