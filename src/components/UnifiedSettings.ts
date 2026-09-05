@@ -1994,7 +1994,7 @@ export class UnifiedSettings {
     return `
       <div class="embed-keys-section">
         <div class="embed-keys-header">
-          <p class="embed-keys-desc">Embed keys authorise World Monitor panels on your site and nothing else. Paste one into the <code>data-key</code> attribute of the <a class="embed-keys-docs-link" ${LEGAL_LINK_ATTR} href="${escapeHtml(`${WEB_APP_ORIGIN}/docs/embed-live-map`)}" target="_blank" rel="noopener noreferrer">embed loader</a>.</p>
+          <p class="embed-keys-desc">Embed keys authorise World Monitor panels on your site and nothing else, and each one is shown once at creation. Paste it into the <code>data-key</code> attribute of the <a class="embed-keys-docs-link" ${LEGAL_LINK_ATTR} href="${escapeHtml(`${WEB_APP_ORIGIN}/docs/embed-live-map`)}" target="_blank" rel="noopener noreferrer">embed loader</a>.</p>
         </div>
         <div class="embed-keys-note">
           <strong>These are meant to be public.</strong> An embed key sits in your page's HTML where anyone can read it — that is the point, and it is why it exists as its own credential. Never put an API key (<code>wm_…</code>) there instead: that one carries your whole REST allowance. Revoke an embed key here and the panels using it stop rendering within a minute.
@@ -2146,17 +2146,11 @@ export class UnifiedSettings {
 
     const renderKey = (k: EmbedKeyInfo) => {
       const isRevoked = !!k.revokedAt;
-      // allowedOrigins is declared-not-enforced today; shown so a partner can
-      // see what they recorded, and labelled so nobody reads it as a control.
-      const origins = k.allowedOrigins?.length
-        ? `<span class="embed-keys-item-origins">Declared sites: ${escapeHtml(k.allowedOrigins.join(', '))}</span>`
-        : '';
       return `
         <div class="embed-keys-item${isRevoked ? ' revoked' : ''}">
           <div class="embed-keys-item-main">
             <span class="embed-keys-item-name">${escapeHtml(k.name)}</span>
             <code class="embed-keys-item-prefix">${escapeHtml(k.keyPrefix)}${'*'.repeat(8)}</code>
-            ${origins}
           </div>
           <div class="embed-keys-item-meta">
             <span>Created ${formatDate(k.createdAt)}</span>

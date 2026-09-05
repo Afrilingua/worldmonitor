@@ -245,6 +245,14 @@ describe('Settings -> Embeds tab gating', () => {
     expect(note).toContain('wm_');
     expect(note).toContain('REST allowance');
   });
+
+  it('says the key is shown once BEFORE anyone clicks create', () => {
+    // The banner says it after the fact, which is too late to be a warning.
+    internal.render(false);
+    const desc = panel('embeds')?.querySelector('.embed-keys-desc')?.textContent ?? '';
+
+    expect(desc).toContain('shown once at creation');
+  });
 });
 
 describe('Settings -> Embeds key lifecycle', () => {
