@@ -30,10 +30,10 @@ async function bootEmbed(): Promise<void> {
     document.body.dataset.embedReady = 'false';
 
     // Listen before any await so the parent's iframe `load` postMessage is not
-    // dropped while initI18n() fetches locale bundles.
-    const apiKeyPromise = params.panel && getEmbedPanelFreeTier(params.panel) === null
-      ? waitForEmbeddingApiKey()
-      : Promise.resolve(null);
+    // dropped while initI18n() fetches locale bundles. Started for EVERY panel
+    // now, not just the paid-only ones: a tiered panel renders keylessly but
+    // upgrades in place when a credential arrives, so it must be listening too.
+    const apiKeyPromise = waitForEmbeddingApiKey();
 
     await initI18n();
 
@@ -64,7 +64,9 @@ async function bootEmbed(): Promise<void> {
 
     let destroy: (() => void) | undefined;
     if (params.panel === 'map') {
-      destroy = await mountEmbedMapPanel(root, params);
+      // Mounts free-tier first and upgrades if `apiKeyPromise` resolves, so a
+      // keyless embed never waits out the credential handshake.
+      destroy = await mountEmbedMapPanel(root, params, apiKeyPromise);
     } else if (params.panel === 'chokepoint-strip') {
       await mountEmbedChokepointStrip(root, apiKey ?? '');
     } else if (params.panel === 'fear-greed') {
