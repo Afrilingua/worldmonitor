@@ -218,8 +218,12 @@ describe('Cross-Strait history Railway one-off', () => {
     ]) {
       assert.throws(() => validateHistoryPostflightRecord(record, 'run-42'));
     }
-    assert.match(HISTORY_POSTFLIGHT_PROGRAM, /intel-history:ingest-health:military:cross-strait-activity:v1/);
+    assert.match(
+      HISTORY_POSTFLIGHT_PROGRAM,
+      /intel-history:ingest-health:military:cross-strait-activity:v1:run:' \+ runId/,
+    );
     assert.match(HISTORY_POSTFLIGHT_PROGRAM, /'User-Agent': 'WorldMonitor-Cross-Strait-One-Off\/1\.0'/);
+    assert.match(SANDBOX_SEED_PROGRAM, /WM_ONE_OFF_HISTORY_RECEIPT=1 node --eval/);
     assert.match(SANDBOX_SEED_PROGRAM, /node --eval [\s\S]* "\$run_id"/);
     const syntax = spawnSync('/bin/sh', ['-n'], { input: SANDBOX_SEED_PROGRAM, encoding: 'utf8' });
     assert.equal(syntax.status, 0, syntax.stderr);
@@ -620,6 +624,34 @@ while :; do printf '%01024d' 0; done
       overflow(['sandbox', 'create'], { stage: 'create', timeoutMs: 1_000 }),
       /create response exceeded the output limit; remote output suppressed/,
     );
+  });
+
+  it('terminates and classifies a Railway command that reaches its deadline', async () => {
+    const signals = [];
+    // The executor deliberately unrefs its timers. Keep this test's event loop
+    // alive until the fake child reports the deadline-triggered close.
+    const keepAlive = setTimeout(() => {}, 1_000);
+    const execute = createRailwayExecutor(() => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stdout.setEncoding = () => {};
+      child.kill = (signal) => {
+        signals.push(signal);
+        queueMicrotask(() => child.emit('close', null, signal));
+        return true;
+      };
+      return child;
+    });
+
+    try {
+      await assert.rejects(
+        execute(['sandbox', 'exec'], { stage: 'seed', timeoutMs: 5 }),
+        /Railway seed timed out; remote output suppressed/,
+      );
+      assert.deepEqual(signals, ['SIGTERM']);
+    } finally {
+      clearTimeout(keepAlive);
+    }
   });
 
   it('terminates the active sandbox seeder before shell cleanup', async () => {

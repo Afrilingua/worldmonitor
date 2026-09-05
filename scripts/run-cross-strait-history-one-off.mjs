@@ -98,7 +98,7 @@ const validate = ${validateHistoryPostflightRecord.toString()};
 const runId = String(process.argv[1] ?? '');
 const url = String(process.env.UPSTASH_REDIS_REST_URL ?? '');
 const token = String(process.env.UPSTASH_REDIS_REST_TOKEN ?? '');
-const key = 'intel-history:ingest-health:military:cross-strait-activity:v1';
+const key = 'intel-history:ingest-health:military:cross-strait-activity:v1:run:' + runId;
 const response = await fetch(url + '/get/' + encodeURIComponent(key), {
   headers: {
     Authorization: 'Bearer ' + token,
@@ -221,7 +221,7 @@ npm ci --ignore-scripts --omit=dev --no-audit --no-fund
 seed_output="$workspace/seed-output.log"
 overflow_marker="$workspace/seed-output.overflow"
 set +e
-node --eval ${shellSingleQuote(SEED_SUPERVISOR_PROGRAM)} "$seed_output" "$overflow_marker" supervisor &
+WM_ONE_OFF_HISTORY_RECEIPT=1 node --eval ${shellSingleQuote(SEED_SUPERVISOR_PROGRAM)} "$seed_output" "$overflow_marker" supervisor &
 seed_pid=$!
 wait "$seed_pid"
 exit_code=$?

@@ -53,6 +53,7 @@ const {
   appendSeedHistory,
   makeSeedHistoryAfterPublish,
   HISTORY_INGEST_ALARM_AFTER_FAILURES,
+  HISTORY_INGEST_RUN_RECEIPT_TTL_SECONDS,
   HISTORY_INGEST_SOURCE_VERSION,
   HISTORY_INGEST_TTL_SECONDS,
   describeHistoryAppendOutcome,
@@ -60,6 +61,7 @@ const {
   historyIngestErrorCode,
   historyIngestHealthKey,
   historyIngestMetaKey,
+  historyIngestRunReceiptKey,
   projectHistoryIngestHealth,
   recordHistoryIngestHealth,
 } = await import('../scripts/_seed-history.mjs');
@@ -398,11 +400,12 @@ function stubUpstash({ getResult = null, getStatus = 200, pipelineStatus = 200, 
   const calls = { gets: [], pipelines: [] };
   const fetchImpl = async (url, init) => {
     if (String(url).includes('/pipeline')) {
-      calls.pipelines.push(JSON.parse(init.body));
+      const commands = JSON.parse(init.body);
+      calls.pipelines.push(commands);
       return {
         ok: pipelineStatus >= 200 && pipelineStatus < 300,
         status: pipelineStatus,
-        json: async () => pipelineBody ?? [{ result: 'OK' }, { result: 'OK' }, { result: 'OK' }],
+        json: async () => pipelineBody ?? commands.map(() => ({ result: 'OK' })),
       };
     }
     calls.gets.push(String(url));
@@ -445,6 +448,7 @@ describe('recordHistoryIngestHealth', () => {
     assert.match(calls.gets[0], /intel-history%3Aingest-health%3Aconflict%3Aacled-intel%3Av1$/);
 
     assert.equal(calls.pipelines.length, 1);
+    assert.equal(calls.pipelines[0].length, 3, 'scheduled runs do not create run receipts');
     const [recordCmd, metaCmd, activationCmd] = calls.pipelines[0];
 
     assert.deepEqual(recordCmd.slice(0, 2), ['SET', historyIngestHealthKey(DOMAIN, RESOURCE)]);
@@ -467,6 +471,26 @@ describe('recordHistoryIngestHealth', () => {
       ['SET', historyIngestActivationKey(DOMAIN, RESOURCE), '1'],
       'the activation marker carries NO TTL: it must outlive the 7-day record',
     );
+  });
+
+  it('writes bounded run-scoped receipts for one-off recovery only', async () => {
+    const receipts = [];
+    for (const runId of ['run-9', 'run-10']) {
+      const { fetchImpl, calls } = stubUpstash();
+      await recordHistoryIngestHealth(
+        { domain: DOMAIN, resource: RESOURCE, runId, result: SUCCESS },
+        { env: { ...ENV, WM_ONE_OFF_HISTORY_RECEIPT: '1' }, fetchImpl, now: () => AT },
+      );
+      receipts.push(calls.pipelines[0][3]);
+    }
+
+    assert.notEqual(receipts[0][1], receipts[1][1]);
+    assert.deepEqual(receipts[0].slice(0, 2), [
+      'SET',
+      historyIngestRunReceiptKey(DOMAIN, RESOURCE, 'run-9'),
+    ]);
+    assert.equal(JSON.parse(receipts[0][2]).lastRunId, 'run-9');
+    assert.deepEqual(receipts[0].slice(3), ['EX', HISTORY_INGEST_RUN_RECEIPT_TTL_SECONDS]);
   });
 
   it('continues the failure streak from the persisted record', async () => {
