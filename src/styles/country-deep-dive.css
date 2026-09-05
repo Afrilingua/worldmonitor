@@ -1439,6 +1439,7 @@
 @media (max-width: 767px) {
   .country-deep-dive {
     width: 100vw;
+    z-index: 10004;
     transform: translateX(100%);
   }
 

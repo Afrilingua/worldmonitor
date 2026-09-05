@@ -78,7 +78,7 @@ function downloadHtml(name: string, article: HTMLElement, title: string): void {
   doc.documentElement.lang = document.documentElement.lang || 'en';
   doc.head.prepend(h('meta', { charset: 'utf-8' }));
   doc.head.append(h('meta', { name: 'viewport', content: 'width=device-width,initial-scale=1' }),
-    h('meta', { httpEquiv: 'Content-Security-Policy', content: "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; base-uri 'none'; form-action 'none'" }),
+    h('meta', { 'http-equiv': 'Content-Security-Policy', content: "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; base-uri 'none'; form-action 'none'" }),
     h('style', {}, briefCss, reportTheme));
   doc.body.append(article.cloneNode(true));
   const url = URL.createObjectURL(new Blob(['<!doctype html>', doc.documentElement.outerHTML], { type: 'text/html;charset=utf-8' }));

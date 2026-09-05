@@ -144,7 +144,20 @@ test('US brief keeps late evidence, metric design and report data connected', as
   await expect(panel.locator('#cdp-section-assessment .cdp-summary-only').first()).not.toContainText('Classification:');
   await factors.scrollIntoViewIfNeeded();
   await testInfo.attach('factors-desktop', { body: await page.screenshot({ path: testInfo.outputPath('factors-desktop.png') }), contentType: 'image/png' });
+  let releaseOutput: () => void = () => {};
+  let outputRequested = false;
+  const outputReady = new Promise<void>(resolve => { releaseOutput = resolve; });
+  await page.route('**/src/components/CountryBriefOutput.ts*', async route => {
+    outputRequested = true;
+    await outputReady;
+    await route.continue();
+  });
   await panel.getByRole('button', { name: 'Export report ↗', exact: true }).click();
+  await expect.poll(() => outputRequested).toBe(true);
+  await panel.getByRole('button', { name: 'Create story', exact: true }).click();
+  releaseOutput();
+  await expect(panel.locator('.cdp-output')).toHaveCount(1);
+  await expect(panel.locator('.cdp-output')).toHaveAccessibleName('Export country report');
   await expect(panel.locator('.cdp-output-paper .cdp-scorecard-input')).toHaveCount(27);
   await expect(panel.locator('.cdp-output-paper')).toContainText('128.6%');
   await expect(panel.locator('.cdp-output-paper')).toContainText('156.4');
@@ -161,12 +174,20 @@ test('US brief keeps late evidence, metric design and report data connected', as
   const savedReport = await page.context().newPage();
   await savedReport.route('http://brief-export.test/', route => route.fulfill({ body: html, contentType: 'text/html' }));
   await savedReport.goto('http://brief-export.test/');
+  await expect(savedReport.locator('meta[http-equiv="Content-Security-Policy"]')).toHaveAttribute('content', /default-src 'none'/);
+  await savedReport.evaluate(() => {
+    const probe = document.createElement('script');
+    probe.textContent = "document.body.dataset.exportScriptRan='true'";
+    document.body.append(probe);
+  });
+  await expect(savedReport.locator('body')).not.toHaveAttribute('data-export-script-ran', 'true');
   await expect(savedReport.locator('.cdp-scorecard-input')).toHaveCount(27);
   await expect(savedReport.locator('#export-cdp-section-housing')).toContainText('BIS · 2026-Q1');
   await savedReport.setViewportSize({ width: 390, height: 844 });
   expect(await savedReport.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1);
   await savedReport.close();
   await panel.getByRole('button', { name: '← Back to brief', exact: true }).click();
+  await expect(panel).toHaveClass(/maximized/);
   await expect(factors.getByRole('tab', { name: /Defense/ })).toHaveAttribute('aria-selected', 'true');
   await panel.getByRole('button', { name: 'Create story', exact: true }).click();
   await expect(panel.locator('.cdp-output-paper')).toContainText('The United States has attacked three Iranian oil tankers');
@@ -174,6 +195,7 @@ test('US brief keeps late evidence, metric design and report data connected', as
   await expect(panel.locator('.cdp-output-paper')).toContainText('65% coverage');
   await page.keyboard.press('Escape');
   await expect(panel.locator('.cdp-shell')).toBeVisible();
+  await expect(panel).toHaveClass(/maximized/);
   await page.setViewportSize({ width: 390, height: 844 });
   await factors.scrollIntoViewIfNeeded();
   const overflow = await panel.evaluate(element => {
@@ -181,6 +203,7 @@ test('US brief keeps late evidence, metric design and report data connected', as
     return content.scrollWidth - content.clientWidth;
   });
   expect(overflow).toBeLessThanOrEqual(1);
+  expect(await page.evaluate(() => Boolean(document.elementFromPoint(195, 820)?.closest('#country-deep-dive-panel')))).toBe(true);
   await testInfo.attach('factors-mobile', { body: await page.screenshot({ path: testInfo.outputPath('factors-mobile.png') }), contentType: 'image/png' });
 });
 
@@ -205,6 +228,9 @@ test('limited country coverage stays navigable and China keeps its own section',
   await panel.getByRole('button', { name: 'Summary', exact: true }).click();
   await expect(panel.locator('#cdp-section-housing')).toBeHidden();
   await expect(panel.locator('#cdp-section-assessment')).toBeVisible();
+  await panel.getByRole('button', { name: 'Full brief', exact: true }).click();
+  await expect(panel.locator('[data-brief-section]:visible')).toHaveCount(23);
+  await expect(panel.locator('#cdp-section-housing')).toBeVisible();
   await page.goto('/dashboard?country=CN&expanded=1');
   await expect(panel.locator('.cdp-country-name')).toHaveText('China');
   await expect(panel.locator('#cdp-section-china')).toBeVisible();

@@ -143,6 +143,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
   private presentation: CountryBriefPresentation | null = null;
   private sections: BriefSection[] = [];
   private outputClose: (() => void) | null = null;
+  private outputRequestSignal: AbortSignal | null = null;
   private signalsBody: HTMLElement | null = null;
   private signalBreakdownBody: HTMLElement | null = null;
   private signalRecentBody: HTMLElement | null = null;
@@ -254,7 +255,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     this.closeButton.addEventListener('click', () => this.hide());
 
     this.panel.addEventListener('click', (e) => {
-      if (this.isMaximizedState && !(e.target as HTMLElement).closest('.panel-content')) {
+      if (this.isMaximizedState && (e.target === this.panel || e.target === this.content.parentElement)) {
         this.minimize();
       }
     });
@@ -3759,11 +3760,12 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
   private async openOutput(kind: 'story' | 'report', trigger: HTMLButtonElement): Promise<void> {
     const code = this.currentCode;
     const signal = this.signal;
-    if (!code || !this.currentName || this.outputClose) return;
+    if (!code || !this.currentName || this.outputClose || this.outputRequestSignal === signal) return;
+    this.outputRequestSignal = signal;
     trigger.disabled = true;
     try {
       const { createCountryBriefOutput, freezeBriefContent } = await import('./CountryBriefOutput');
-      if (signal.aborted || this.signal !== signal || this.currentCode !== code || !this.currentName || !this.isVisible()) return;
+      if (signal.aborted || this.signal !== signal || this.currentCode !== code || !this.currentName || !this.isVisible() || this.outputClose) return;
       const sections: import('./CountryBriefOutput').BriefOutputSection[] = this.sections.map(section => ({
         id: section.id, title: section.title, topics: BRIEF_SECTIONS[section.id], state: briefSectionState(section), content: freezeBriefContent(section.card),
       }));
@@ -3809,6 +3811,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
       console.error('[CountryBrief] Output preview failed:', error);
       showToast('Could not prepare the preview. Please try again.');
     } finally {
+      if (this.outputRequestSignal === signal) this.outputRequestSignal = null;
       trigger.disabled = false;
     }
   }

@@ -90,7 +90,7 @@ export class CountryBriefPresentation {
       const button = h('button', { type: 'button', 'data-mode': mode }, mode === 'summary' ? 'Summary' : 'Full brief');
       button.addEventListener('click', () => {
         this.mode = mode;
-        if (mode === 'summary') this.topic = 'overview';
+        this.topic = mode === 'summary' ? 'overview' : 'all';
         this.applyView();
       });
       this.modeButtons.append(button);
