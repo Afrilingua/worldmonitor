@@ -307,11 +307,23 @@ describe('cloudflare corpus cache rule', () => {
     // echoed id as a foreign ref made --check report "ambiguous" against a zone
     // that held exactly one copy, and --apply refuse to touch it.
     const bypass = { id: 'a', description: 'Bypass cache - WWW documents', action_parameters: { cache: false } };
-    const echoed = { ...rule, id: '7a9b6e5ba37940ecb103d9063db3a5f2', ref: '7a9b6e5ba37940ecb103d9063db3a5f2' };
+    const echoed = {
+      ...rule,
+      id: '7a9b6e5ba37940ecb103d9063db3a5f2',
+      ref: '7a9b6e5ba37940ecb103d9063db3a5f2',
+      expression: '(http.host eq "the #7659 expression")',
+    };
     const plan = planApply([bypass, echoed], rule);
     assert.equal(plan.op, 'update');
     assert.equal(plan.id, echoed.id);
-    assert.deepEqual(plan.diff.problems, [`ref is ${echoed.id}, expected ${rule.ref}`]);
+    // The echoed ref is not reported: Cloudflare refuses to change it (error
+    // 20142 on the live zone, 2026-09-05), so it can never be "repaired", and a
+    // drift that can never clear would keep --check red on a correct zone.
+    assert.deepEqual(plan.diff.problems, ['expression differs']);
+    assert.equal(plan.refLocked, true);
+
+    // Once the content matches, the rule is current under its default ref.
+    assert.equal(planApply([bypass, { ...echoed, expression: rule.expression }], rule).op, 'none');
 
     // A genuinely foreign ref on the same description is still a conflict.
     const foreign = { ...rule, id: 'x', ref: 'someone_elses_ref' };
@@ -391,10 +403,18 @@ describe('cloudflare corpus cache rule', () => {
   });
 
   it('adopts one legacy description-only rule and rejects ambiguous identity', () => {
-    const legacy = { ...rule, id: 'legacy' };
+    const legacy = { ...rule, id: 'legacy', expression: '(http.host eq "stale")' };
     delete legacy.ref;
-    assert.equal(planApply([legacy], rule).op, 'update');
-    assert.equal(planApply([legacy], rule).id, 'legacy');
+    const plan = planApply([legacy], rule);
+    assert.equal(plan.op, 'update');
+    assert.equal(plan.id, 'legacy');
+    assert.equal(plan.refLocked, true, 'a PATCH must not try to give the adopted rule our ref');
+    assert.deepEqual(plan.diff.problems, ['expression differs'], 'the missing ref itself is not drift');
+
+    // Identical content under a default ref is simply current.
+    const current = { ...rule, id: 'legacy' };
+    delete current.ref;
+    assert.equal(planApply([current], rule).op, 'none');
 
     const renamed = { ...rule, id: 'managed', description: 'renamed in the dashboard' };
     const ambiguous = planApply([renamed, legacy], rule);
@@ -696,15 +716,18 @@ describe('cloudflare cache rule runner', () => {
     ]);
   });
 
-  it('adopts exactly one legacy description-only rule with PATCH', async () => {
+  it('adopts exactly one legacy description-only rule with a PATCH that leaves its ref alone', async () => {
     const rule = buildCorpusCacheRule();
-    const legacy = { ...rule, id: 'legacy-id' };
+    const legacy = { ...rule, id: 'legacy-id', expression: '(http.host eq "stale")' };
     delete legacy.ref;
+    const { ref: _ref, ...ruleWithoutRef } = rule;
+    // Cloudflare echoes the default ref (the id) back; that must read as current.
+    const adopted = { ...rule, id: 'legacy-id', ref: 'legacy-id' };
     const intercepted = interceptedFetch([
       cloudflareResponse({ id: 'zone-id', name: 'worldmonitor.app' }),
       cloudflareResponse({ id: 'ruleset-id', version: '8', rules: [legacy] }),
-      cloudflareResponse({ ...rule, id: 'legacy-id' }),
-      cloudflareResponse({ id: 'ruleset-id', version: '9', rules: [{ ...rule, id: 'legacy-id' }] }),
+      cloudflareResponse(adopted),
+      cloudflareResponse({ id: 'ruleset-id', version: '9', rules: [adopted] }),
     ]);
     const code = await runCloudflareCacheRule(['--apply'], {
       env: RUN_ENV,
@@ -717,9 +740,53 @@ describe('cloudflare cache rule runner', () => {
     assert.deepEqual(intercepted.calls, [
       { url: ZONE_PATH, method: 'GET', body: undefined },
       { url: ENTRYPOINT_PATH, method: 'GET', body: undefined },
-      { url: `${RULES_PATH}/legacy-id`, method: 'PATCH', body: rule },
+      { url: `${RULES_PATH}/legacy-id`, method: 'PATCH', body: ruleWithoutRef },
       { url: ENTRYPOINT_PATH, method: 'GET', body: undefined },
     ]);
+  });
+
+  it('re-expresses the live #7659 rule without touching its Cloudflare-default ref', async () => {
+    // The exact shape the zone held on 2026-09-05: our description, ref === id,
+    // the old expression, sitting last. The first attempt sent `ref` and
+    // Cloudflare answered 400 / 20142 "expected the reference to be empty".
+    const rule = buildCorpusCacheRule();
+    const { ref: _ref, ...ruleWithoutRef } = rule;
+    const live = {
+      ...rule,
+      id: '7a9b6e5ba37940ecb103d9063db3a5f2',
+      ref: '7a9b6e5ba37940ecb103d9063db3a5f2',
+      expression: '(http.host eq "the #7659 expression")',
+    };
+    const bypass = {
+      id: 'bypass-id',
+      description: 'Bypass cache - WWW documents',
+      action: 'set_cache_settings',
+      action_parameters: { cache: false },
+      enabled: true,
+    };
+    const after = { ...live, expression: rule.expression };
+    const intercepted = interceptedFetch([
+      cloudflareResponse({ id: 'zone-id', name: 'worldmonitor.app' }),
+      cloudflareResponse({ id: 'ruleset-id', version: '59', rules: [bypass, live] }),
+      cloudflareResponse(after),
+      cloudflareResponse({ id: 'ruleset-id', version: '60', rules: [bypass, after] }),
+    ]);
+    const stdout = outputSink();
+    const code = await runCloudflareCacheRule(['--apply'], {
+      env: RUN_ENV,
+      fetchImpl: intercepted.fetchImpl,
+      stdout: stdout.stream,
+      stderr: outputSink().stream,
+    });
+
+    assert.equal(code, 0);
+    assert.deepEqual(intercepted.calls[2], {
+      url: `${RULES_PATH}/${live.id}`,
+      method: 'PATCH',
+      body: ruleWithoutRef,
+    });
+    assert.ok(!('position' in intercepted.calls[2].body), 'already last: no move');
+    assert.match(stdout.chunks.join(''), /applied \(update\)/);
   });
 
   it('creates a missing rule with POST and verifies the result', async () => {

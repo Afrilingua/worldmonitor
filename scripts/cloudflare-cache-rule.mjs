@@ -381,15 +381,31 @@ function resolveToken(env = process.env) {
   return tokens[0];
 }
 
+/**
+ * Whether a live rule carries a ref somebody chose, as opposed to Cloudflare's
+ * default. Cloudflare fills an unset `ref` with the rule's own id, and — learned
+ * from the live zone while landing #7747 — refuses to change it afterwards: a
+ * PATCH that sends a new `ref` for such a rule fails with error 20142, "expected
+ * the reference to be empty". A ref is only ever accepted at creation. So a rule
+ * adopted by description keeps its default ref for life, and a default ref is
+ * identity to adopt, never drift to repair.
+ */
+const hasOwnRef = (entry) => Boolean(entry.ref) && entry.ref !== entry.id;
+
+/** `rule` without its `ref`, for a PATCH to a rule whose ref Cloudflare will not let us set. */
+function withoutRef(rule) {
+  const { ref: _ref, ...rest } = rule;
+  return rest;
+}
+
 function identifyLiveRule(rules, rule) {
   const entries = (rules ?? []).map((entry, position) => ({ entry, position }));
   const refMatches = entries.filter(({ entry }) => entry.ref === rule.ref);
   const descriptionMatches = entries.filter(({ entry }) => entry.description === rule.description);
-  // Cloudflare fills an unset `ref` with the rule's own id, so a description
-  // match whose ref merely echoes its id is a legacy rule to adopt, not a foreign
-  // one to refuse. The first corpus rule went live before `ref` existed here and
-  // sat in exactly that state; `--check` called it "ambiguous" until #7747.
-  const hasOwnRef = (entry) => Boolean(entry.ref) && entry.ref !== entry.id;
+  // A description match whose ref merely echoes its id is a legacy rule to adopt,
+  // not a foreign one to refuse. The first corpus rule went live before `ref`
+  // existed here and sat in exactly that state; `--check` called it "ambiguous"
+  // until #7747.
   const legacyMatches = descriptionMatches.filter(({ entry }) => !hasOwnRef(entry));
   const conflictingDescriptionMatches = descriptionMatches.filter(
     ({ entry }) => hasOwnRef(entry) && entry.ref !== rule.ref,
@@ -438,7 +454,11 @@ export function diffLiveRuleset(rules, rule = buildCorpusCacheRule()) {
 
   const { entry: live, position: index } = identity.match;
   const problems = [];
-  if (live.ref !== rule.ref) problems.push(`ref is ${live.ref ?? 'missing'}, expected ${rule.ref}`);
+  // A default ref (missing, or echoing the id) is not drift: Cloudflare will not
+  // let a PATCH change it, so reporting it would make an adopted rule drift
+  // forever. A chosen-but-different ref cannot reach here — identifyLiveRule
+  // already calls that a conflict — so this line is belt-and-braces.
+  if (hasOwnRef(live) && live.ref !== rule.ref) problems.push(`ref is ${live.ref}, expected ${rule.ref}`);
   if (live.description !== rule.description) problems.push('description differs');
   if (live.expression !== rule.expression) problems.push('expression differs');
   if (live.action !== rule.action) problems.push(`action is ${live.action}, expected ${rule.action}`);
@@ -493,10 +513,12 @@ export function planApply(rules, rule = buildCorpusCacheRule()) {
     return { op: 'duplicates', duplicates: diff.matches.map(({ entry }) => entry.id), diff };
   }
   if (diff.status === 'current') return { op: 'none', diff };
-  const id = rules[diff.index]?.id;
+  const live = rules[diff.index];
   // Cloudflare accepts position on the per-rule PATCH, so drift and movement are
-  // one atomic update that preserves the existing rule id.
-  return { op: 'update', id, diff };
+  // one atomic update that preserves the existing rule id. `refLocked` says the
+  // live rule carries Cloudflare's default ref, which a PATCH must not try to
+  // replace (see hasOwnRef).
+  return { op: 'update', id: live?.id, refLocked: !hasOwnRef(live ?? {}), diff };
 }
 
 const MODES = ['--print', '--check', '--apply'];
@@ -568,7 +590,8 @@ export async function runCloudflareCacheRule(
     }
     const rulesPath = `/zones/${zoneId}/rulesets/${ruleset.id}/rules`;
     if (plan.op === 'update') {
-      const body = plan.diff.misordered ? { ...rule, position: { after: '' } } : rule;
+      const base = plan.refLocked ? withoutRef(rule) : rule;
+      const body = plan.diff.misordered ? { ...base, position: { after: '' } } : base;
       await cloudflareRequest(`${rulesPath}/${plan.id}`, {
         token,
         method: 'PATCH',
