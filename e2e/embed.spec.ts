@@ -384,6 +384,7 @@ test.describe('public map embed', () => {
 
 test.describe('allowlisted panel embeds', () => {
   const embeddingKey = 'wm_0123456789abcdef0123456789abcdef01234567';
+  const embedKey = `wme_${'a1b2c3d4e5'.repeat(4)}`;
 
   async function stubPanelApis(page: Page): Promise<void> {
     await page.route('**/api/embed/entitlement**', async (route) => {
@@ -391,7 +392,7 @@ test.describe('allowlisted panel embeds', () => {
       const url = new URL(request.url());
       const panel = url.searchParams.get('panel') ?? '';
       const key = request.headers()['x-worldmonitor-key'] ?? '';
-      const allowed = key === embeddingKey;
+      const allowed = key === embeddingKey || key === embedKey;
       await route.fulfill({
         status: allowed ? 200 : 401,
         contentType: 'application/json',
@@ -401,6 +402,9 @@ test.describe('allowlisted panel embeds', () => {
           public: false,
           accountId: allowed ? 'embed-account' : undefined,
           error: allowed ? undefined : 'embedding_api_key_required',
+          // Mirrors server/_shared/embed-entitlement.ts: the marker is present
+          // for the legacy credential and absent for a wme_ embed key.
+          deprecatedCredential: key === embeddingKey ? 'user_api_key' : undefined,
         }),
       });
     });
@@ -535,6 +539,89 @@ test.describe('allowlisted panel embeds', () => {
       await expect(frame.locator('.wm-embed-fg-score')).toHaveText('42');
     } finally {
       await host.close();
+    }
+  });
+
+  test('renders chokepoint-strip from a wme_ embed key and sends it on the data read', async ({ page, baseURL }) => {
+    // The migration end to end: a credential that authorises embedding and
+    // nothing else drives a paid panel, loader handshake included.
+    await stubPanelApis(page);
+    const localBaseUrl = baseURL ?? 'http://127.0.0.1:4173';
+    const keyedRequests: string[] = [];
+    page.on('request', (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === '/api/supply-chain/v1/get-chokepoint-status') {
+        keyedRequests.push(request.headers()['x-worldmonitor-key'] ?? '');
+      }
+    });
+
+    const host = await serveThirdPartyHostPage(`
+      <!doctype html>
+      <html>
+        <body style="margin:0;background:#111">
+          <script src="${localBaseUrl}/embed.js" data-panel="chokepoint-strip" data-key="${embedKey}" data-theme="dark" data-height="360"></script>
+        </body>
+      </html>
+    `);
+
+    try {
+      await page.goto(host.url);
+      const frame = page.frameLocator('iframe[title="World Monitor embed"]');
+      await expect(frame.locator('body')).toHaveAttribute('data-embed-ready', 'true');
+      await expect(frame.locator('.wm-embed-chokepoints')).toBeVisible();
+      expect(keyedRequests.some((key) => key === embedKey)).toBe(true);
+      expect(keyedRequests.some((key) => key.startsWith('wm_'))).toBe(false);
+    } finally {
+      await host.close();
+    }
+  });
+
+  test('warns in the partner console for a wm_ key and stays quiet for a wme_ one', async ({ page, baseURL }) => {
+    await stubPanelApis(page);
+    const localBaseUrl = baseURL ?? 'http://127.0.0.1:4173';
+    const warnings: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'warning') warnings.push(message.text());
+    });
+
+    const legacy = await serveThirdPartyHostPage(`
+      <!doctype html>
+      <html>
+        <body style="margin:0;background:#111">
+          <script src="${localBaseUrl}/embed.js" data-panel="fear-greed" data-key="${embeddingKey}" data-theme="dark" data-height="360"></script>
+        </body>
+      </html>
+    `);
+    try {
+      await page.goto(legacy.url);
+      await expect(page.frameLocator('iframe[title="World Monitor embed"]').locator('body'))
+        .toHaveAttribute('data-embed-ready', 'true');
+      await expect
+        .poll(() => warnings.filter((line) => line.includes('worldmonitor-embed')).length)
+        .toBeGreaterThan(0);
+      const notice = warnings.find((line) => line.includes('worldmonitor-embed')) ?? '';
+      expect(notice).toContain('Settings');
+      expect(notice).toContain('wme_');
+    } finally {
+      await legacy.close();
+    }
+
+    warnings.length = 0;
+    const scoped = await serveThirdPartyHostPage(`
+      <!doctype html>
+      <html>
+        <body style="margin:0;background:#111">
+          <script src="${localBaseUrl}/embed.js" data-panel="fear-greed" data-key="${embedKey}" data-theme="dark" data-height="360"></script>
+        </body>
+      </html>
+    `);
+    try {
+      await page.goto(scoped.url);
+      await expect(page.frameLocator('iframe[title="World Monitor embed"]').locator('body'))
+        .toHaveAttribute('data-embed-ready', 'true');
+      expect(warnings.filter((line) => line.includes('worldmonitor-embed'))).toEqual([]);
+    } finally {
+      await scoped.close();
     }
   });
 
