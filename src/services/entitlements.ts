@@ -51,6 +51,15 @@ export interface EntitlementState {
      * never locks a paying customer out of their own data.
      */
     dataExport?: boolean;
+    /**
+     * Partner-embed key issuance (`wme_…`). Deliberately separate from
+     * `apiAccess`: both Pro tiers sell embedding without REST access, so
+     * gating the Embeds tab on `apiAccess` would hide it from most of the
+     * customers who bought it. Undefined on snapshots older than the catalog
+     * field; `hasFeature` coerces that to false, which is the fail-closed
+     * direction and self-heals on the next entitlement read.
+     */
+    embedAccess?: boolean;
   };
   validUntil: number;
 }
