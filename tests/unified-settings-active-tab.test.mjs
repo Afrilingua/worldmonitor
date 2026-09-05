@@ -82,10 +82,12 @@ function extractOpen() {
 }
 
 let mcpAccess = false;
+let embedAccess = false;
 const Harness = extractOpen()(
-  () => ({ planKey: mcpAccess ? 'pro_monthly' : 'free' }),
+  () => ({ planKey: mcpAccess || embedAccess ? 'pro_monthly' : 'free' }),
   () => 'ready',
-  (feature) => feature === 'mcpAccess' && mcpAccess,
+  (feature) =>
+    (feature === 'mcpAccess' && mcpAccess) || (feature === 'embedAccess' && embedAccess),
   () => () => {},
   () => () => {},
   () => () => {},
@@ -137,6 +139,7 @@ function makeInstance(initialTab = 'settings') {
 describe('UnifiedSettings.open active-tab availability (#5611)', () => {
   beforeEach(() => {
     mcpAccess = false;
+    embedAccess = false;
     globalThis.localStorage = {
       getItem: () => null,
       setItem() {},
@@ -177,6 +180,48 @@ describe('UnifiedSettings.open active-tab availability (#5611)', () => {
 
     assert.equal(instance.activeTab, 'mcp-clients');
     assert.deepEqual(instance.renderedTabs, ['mcp-clients']);
+  });
+
+  // The Embeds tab is gated on embedAccess, not apiAccess: both Pro tiers are
+  // apiAccess:false, so an apiAccess gate would hide embed keys from the
+  // customers who bought embedding. Same clamp as MCP Clients.
+  it('falls back to Settings when opened to Embeds without embedAccess', () => {
+    const instance = makeInstance();
+
+    instance.open('embeds');
+
+    assert.equal(instance.activeTab, 'settings');
+    assert.deepEqual(instance.renderedTabs, ['settings']);
+  });
+
+  it('clears a sticky Embeds tab when embed access was lost between opens', () => {
+    const instance = makeInstance('embeds');
+
+    instance.open();
+
+    assert.equal(instance.activeTab, 'settings');
+    assert.deepEqual(instance.renderedTabs, ['settings']);
+  });
+
+  it('preserves Embeds when embedAccess is present', () => {
+    embedAccess = true;
+    const instance = makeInstance();
+
+    instance.open('embeds');
+
+    assert.equal(instance.activeTab, 'embeds');
+    assert.deepEqual(instance.renderedTabs, ['embeds']);
+  });
+
+  // The load-bearing half: a Pro account carries embedAccess without mcpAccess
+  // and vice versa. Neither flag may stand in for the other.
+  it('does not open Embeds on mcpAccess alone', () => {
+    mcpAccess = true;
+    const instance = makeInstance();
+
+    instance.open('embeds');
+
+    assert.equal(instance.activeTab, 'settings');
   });
 
   it('does not clamp tabs that are always rendered', () => {
