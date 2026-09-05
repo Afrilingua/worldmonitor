@@ -724,8 +724,14 @@ async function writeHistoryIngestRecord({
     });
     if (!resp.ok) throw new Error(`${label} failed: HTTP ${resp.status}`);
     const results = await resp.json();
-    const failed = Array.isArray(results) ? results.find((entry) => entry?.error) : null;
+    if (!Array.isArray(results) || results.length !== pipelineCommands.length) {
+      throw new Error(`${label} returned incomplete results`);
+    }
+    const failed = results.find((entry) => entry?.error);
     if (failed) throw new Error(`${label} command failed: ${failed.error}`);
+    if (results.some((entry) => entry?.result !== 'OK')) {
+      throw new Error(`${label} returned an unconfirmed result`);
+    }
   };
 
   await writePipeline(commands, 'ingest-health pipeline');

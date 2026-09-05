@@ -532,6 +532,22 @@ describe('recordHistoryIngestHealth', () => {
     );
   });
 
+  it('does not write a one-off receipt for malformed or incomplete shared results', async () => {
+    for (const pipelineBody of [[], {}, [{ result: 'OK' }]]) {
+      const { fetchImpl, calls } = stubUpstash({ pipelineBody });
+
+      const { value, warns } = await withCapturedWarn(() => recordHistoryIngestHealth(
+        { domain: DOMAIN, resource: RESOURCE, runId: 'run-malformed', result: SUCCESS },
+        { env: { ...ENV, WM_ONE_OFF_HISTORY_RECEIPT: '1' }, fetchImpl, now: () => AT },
+      ));
+
+      assert.equal(value, null);
+      assert.equal(warns.length, 1);
+      assert.equal(calls.pipelines.length, 1, 'unconfirmed shared writes must stop before the receipt');
+      assert.equal(calls.pipelines[0].length, 3);
+    }
+  });
+
   it('continues the failure streak from the persisted record', async () => {
     const previous = project(project(null, { result: SUCCESS }).record, {
       error: relayRejection(401),
