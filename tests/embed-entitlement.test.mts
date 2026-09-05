@@ -44,7 +44,7 @@ describe('embed entitlement', () => {
     assert.equal(session.body.error, 'session_token_not_allowed');
   });
 
-  it('accepts an enterprise embedding key and a user key with apiAccess', async () => {
+  it('accepts an enterprise embedding key and a user key with embedAccess', async () => {
     const enterprise = await evaluateEmbedEntitlement('fear-greed', 'enterprise-key', deps({
       getValidEnterpriseKeys: () => ['enterprise-key'],
       timingSafeIncludes: async (candidate, keys) => keys.includes(candidate),
@@ -57,7 +57,7 @@ describe('embed entitlement', () => {
       validateUserApiKey: async () => ({ userId: 'user_abc' }),
       getEntitlements: async () => ({
         planKey: 'api_starter',
-        features: { tier: 2, apiAccess: true, apiRateLimit: 60, maxDashboards: 1, prioritySupport: false, exportFormats: [] },
+        features: { tier: 2, apiAccess: true, embedAccess: true, apiRateLimit: 60, maxDashboards: 1, prioritySupport: false, exportFormats: [] },
         validUntil: Date.now() + 86_400_000,
       }),
     }));
@@ -65,7 +65,48 @@ describe('embed entitlement', () => {
     assert.equal(user.body.accountId, 'user_abc');
   });
 
-  it('denies user keys without apiAccess and fails closed on validation outages', async () => {
+  it('accepts a paid plan carrying embedAccess without REST apiAccess', async () => {
+    // Embedding is its own catalog entitlement now: a Pro plan that never sold
+    // REST access may still put a panel on a partner page.
+    const result = await evaluateEmbedEntitlement('fear-greed', 'wm_0123456789abcdef0123456789abcdef01234567', deps({
+      validateUserApiKey: async () => ({ userId: 'user_pro' }),
+      getEntitlements: async () => ({
+        planKey: 'pro_monthly',
+        features: { tier: 1, apiAccess: false, embedAccess: true, apiRateLimit: 0, maxDashboards: 1, prioritySupport: false, exportFormats: [] },
+        validUntil: Date.now() + 86_400_000,
+      }),
+    }));
+    assert.equal(result.status, 200);
+    assert.equal(result.body.accountId, 'user_pro');
+  });
+
+  it('denies an apiAccess row that does not carry embedAccess', async () => {
+    // Fail-closed on the missing flag: a legacy row written before the catalog
+    // field existed must not mint a publishable embed off REST access alone.
+    const legacy = await evaluateEmbedEntitlement('fear-greed', 'wm_0123456789abcdef0123456789abcdef01234567', deps({
+      validateUserApiKey: async () => ({ userId: 'user_legacy' }),
+      getEntitlements: async () => ({
+        planKey: 'api_starter',
+        features: { tier: 2, apiAccess: true, apiRateLimit: 60, maxDashboards: 1, prioritySupport: false, exportFormats: [] },
+        validUntil: Date.now() + 86_400_000,
+      }),
+    }));
+    assert.equal(legacy.status, 403);
+    assert.equal(legacy.body.error, 'embed_not_entitled');
+
+    const revoked = await evaluateEmbedEntitlement('fear-greed', 'wm_0123456789abcdef0123456789abcdef01234567', deps({
+      validateUserApiKey: async () => ({ userId: 'user_revoked' }),
+      getEntitlements: async () => ({
+        planKey: 'api_starter',
+        features: { tier: 2, apiAccess: true, embedAccess: false, apiRateLimit: 60, maxDashboards: 1, prioritySupport: false, exportFormats: [] },
+        validUntil: Date.now() + 86_400_000,
+      }),
+    }));
+    assert.equal(revoked.status, 403);
+    assert.equal(revoked.body.error, 'embed_not_entitled');
+  });
+
+  it('denies free-tier user keys and fails closed on validation outages', async () => {
     const denied = await evaluateEmbedEntitlement('fear-greed', 'wm_0123456789abcdef0123456789abcdef01234567', deps({
       validateUserApiKey: async () => ({ userId: 'user_free' }),
       getEntitlements: async () => ({
@@ -86,12 +127,12 @@ describe('embed entitlement', () => {
     assert.equal(unavailable.body.error, 'key_validation_unavailable');
   });
 
-  it('rejects an expired apiAccess entitlement the same way the gateway does', async () => {
+  it('rejects an expired embedAccess entitlement the same way the gateway does', async () => {
     const expired = await evaluateEmbedEntitlement('fear-greed', 'wm_0123456789abcdef0123456789abcdef01234567', deps({
       validateUserApiKey: async () => ({ userId: 'user_lapsed' }),
       getEntitlements: async () => ({
         planKey: 'api_starter',
-        features: { tier: 2, apiAccess: true, apiRateLimit: 60, maxDashboards: 1, prioritySupport: false, exportFormats: [] },
+        features: { tier: 2, apiAccess: true, embedAccess: true, apiRateLimit: 60, maxDashboards: 1, prioritySupport: false, exportFormats: [] },
         validUntil: Date.now() - 1,
       }),
     }));

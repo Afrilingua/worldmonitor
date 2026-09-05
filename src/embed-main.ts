@@ -2,7 +2,7 @@ import './styles/base-layer.css';
 import './styles/happy-theme.css';
 import './styles/embed.css';
 import { initI18n } from '@/services/i18n';
-import { panelRequiresEmbeddingApiKey } from '../shared/embed-panels';
+import { getEmbedPanelFreeTier } from '../shared/embed-panels';
 import { parseEmbedParams } from '@/embed/embed-url';
 import { waitForEmbeddingApiKey } from '@/embed/embed-credential';
 import { fetchEmbedEntitlement } from '@/embed/embed-fetch';
@@ -31,7 +31,7 @@ async function bootEmbed(): Promise<void> {
 
     // Listen before any await so the parent's iframe `load` postMessage is not
     // dropped while initI18n() fetches locale bundles.
-    const apiKeyPromise = params.panel && panelRequiresEmbeddingApiKey(params.panel)
+    const apiKeyPromise = params.panel && getEmbedPanelFreeTier(params.panel) === null
       ? waitForEmbeddingApiKey()
       : Promise.resolve(null);
 
@@ -44,7 +44,7 @@ async function bootEmbed(): Promise<void> {
     }
 
     let apiKey: string | null = null;
-    if (panelRequiresEmbeddingApiKey(params.panel)) {
+    if (getEmbedPanelFreeTier(params.panel) === null) {
       apiKey = await apiKeyPromise;
       if (!apiKey) {
         mountError(root, 'This World Monitor panel requires an embedding API key from the partner account.');

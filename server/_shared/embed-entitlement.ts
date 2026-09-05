@@ -5,9 +5,10 @@
 
 import {
   parseEmbedPanelId,
-  panelRequiresEmbeddingApiKey,
+  getEmbedPanelFreeTier,
   type EmbedPanelId,
 } from '../../shared/embed-panels';
+import { hasEmbedAccess } from '../../shared/embed-access';
 import type { CachedEntitlements } from './entitlement-check';
 import { isUserApiKeyUnavailableError } from './user-api-key';
 
@@ -46,7 +47,13 @@ export async function evaluateEmbedEntitlement(
     return { status: 404, body: { allowed: false, error: 'unknown_panel' } };
   }
 
-  if (!panelRequiresEmbeddingApiKey(panel)) {
+  // A panel with a free tier clears its own floor keylessly, so this endpoint
+  // answers `public` without touching the credential — including when one was
+  // supplied. Upgrading to the paid tier is `POST /api/embed/session`'s job,
+  // which keeps key validation and lapse handling on ONE path; answering it
+  // here too would mean a partner whose key lapsed loses the free render they
+  // are still entitled to.
+  if (getEmbedPanelFreeTier(panel) !== null) {
     return { status: 200, body: { allowed: true, panel, public: true } };
   }
 
@@ -77,12 +84,12 @@ export async function evaluateEmbedEntitlement(
       }
       return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
     }
-    // Match gateway `apiAccessCovered`: apiAccess alone is not coverage.
-    // A lapsed row with apiAccess still true must 403, not 200.
-    if (
-      entitlements.features.apiAccess === true &&
-      (entitlements.validUntil ?? 0) >= Date.now()
-    ) {
+    // `hasEmbedAccess` rather than `apiAccess`: embedding is now its own
+    // catalog entitlement, so any paid tier carrying it may embed even without
+    // REST API access. It keeps the coverage rule the previous `apiAccess`
+    // check encoded — a lapsed row with the flag still true fails on
+    // `validUntil` and 403s rather than 200s.
+    if (hasEmbedAccess(entitlements, Date.now())) {
       return { status: 200, body: { allowed: true, panel, public: false, accountId: userKey.userId } };
     }
     return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
