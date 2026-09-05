@@ -214,11 +214,17 @@ test('the guarded Cross-Strait recovery appends the full retained archive in bou
     HISTORY_MAX_RECORDS_PER_RUN,
     CROSS_STRAIT_HISTORY_MAX_RECORDS - 2 * HISTORY_MAX_RECORDS_PER_RUN,
   ]);
-  assert.equal(result.inputRecords, CROSS_STRAIT_HISTORY_MAX_RECORDS);
-  assert.equal(result.normalizedRecords, CROSS_STRAIT_HISTORY_MAX_RECORDS);
-  assert.equal(result.droppedRecords, 0);
-  assert.equal(result.inserted, CROSS_STRAIT_HISTORY_MAX_RECORDS);
-  assert.equal(result.chunks, 8);
+  assert.deepEqual(result, {
+    inserted: CROSS_STRAIT_HISTORY_MAX_RECORDS,
+    skipped: 0,
+    retracted: 0,
+    chunks: 8,
+    abandoned: 0,
+    failedChunks: 0,
+    inputRecords: CROSS_STRAIT_HISTORY_MAX_RECORDS,
+    normalizedRecords: CROSS_STRAIT_HISTORY_MAX_RECORDS,
+    droppedRecords: 0,
+  });
 });
 
 test('the guarded Cross-Strait recovery rejects records beyond canonical retention', async () => {

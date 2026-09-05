@@ -168,18 +168,19 @@ describe('Cross-Strait history Railway one-off', () => {
       /git -C "\$workspace" fetch --quiet --depth=1 origin "\$WM_ONE_OFF_DEPLOYED_COMMIT"/,
     );
     assert.match(seedCall.args.at(-1), /git -C "\$workspace" checkout --quiet --detach FETCH_HEAD/);
-    assert.match(seedCall.args.at(-1), /actual_commit="\$\(git -C "\$workspace" rev-parse HEAD\)"/);
+    assert.match(seedCall.args.at(-1), /actual_commit="\$\(git -C "\$workspace" rev-parse HEAD 2>\/dev\/null\)"/);
     assert.match(seedCall.args.at(-1), /if \[ "\$actual_commit" != "\$WM_ONE_OFF_DEPLOYED_COMMIT" \]/);
     assert.match(seedCall.args.at(-1), /seed-cross-strait-activity\.mjs/);
+    assert.match(seedCall.args.at(-1), /WM_ONE_OFF_HISTORY_RECEIPT=1 node --eval/);
   });
 
   it('turns a fail-open seeder lock skip into a failed one-off', () => {
-    assert.match(
-      SANDBOX_SEED_PROGRAM,
-      /SKIPPED: \(Redis unavailable during lock acquisition\|another seed run in progress\|validation failed\)\|NO SOURCE:\|RETRY:/,
-    );
-    assert.match(SANDBOX_SEED_PROGRAM, /exit 75/);
-    assert.match(SANDBOX_SEED_PROGRAM, /exit "\$exit_code"/);
+    assert.match(SANDBOX_SEED_PROGRAM, /SKIPPED: Redis unavailable during lock acquisition.*seed_lock_unavailable/s);
+    assert.match(SANDBOX_SEED_PROGRAM, /SKIPPED: another seed run in progress.*seed_already_running/s);
+    assert.match(SANDBOX_SEED_PROGRAM, /SKIPPED: validation failed.*seed_validation_failed/s);
+    assert.match(SANDBOX_SEED_PROGRAM, /NO SOURCE:.*seed_no_source/s);
+    assert.match(SANDBOX_SEED_PROGRAM, /RETRY:.*seed_incomplete/s);
+    assert.match(SANDBOX_SEED_PROGRAM, /reject_seed seed_process_failed "\$exit_code"/);
   });
 
   it('requires a lossless same-run history ingest postflight', () => {
@@ -597,6 +598,81 @@ while :; do printf '%01024d' 0; done
     );
     assert.deepEqual(spawnOptions.stdio, ['ignore', 'pipe', 'ignore']);
     assert.equal('maxBuffer' in spawnOptions, false);
+  });
+
+  it('surfaces only an allowlisted seed failure reason', async () => {
+    const secret = 'secret-returned-by-remote-process';
+    let spawnOptions;
+    const execute = createRailwayExecutor((_command, _args, options) => {
+      spawnOptions = options;
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stdout.setEncoding = () => {};
+      child.kill = () => true;
+      queueMicrotask(() => {
+        child.stdout.emit('data', `${secret}\n`);
+        child.stdout.emit('data', '__WM_ONE_OFF_SEED__{"status":"rejected","code":"history_postflight_failed"}\n');
+        child.emit('close', 75, null);
+      });
+      return child;
+    });
+
+    await assert.rejects(
+      execute(['sandbox', 'exec'], { stage: 'seed', timeoutMs: 1_000 }),
+      (error) => {
+        assert.match(error.message, /reason history_postflight_failed/);
+        assert.doesNotMatch(error.message, new RegExp(secret));
+        assert.match(error.message, /remote output suppressed/);
+        return true;
+      },
+    );
+    assert.deepEqual(spawnOptions.stdio, ['ignore', 'pipe', 'ignore']);
+  });
+
+  it('requires the fixed accepted marker even when Railway exits zero', async () => {
+    const execute = createRailwayExecutor(() => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stdout.setEncoding = () => {};
+      child.kill = () => true;
+      queueMicrotask(() => {
+        child.stdout.emit('data', 'untrusted successful-looking output\n');
+        child.emit('close', 0, null);
+      });
+      return child;
+    });
+
+    await assert.rejects(
+      execute(['sandbox', 'exec'], { stage: 'seed', timeoutMs: 1_000 }),
+      /seed returned no accepted status; remote output suppressed/,
+    );
+  });
+
+  it('does not surface a non-allowlisted seed marker code', async () => {
+    const secretCode = 'secret_remote_failure_detail';
+    const execute = createRailwayExecutor(() => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stdout.setEncoding = () => {};
+      child.kill = () => true;
+      queueMicrotask(() => {
+        child.stdout.emit(
+          'data',
+          `__WM_ONE_OFF_SEED__{"status":"rejected","code":"${secretCode}"}\n`,
+        );
+        child.emit('close', 75, null);
+      });
+      return child;
+    });
+
+    await assert.rejects(
+      execute(['sandbox', 'exec'], { stage: 'seed', timeoutMs: 1_000 }),
+      (error) => {
+        assert.equal(error.message, 'Railway seed failed (exit 75); remote output suppressed');
+        assert.doesNotMatch(error.message, new RegExp(secretCode));
+        return true;
+      },
+    );
   });
 
   it('captures only bounded sandbox-create JSON', async () => {
