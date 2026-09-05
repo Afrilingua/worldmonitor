@@ -27,7 +27,13 @@ export const CROSS_STRAIT_ACTIVITY_FETCH_PHASE_TIMEOUT_MS = 240_000;
 // archive, its compact bootstrap projection, and both source-health records.
 export const CROSS_STRAIT_ACTIVITY_PUBLISH_CLEANUP_HEADROOM_MS = 40_000;
 export const CROSS_STRAIT_ACTIVITY_LOCK_TTL_MS = 320_000;
+// One-off recovery batches the full retained archive through the shared
+// 150-row embedding cap. Each batch still spends the 30s history append
+// budget, so the lock has to cover fetch + every batch + publish cleanup.
 export const CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS = 480_000;
+export const CROSS_STRAIT_HISTORY_MAX_RECORDS =
+  MND_RETENTION_REPORTING_DAYS + REVIEWED_JAPAN_MOD_OBSERVATIONS.length;
+const HISTORY_APPEND_BUDGET_MS = 30_000;
 // Keep this literal inside scripts/: Railway's nixpacks service copies only
 // scripts/, so importing the shared browser/Edge registry would crash at boot.
 // The production-registration test pins it to BOOTSTRAP_CACHE_KEYS.
@@ -42,6 +48,14 @@ if (CROSS_STRAIT_ACTIVITY_LOCK_TTL_MS <= (
   CROSS_STRAIT_ACTIVITY_FETCH_PHASE_TIMEOUT_MS + CROSS_STRAIT_ACTIVITY_PUBLISH_CLEANUP_HEADROOM_MS
 )) {
   throw new Error('cross-Strait activity lock TTL must exceed fetch deadline plus publish cleanup headroom');
+}
+
+if (CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS <= (
+  CROSS_STRAIT_ACTIVITY_FETCH_PHASE_TIMEOUT_MS
+  + CROSS_STRAIT_ACTIVITY_PUBLISH_CLEANUP_HEADROOM_MS
+  + Math.ceil(CROSS_STRAIT_HISTORY_MAX_RECORDS / HISTORY_MAX_RECORDS_PER_RUN) * HISTORY_APPEND_BUDGET_MS
+)) {
+  throw new Error('cross-Strait one-off lock TTL must cover fetch, full-archive history batches, and publish cleanup');
 }
 
 export function crossStraitActivityLockTtlMs(env = process.env) {
@@ -260,14 +274,10 @@ export function buildCrossStraitHistoryRecords(snapshot) {
   }).filter(Boolean);
 }
 
-const CROSS_STRAIT_HISTORY_MAX_RECORDS =
-  MND_RETENTION_REPORTING_DAYS + REVIEWED_JAPAN_MOD_OBSERVATIONS.length;
-
 /**
- * The production one-off may need to recover the complete retained archive,
- * while natural seed runs must keep the shared per-run embedding cost limit.
- * Reuse that limit as a batch boundary and return one aggregate result for
- * the strict same-run postflight receipt.
+ * Scheduled ticks keep the shared 150-row embedding cap. The guarded one-off
+ * reuses that cap as a batch size so the full retained archive can still
+ * satisfy lossless postflight (validation drops fail; cap slicing does not).
  */
 export async function appendCrossStraitHistoryArchive(
   args,

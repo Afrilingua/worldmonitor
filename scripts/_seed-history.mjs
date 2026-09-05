@@ -37,7 +37,9 @@ import { embedBatch, normalizeForEmbedding } from './lib/brief-embedding.mjs';
 
 // Per-run cap. A seed tick that suddenly emits thousands of "historic"
 // rows is a bug upstream, not a reason to spend the embedding budget —
-// keep the newest slice and drop the tail.
+// keep the newest slice and drop the tail. The Cross-Strait one-off
+// reuses this as a batch size so a full retained archive can still
+// postflight as lossless; it does not mean recovery may drop the tail.
 export const HISTORY_MAX_RECORDS_PER_RUN = 150;
 
 // Records per POST. Matches the batch sizes used by the other relay

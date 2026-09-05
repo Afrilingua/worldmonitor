@@ -27,11 +27,13 @@ const {
 const {
   CROSS_STRAIT_ACTIVITY_LOCK_TTL_MS,
   CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS,
+  CROSS_STRAIT_HISTORY_MAX_RECORDS,
   appendCrossStraitHistoryArchive,
   buildCrossStraitHistoryRecords,
   crossStraitActivityLockTtlMs,
   crossStraitHistoryAfterPublish,
 } = await import('../scripts/seed-cross-strait-activity.mjs');
+const { HISTORY_MAX_RECORDS_PER_RUN } = await import('../scripts/_seed-history.mjs');
 
 const ACLED_EVENT = {
   id: 'acled-SUD12345',
@@ -185,7 +187,7 @@ test('the guarded Cross-Strait recovery appends the full retained archive in bou
     domain: 'military',
     resource: 'cross-strait-activity',
     runId: 'run-full-archive',
-    records: Array.from({ length: 367 }, (_, index) => ({
+    records: Array.from({ length: CROSS_STRAIT_HISTORY_MAX_RECORDS }, (_, index) => ({
       dedupeKey: `military:cross-strait-activity:mnd-${index}`,
       title: `Cross-Strait activity ${index}`,
       occurredAt: Date.parse('2026-09-05') - index * 86_400_000,
@@ -207,16 +209,20 @@ test('the guarded Cross-Strait recovery appends the full retained archive in bou
     },
   });
 
-  assert.deepEqual(batchSizes, [150, 150, 67]);
+  assert.deepEqual(batchSizes, [
+    HISTORY_MAX_RECORDS_PER_RUN,
+    HISTORY_MAX_RECORDS_PER_RUN,
+    CROSS_STRAIT_HISTORY_MAX_RECORDS - 2 * HISTORY_MAX_RECORDS_PER_RUN,
+  ]);
   assert.deepEqual(result, {
-    inserted: 367,
+    inserted: CROSS_STRAIT_HISTORY_MAX_RECORDS,
     skipped: 0,
     retracted: 0,
     chunks: 8,
     abandoned: 0,
     failedChunks: 0,
-    inputRecords: 367,
-    normalizedRecords: 367,
+    inputRecords: CROSS_STRAIT_HISTORY_MAX_RECORDS,
+    normalizedRecords: CROSS_STRAIT_HISTORY_MAX_RECORDS,
     droppedRecords: 0,
   });
 });
@@ -225,13 +231,38 @@ test('the guarded Cross-Strait recovery rejects records beyond canonical retenti
   let appendCalls = 0;
   await assert.rejects(
     appendCrossStraitHistoryArchive({
-      records: Array.from({ length: 368 }, () => ({})),
+      records: Array.from({ length: CROSS_STRAIT_HISTORY_MAX_RECORDS + 1 }, () => ({})),
     }, {
       append: async () => { appendCalls += 1; },
     }),
-    /368 records; maximum is 367/,
+    new RegExp(`${CROSS_STRAIT_HISTORY_MAX_RECORDS + 1} records; maximum is ${CROSS_STRAIT_HISTORY_MAX_RECORDS}`),
   );
   assert.equal(appendCalls, 0);
+});
+
+test('full-archive aggregation still reports validation drops to postflight', async () => {
+  const result = await appendCrossStraitHistoryArchive({
+    records: Array.from({ length: HISTORY_MAX_RECORDS_PER_RUN + 1 }, (_, index) => ({
+      dedupeKey: `military:cross-strait-activity:mnd-${index}`,
+      title: `Cross-Strait activity ${index}`,
+      occurredAt: Date.parse('2026-09-05') - index * 86_400_000,
+    })),
+  }, {
+    append: async ({ records }) => ({
+      inserted: Math.max(0, records.length - 1),
+      skipped: 0,
+      retracted: 0,
+      chunks: 1,
+      abandoned: 0,
+      failedChunks: 0,
+      inputRecords: records.length,
+      normalizedRecords: records.length - 1,
+      droppedRecords: 1,
+    }),
+  });
+
+  assert.equal(result.droppedRecords, 2);
+  assert.notEqual(result.inputRecords, result.normalizedRecords);
 });
 
 test('only the guarded one-off extends the Cross-Strait seed lock', () => {
@@ -240,7 +271,6 @@ test('only the guarded one-off extends the Cross-Strait seed lock', () => {
     crossStraitActivityLockTtlMs({ WM_ONE_OFF_HISTORY_RECEIPT: '1' }),
     CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS,
   );
-  assert.ok(CROSS_STRAIT_ACTIVITY_ONE_OFF_LOCK_TTL_MS >= 8 * 60_000);
 });
 
 test('the one-off history hook records one aggregate receipt for the full archive', async () => {
@@ -250,7 +280,7 @@ test('the one-off history hook records one aggregate receipt for the full archiv
   process.env.WM_ONE_OFF_HISTORY_RECEIPT = '1';
   try {
     await crossStraitHistoryAfterPublish({
-      observations: Array.from({ length: 367 }, (_, index) => ({
+      observations: Array.from({ length: CROSS_STRAIT_HISTORY_MAX_RECORDS }, (_, index) => ({
         ...CROSS_STRAIT_OBSERVATION,
         id: `mnd-${index}`,
         sourceId: index < 365 ? 'taiwan-mnd' : 'japan-mod',
@@ -280,11 +310,15 @@ test('the one-off history hook records one aggregate receipt for the full archiv
     else process.env.WM_ONE_OFF_HISTORY_RECEIPT = previous;
   }
 
-  assert.deepEqual(batchSizes, [150, 150, 67]);
+  assert.deepEqual(batchSizes, [
+    HISTORY_MAX_RECORDS_PER_RUN,
+    HISTORY_MAX_RECORDS_PER_RUN,
+    CROSS_STRAIT_HISTORY_MAX_RECORDS - 2 * HISTORY_MAX_RECORDS_PER_RUN,
+  ]);
   assert.equal(healthObservations.length, 1);
   assert.equal(healthObservations[0].runId, 'run-full-hook');
-  assert.equal(healthObservations[0].result.inputRecords, 367);
-  assert.equal(healthObservations[0].result.normalizedRecords, 367);
+  assert.equal(healthObservations[0].result.inputRecords, CROSS_STRAIT_HISTORY_MAX_RECORDS);
+  assert.equal(healthObservations[0].result.normalizedRecords, CROSS_STRAIT_HISTORY_MAX_RECORDS);
   assert.equal(healthObservations[0].result.droppedRecords, 0);
 });
 
