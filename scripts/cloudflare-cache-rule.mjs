@@ -40,11 +40,20 @@
  * headers, and both match media types case-insensitively (measured 2026-09-05:
  * `Accept: TEXT/MARKDOWN` answers text/markdown on both origins). Cloudflare keys
  * its cache on the URL and documents honouring `Vary` only for Accept-Encoding;
- * nothing in the zone configures otherwise. So the rule admits a request only
- * when it asks for the HTML representation the way browsers and crawlers do — no
- * RSC headers, no markdown/plain/x-component media type in Accept. Negotiating
- * requests fall through to the bypass and stay DYNAMIC, and nothing is stored
- * that a differently-negotiating client could be handed.
+ * nothing in the zone configures otherwise. So the rule admits a request for an
+ * HTML document only when it asks for it the way browsers and crawlers do — no
+ * RSC headers, no markdown/plain/x-component media type in any Accept value
+ * (Accept is list-typed and may arrive as several header lines; the origins
+ * honour the combined list, so every value is inspected). Negotiating requests
+ * fall through to the bypass and stay DYNAMIC, and nothing is stored that a
+ * differently-negotiating client could be handed.
+ *
+ * Files with a `.md`, `.txt` or `.xml` extension are exempt from that guard: the
+ * markdown twins (`/countries/iran.md`, `/docs/documentation.md`), the root agent
+ * files, feeds and sitemaps answer the same body for every Accept value and for
+ * `RSC: 1` (measured 2026-09-05). Guarding them would push the clients most
+ * likely to advertise their media type — agents sending `Accept: text/plain` or
+ * `text/markdown` — off the cache these files exist to serve.
  *
  * ## Safety of caching these documents at a shared edge
  *
@@ -165,6 +174,14 @@ export const RSC_REQUEST_HEADERS = Object.freeze([
  */
 export const NEGOTIATED_MEDIA_TYPES = Object.freeze(['text/markdown', 'text/plain', 'text/x-component']);
 
+/**
+ * Path extensions whose response is the same body whatever the request asks for,
+ * so the representation guard does not apply: markdown twins, the root agent
+ * files, RSS and sitemaps. An allowlist rather than "anything with an extension"
+ * so a document slug that happens to contain a dot (`/docs/v1.2`) keeps the guard.
+ */
+export const SINGLE_REPRESENTATION_EXTENSIONS = Object.freeze(['md', 'txt', 'xml']);
+
 const CORPUS_CACHE_RULE_DESCRIPTION = 'WWW corpus HTML - use origin CDN cache headers';
 
 /** Stable ruleset identity, independent of dashboard description edits. */
@@ -221,12 +238,21 @@ function buildCorpusCacheExpression({
   const agentFiles = files.map((file) => `"/${file}"`).join(' ');
   // Header names arrive lowercased in http.request.headers.names; Accept values
   // do not, and both origins match media types case-insensitively, hence lower().
+  // Accept is a list-typed header that may arrive as several lines, and Cloudflare
+  // exposes each line as one array element; the origins honour the combined list
+  // (`Accept: text/markdown` on a second line still yields markdown), so every
+  // element is inspected — `[0]` alone would admit a request whose first line is
+  // harmless and whose second asks for markdown.
   const noRscFlight = RSC_REQUEST_HEADERS.map(
-    (name) => `  and not any(http.request.headers.names[*] == "${name}")`,
+    (name) => `      and not any(http.request.headers.names[*] == "${name}")`,
   );
   const noNegotiation = NEGOTIATED_MEDIA_TYPES.map(
-    (type) => `  and not (lower(http.request.headers["accept"][0]) contains "${type}")`,
+    (type) => `      and not any(lower(http.request.headers["accept"][*])[*] contains "${type}")`,
   );
+  const singleRepresentation = SINGLE_REPRESENTATION_EXTENSIONS.map((ext) => `"${ext}"`).join(' ');
+  // The first `and not` opens the conjunction after `or (`; strip its leading
+  // operator so the block reads `or (not any(...) and not any(...) ...)`.
+  const [firstGuard, ...restGuards] = [...noRscFlight, ...noNegotiation];
   return [
     `(http.host eq "${CORPUS_HOST}"`,
     '  and http.request.method eq "GET"',
@@ -235,11 +261,16 @@ function buildCorpusCacheExpression({
     // Accept-Encoding, so caching the query-bearing variants risks replaying a
     // crawler's redirect to a human and stripping `ref` before referral capture.
     '  and http.request.uri.query eq ""',
-    // The representations a URL can answer with besides its HTML document; see
-    // the header comment. A request that negotiates is not cached, not served
-    // from cache, and reaches the origin exactly as it did before this rule.
-    ...noRscFlight,
-    ...noNegotiation,
+    // The representations an HTML document URL can answer with besides the
+    // document; see the header comment. A request that negotiates is not cached,
+    // not served from cache, and reaches the origin exactly as it did before this
+    // rule. Single-representation files skip the guard entirely.
+    '  and (',
+    `    http.request.uri.path.extension in {${singleRepresentation}}`,
+    `    or (${firstGuard.trim().replace(/^and /, '')}`,
+    ...restGuards,
+    '    )',
+    '  )',
     '  and (',
     `    ${path} in {${bare}}`,
     ...nested,

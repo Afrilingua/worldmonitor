@@ -157,10 +157,10 @@ async function assertRepeatedNeverCloudflareHit(url, { expectedStatus, label, in
  * coincides with an apply, but a manual re-run right after one would, and the
  * failure message says so.
  */
-async function waitForCloudflareHit(url, name) {
+async function waitForCloudflareHit(url, name, init = {}) {
   const seen = [];
   for (let attempt = 1; attempt <= 8; attempt += 1) {
-    const result = await fetchText(url);
+    const result = await fetchText(url, init);
     assert.equal(result.resp.status, 200, `${name}: corpus document must still be served`);
     const status = cfCacheStatus(result.resp).toUpperCase();
     seen.push(status || 'absent');
@@ -577,6 +577,16 @@ describe(`live API cache/auth regression sweep (${LIVE ? 'ENABLED' : 'SKIPPED - 
         `${name} must advertise the 600s shared TTL the cache rule honours`,
       );
     }
+
+    // Single-representation files are exempt from the representation guard, so an
+    // agent that advertises its media type still gets the edge cache. Positive
+    // control for the exemption; the markdown checks below are its negative.
+    const plainText = await waitForCloudflareHit(
+      `${WWW_BASE}/llms.txt`,
+      'llms.txt for an agent sending Accept: text/plain',
+      { headers: { Accept: 'text/plain' } },
+    );
+    assert.match(plainText.resp.headers.get('content-type') || '', /text\/plain/);
 
     const flight = await fetchText(`${WWW_BASE}/docs/documentation`, { headers: { RSC: '1' } });
     assert.equal(flight.resp.status, 200, 'docs RSC request must still be served');

@@ -29,6 +29,7 @@ import {
   FAMILY_EXCLUSIONS,
   NEGOTIATED_MEDIA_TYPES,
   RSC_REQUEST_HEADERS,
+  SINGLE_REPRESENTATION_EXTENSIONS,
   buildCorpusCacheRule,
   diffLiveRuleset,
   planApply,
@@ -198,7 +199,7 @@ describe('cloudflare corpus cache rule', () => {
     assert.deepEqual(sorted(claimed.files), sorted(AGENT_TEXT_FILES));
   });
 
-  it('admits only the HTML representation: no RSC flight headers, no negotiated media types', () => {
+  it('admits an HTML document only for the HTML representation: no RSC flight headers, no negotiated media types', () => {
     // Vercel answers `Accept: text/markdown` with markdown for the corpus and the
     // blog; Mintlify does the same for text/markdown and text/plain and serves an
     // RSC flight for `RSC: 1` / the next-router-* headers. Cloudflare keys on the
@@ -210,26 +211,53 @@ describe('cloudflare corpus cache rule', () => {
       ['rsc', 'next-router-state-tree', 'next-router-prefetch', 'next-router-segment-prefetch'],
     );
     assert.deepEqual([...NEGOTIATED_MEDIA_TYPES], ['text/markdown', 'text/plain', 'text/x-component']);
-    for (const name of RSC_REQUEST_HEADERS) {
-      assert.ok(
-        rule.expression.includes(`and not any(http.request.headers.names[*] == "${name}")`),
-        `${name} must exclude the request`,
-      );
+    const guards = [
+      ...RSC_REQUEST_HEADERS.map((name) => `not any(http.request.headers.names[*] == "${name}")`),
+      // Every Accept value, lowercased: Accept may arrive as several header lines
+      // and the origins honour the combined list (measured: a second line
+      // `Accept: text/markdown` still yields markdown), and both origins match
+      // media types case-insensitively (`Accept: TEXT/MARKDOWN` -> text/markdown).
+      // `[0]` alone would admit a request whose first line is harmless.
+      ...NEGOTIATED_MEDIA_TYPES.map((type) => `not any(lower(http.request.headers["accept"][*])[*] contains "${type}")`),
+    ];
+    for (const guard of guards) {
+      assert.ok(rule.expression.includes(guard), `missing guard: ${guard}`);
     }
-    for (const type of NEGOTIATED_MEDIA_TYPES) {
-      // lower(): both origins match media types case-insensitively (measured:
-      // `Accept: TEXT/MARKDOWN` answers text/markdown), so the guard must too.
-      assert.ok(
-        rule.expression.includes(`and not (lower(http.request.headers["accept"][0]) contains "${type}")`),
-        `${type} in Accept must exclude the request, case-insensitively`,
-      );
-    }
-    // These clauses gate the whole rule, not one family: they sit before the path
+    assert.ok(!rule.expression.includes('["accept"][0]'), 'only the first Accept line was inspected');
+
+    // Structure: one guard block, gating every HTML document family, disjoined
+    // with the single-representation exemption, and closed before the path
     // disjunction opens.
-    const pathBlock = rule.expression.indexOf('  and (\n');
-    for (const clause of ['headers.names[*] == "rsc"', 'lower(http.request.headers["accept"][0])']) {
-      assert.ok(rule.expression.lastIndexOf(clause) < pathBlock, `${clause} must apply to every family`);
+    const lines = rule.expression.split('\n');
+    const exemption = lines.findIndex((line) => line.trim() === `http.request.uri.path.extension in {${SINGLE_REPRESENTATION_EXTENSIONS.map((ext) => `"${ext}"`).join(' ')}}`);
+    assert.ok(exemption > 0, 'the single-representation exemption must be present');
+    assert.equal(lines[exemption - 1].trim(), 'and (', 'the exemption opens the guard block');
+    assert.ok(lines[exemption + 1].trim().startsWith(`or (${guards[0]}`), 'the guard conjunction is the exemption\'s alternative');
+    const guardClose = lines.findIndex((line, index) => index > exemption && line.trim() === ')');
+    const blockClose = guardClose + 1;
+    assert.equal(lines[blockClose].trim(), ')', 'the guard block closes');
+    assert.equal(lines[blockClose + 1].trim(), 'and (', 'the path disjunction follows the guard block');
+    for (const guard of guards) {
+      const at = lines.findIndex((line) => line.includes(guard));
+      assert.ok(at > exemption && at < guardClose, `${guard} must sit inside the guard block`);
     }
+    assert.ok(
+      !lines.slice(blockClose + 1).some((line) => line.includes('headers.names') || line.includes('["accept"]')),
+      'no per-family guard: the block applies to every family once',
+    );
+  });
+
+  it('exempts single-representation files from the representation guard', () => {
+    // /countries/iran.md, /docs/documentation.md, /llms.txt, /blog/rss.xml and
+    // the sitemaps answer the same body for every Accept value and for `RSC: 1`
+    // (measured 2026-09-05). Guarding them would push agents that advertise
+    // `Accept: text/plain` or `text/markdown` — the clients these files exist for
+    // — off the cache. An allowlist, not "any extension": a document slug with a
+    // dot in it (`/docs/v1.2`) must keep the guard.
+    assert.deepEqual([...SINGLE_REPRESENTATION_EXTENSIONS], ['md', 'txt', 'xml']);
+    assert.ok(rule.expression.includes('http.request.uri.path.extension in {"md" "txt" "xml"}'));
+    assert.ok(!rule.expression.includes('path.extension ne ""'), 'must not exempt every extension');
+    assert.ok(!rule.expression.includes('path.extension in {"" "html"}'), 'the exemption is an allowlist of files, not a denylist of documents');
   });
 
   it('leaves the blog asset prefixes to the zone\'s older "Blog" rule', () => {
@@ -253,10 +281,11 @@ describe('cloudflare corpus cache rule', () => {
       rule.expression.includes('starts_with(http.request.uri.path, "/countries/")'),
       'the prefix clause is what admits both /countries/iran/ and /countries/iran.md',
     );
-    assert.ok(
-      !rule.expression.includes('http.request.uri.path.extension'),
-      'no extension filter: narrowing to HTML would drop the .md twins crawlers fetch',
-    );
+    // The only use of the path extension is the single-representation exemption,
+    // which widens what is admitted for .md/.txt/.xml; nothing narrows the path
+    // claims to HTML, which would drop the .md twins crawlers fetch.
+    const extensionUses = rule.expression.match(/http\.request\.uri\.path\.extension[^\n]*/g) ?? [];
+    assert.deepEqual(extensionUses, ['http.request.uri.path.extension in {"md" "txt" "xml"}']);
   });
 
   it('is scoped to query-free GETs of the www document host', () => {

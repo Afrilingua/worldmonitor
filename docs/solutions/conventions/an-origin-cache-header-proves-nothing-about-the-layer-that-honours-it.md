@@ -116,10 +116,13 @@ What the widening surfaced:
   Mintlify does the same for `text/markdown` and `text/plain`, serves an RSC
   flight for `RSC: 1` and the `next-router-*` headers, and both match media
   types case-insensitively. Cloudflare keys on the URL. The rule therefore
-  admits a request only when it asks for the HTML representation the way
-  browsers and crawlers do; negotiating requests fall through to the bypass,
-  exactly as before. Probe representations, not just routes, before caching
-  anything behind a proxy.
+  admits an HTML document only when the request asks for it the way browsers
+  and crawlers do — inspecting every `Accept` value, since the header may
+  arrive as several lines and the origins honour the combined list — while
+  `.md`/`.txt`/`.xml` files, which answer one body whatever is asked, are
+  exempt so agents advertising their media type keep the cache. Negotiating
+  requests for documents fall through to the bypass, exactly as before. Probe
+  representations, not just routes, before caching anything behind a proxy.
 - **Vercel's own cache is a third layer with the same problem.** For the
   Mintlify proxy `Vercel-CDN-Cache-Control: no-store` keeps Vercel from keying
   the HTML and markdown bodies under one URL while `CDN-Cache-Control` still
