@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readdirSync } from 'node:fs';
-import policy from '../shared/agent-request-policy.json' with { type: 'json' };
+import policy from './shared/agent-request-policy.json' with { type: 'json' };
 
 const origin = new URL(process.argv[2] ?? 'https://www.worldmonitor.app').origin;
 const checks = [];

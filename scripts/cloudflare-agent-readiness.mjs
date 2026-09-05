@@ -1,6 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import policy from '../shared/agent-request-policy.json' with { type: 'json' };
+import policy from './shared/agent-request-policy.json' with { type: 'json' };
 import { loadEnvFile } from './_seed-utils.mjs';
 import { cloudflareRequest, resolveToken, resolveZoneId } from './cloudflare-cache-rule.mjs';
 
