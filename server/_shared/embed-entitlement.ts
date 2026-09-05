@@ -5,9 +5,11 @@
 
 import {
   parseEmbedPanelId,
-  panelRequiresEmbeddingApiKey,
+  getEmbedPanelFreeTier,
   type EmbedPanelId,
 } from '../../shared/embed-panels';
+import { hasAccountEmbedAccess, hasEmbedAccess } from '../../shared/embed-access';
+import type { ClerkPlanLookupResult } from '../auth-session';
 import type { CachedEntitlements } from './entitlement-check';
 import { isUserApiKeyUnavailableError } from './user-api-key';
 
@@ -29,6 +31,7 @@ export interface EmbedEntitlementDeps {
   timingSafeIncludes: (candidate: string, keys: readonly string[]) => Promise<boolean>;
   validateUserApiKey: (key: string) => Promise<{ userId: string } | null>;
   getEntitlements: (userId: string) => Promise<CachedEntitlements | null>;
+  getAccountPlan: (userId: string) => Promise<ClerkPlanLookupResult>;
   isEntitlementBackendConfigured: () => boolean;
 }
 
@@ -46,7 +49,13 @@ export async function evaluateEmbedEntitlement(
     return { status: 404, body: { allowed: false, error: 'unknown_panel' } };
   }
 
-  if (!panelRequiresEmbeddingApiKey(panel)) {
+  // A panel with a free tier clears its own floor keylessly, so this endpoint
+  // answers `public` without touching the credential — including when one was
+  // supplied. Upgrading to the paid tier is `POST /api/embed/session`'s job,
+  // which keeps key validation and lapse handling on ONE path; answering it
+  // here too would mean a partner whose key lapsed loses the free render they
+  // are still entitled to.
+  if (getEmbedPanelFreeTier(panel) !== null) {
     return { status: 200, body: { allowed: true, panel, public: true } };
   }
 
@@ -68,22 +77,20 @@ export async function evaluateEmbedEntitlement(
       return { status: 401, body: { allowed: false, error: 'invalid_embedding_api_key' } };
     }
     const entitlements = await deps.getEntitlements(userKey.userId);
-    if (entitlements?.verificationUnavailable) {
-      return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
-    }
-    if (!entitlements) {
-      if (!deps.isEntitlementBackendConfigured()) {
-        return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
-      }
-      return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
-    }
-    // Match gateway `apiAccessCovered`: apiAccess alone is not coverage.
-    // A lapsed row with apiAccess still true must 403, not 200.
-    if (
-      entitlements.features.apiAccess === true &&
-      (entitlements.validUntil ?? 0) >= Date.now()
-    ) {
+    const now = Date.now();
+    if (hasEmbedAccess(entitlements, now)) {
       return { status: 200, body: { allowed: true, panel, public: false, accountId: userKey.userId } };
+    }
+
+    const accountPlan = await deps.getAccountPlan(userKey.userId);
+    if (accountPlan === 'unavailable') {
+      return { status: 503, body: { allowed: false, error: 'account_verification_unavailable' } };
+    }
+    if (hasAccountEmbedAccess(accountPlan, entitlements, now)) {
+      return { status: 200, body: { allowed: true, panel, public: false, accountId: userKey.userId } };
+    }
+    if (entitlements?.verificationUnavailable || (!entitlements && !deps.isEntitlementBackendConfigured())) {
+      return { status: 503, body: { allowed: false, error: 'entitlement_verification_unavailable' } };
     }
     return { status: 403, body: { allowed: false, error: 'embed_not_entitled' } };
   } catch (error) {

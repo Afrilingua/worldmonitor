@@ -2,9 +2,15 @@ import type { MapLayers } from '@/types';
 import {
   DEFAULT_EMBED_PANEL_ID,
   parseEmbedPanelId,
+  type EmbedLayerId,
   type EmbedPanelId,
 } from '../../shared/embed-panels';
 
+export type { EmbedLayerId };
+
+// Browser-side mapping for the shared `EMBED_LAYER_IDS` allowlist. An id
+// present there but missing here would silently render nothing; pinned by
+// tests/embed-url.test.mts.
 export const EMBEDDABLE_LAYERS = [
   { id: 'conflicts', mapLayer: 'conflicts', label: 'Conflicts' },
   { id: 'earthquakes', mapLayer: 'natural', label: 'Earthquakes' },
@@ -22,7 +28,6 @@ export const EMBEDDABLE_LAYERS = [
   { id: 'gulfInvestments', mapLayer: 'gulfInvestments', label: 'GCC Investments' },
 ] as const;
 
-export type EmbedLayerId = typeof EMBEDDABLE_LAYERS[number]['id'];
 export type EmbedTheme = 'dark' | 'light';
 export type EmbedVariant = 'full' | 'tech' | 'finance' | 'commodity' | 'happy' | 'energy';
 

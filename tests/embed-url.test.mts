@@ -6,11 +6,22 @@ import {
   buildEmbedMapUrl,
   buildEmbedPanelUrl,
   createBlankMapLayers,
+  EMBEDDABLE_LAYERS,
   embedLayerIdsFromMapLayers,
   parseEmbedParams,
 } from '../src/embed/embed-url';
+import { EMBED_LAYER_IDS } from '../shared/embed-panels';
 
 describe('embed URL contract', () => {
+  it('maps every layer the shared allowlist names', () => {
+    // The edge validates requested layers against EMBED_LAYER_IDS; an id it
+    // accepts but this table omits would reach the browser and render nothing.
+    assert.deepEqual(
+      EMBEDDABLE_LAYERS.map((layer) => layer.id),
+      [...EMBED_LAYER_IDS],
+    );
+  });
+
   it('defaults to a small public map-layer set', () => {
     const parsed = parseEmbedParams('');
     assert.deepEqual(parsed.layerIds, ['conflicts', 'earthquakes', 'weather']);
