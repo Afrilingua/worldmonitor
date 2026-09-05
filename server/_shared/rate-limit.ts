@@ -514,6 +514,10 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // Partner embed entitlement (#6599): keyed panels look up wm_ keys in Convex.
   // Cap per-IP so a stolen snippet cannot amplify validation traffic.
   '/api/embed/entitlement': { limit: 60, window: '60 s' },
+  // Grant exchange: validates a wme_ key in Convex, so it amplifies the same
+  // way the entitlement lookup does. A frame mints once per 30-minute grant,
+  // which leaves this budget almost entirely as headroom for shared egress IPs.
+  '/api/embed/session': { limit: 60, window: '60 s' },
 };
 
 interface RateLimitPolicyDecision {
@@ -622,6 +626,9 @@ export const FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED: Record<string, RateLimit
   },
   '/api/embed/entitlement': {
     reason: 'Keyed-panel entitlement lookups amplify into Convex user-key validation; fail closed so a Redis outage cannot lift the per-IP budget.',
+  },
+  '/api/embed/session': {
+    reason: 'Grant minting amplifies into Convex embed-key validation and hands back a bearer credential; fail closed so a Redis outage cannot lift the per-IP budget on a credential-issuing path.',
   },
 };
 

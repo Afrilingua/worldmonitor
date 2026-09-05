@@ -204,6 +204,7 @@ const SITE_MAP = [
   [/convex\/companyMonitoring\//,             { cap: 'monitoring.company', note: 'requires planKey!==free && tier>0' , preds: ['tier'] }],
   [/_shared\/direct-llm-quota\.ts/,           { cap: 'llm.direct_quota', note: 'entitlement-derived daily LLM ceiling' , preds: ['tier'] }],
   [/_shared\/embed-entitlement\.ts/,          { cap: 'embed.panels', note: 'entitlement answer for paid-only panels — moved off apiAccess onto embedAccess, so any paid tier carrying the catalog flag may embed' , preds: ['embedAccess'] }],
+  [/_shared\/embed-session\.ts/,              { cap: 'embed.panels', note: 'wme_ key -> wmg_ grant exchange — the enforcement point for a keyed embed, since the map frame then polls with the grant instead of the key' , preds: ['embedAccess'] }],
   // --- false positive: data LOD tier, not an entitlement tier ---
   [/list-military-bases\.ts/,                 { exclude: 'meta.tier is a base-importance LOD tier for zoom filtering, NOT an entitlement tier' , preds: ['tier'] }],
   // --- server route enforcement points of already-mapped API paths ---
@@ -317,6 +318,7 @@ const SITE_BASELINE = {
   "convex/payments/billing.ts::tier": 1,
   "server/_shared/direct-llm-quota.ts::tier": 1,
   "server/_shared/embed-entitlement.ts::embedAccess": 1,
+  "server/_shared/embed-session.ts::embedAccess": 1,
   "server/_shared/entitlement-check.ts::apiAccess": 1,
   "server/_shared/entitlement-check.ts::tier": 1,
   "server/_shared/premium-check.ts::apiAccess": 1,

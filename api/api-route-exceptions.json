@@ -714,6 +714,13 @@
       "removal_issue": null
     },
     {
+      "path": "api/embed/session.ts",
+      "category": "internal-helper",
+      "reason": "Credential exchange for the partner /embed iframe: trades the account's wme_ embed key for a short-lived, panel-scoped wmg_ grant that the frame then polls with. Not a product data API — it returns only a bearer token and its expiry. Deliberately NOT a sebuf RPC: a domain gateway route accepts only wms_ sessions, wm_ keys, or PUBLIC_NO_AUTH_RPC_PATHS membership, and teaching the shared auth cascade a third credential family would widen the very blast radius this exchange exists to narrow. Response is private, no-store because the body IS a credential.",
+      "owner": "@koala73",
+      "removal_issue": null
+    },
+    {
       "path": "api/user/mcp-quota.ts",
       "category": "internal-helper",
       "reason": "Settings-UI-only read of the caller's Pro MCP daily-quota counter (plan 2026-05-10-001 U9). Clerk-authenticated; reads the SAME `mcp:pro-usage:<userId>:<YYYY-MM-DD>` Redis key that api/mcp.ts U7 writes via INCR-first reservation. Returns `{used, limit, resetsAt}` where `limit` is the caller's plan allowance resolved through api/mcp/quota.ts's `resolveDailyLimit` (`null` = unlimited, plan 2026-07-25-001 U3b) — informational, not authoritative; the hard cap is enforced server-side at INCR time. Shape exists purely so the Connected MCP clients tab can show `X / <plan limit> used today, resets in <countdown>` without exposing the underlying Redis schema. Modeling as a sebuf RPC would publish a per-user counter implementation detail as user-facing API surface for a single-feature display widget.",
