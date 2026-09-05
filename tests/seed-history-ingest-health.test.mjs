@@ -53,6 +53,7 @@ const {
   appendSeedHistory,
   makeSeedHistoryAfterPublish,
   HISTORY_INGEST_ALARM_AFTER_FAILURES,
+  HISTORY_INGEST_RUN_RECEIPT_TTL_SECONDS,
   HISTORY_INGEST_SOURCE_VERSION,
   HISTORY_INGEST_TTL_SECONDS,
   describeHistoryAppendOutcome,
@@ -60,6 +61,7 @@ const {
   historyIngestErrorCode,
   historyIngestHealthKey,
   historyIngestMetaKey,
+  historyIngestRunReceiptKey,
   projectHistoryIngestHealth,
   recordHistoryIngestHealth,
 } = await import('../scripts/_seed-history.mjs');
@@ -81,7 +83,17 @@ const AT = Date.UTC(2026, 6, 28, 12, 0, 0);
 const MINUTE = 60_000;
 
 /** One successful relay append. */
-const SUCCESS = { inserted: 7, skipped: 3, chunks: 1, abandoned: 0, failedChunks: 0 };
+const SUCCESS = {
+  inserted: 7,
+  skipped: 3,
+  retracted: 0,
+  chunks: 1,
+  abandoned: 0,
+  failedChunks: 0,
+  inputRecords: 10,
+  normalizedRecords: 10,
+  droppedRecords: 0,
+};
 
 function project(previous, { result = null, error = null, at = AT, runId = 'run-1' } = {}) {
   return projectHistoryIngestHealth(previous, {
@@ -112,6 +124,9 @@ describe('projectHistoryIngestHealth', () => {
     assert.equal(record.lastHealthyAt, AT);
     assert.equal(record.lastInserted, 7);
     assert.equal(record.lastDeduped, 3);
+    assert.equal(record.lastInputRecords, 10);
+    assert.equal(record.lastNormalizedRecords, 10);
+    assert.equal(record.lastDroppedRecords, 0);
     assert.equal(record.lastErrorCode, null);
 
     assert.equal(meta.fetchedAt, AT);
@@ -280,6 +295,24 @@ describe('projectHistoryIngestHealth', () => {
     assert.equal(projected.meta.sourceState, 'degraded', 'but the loss must surface');
   });
 
+  it('records pre-upload drops without changing the scheduled health policy', () => {
+    const droppedBeforeUpload = {
+      ...SUCCESS,
+      inputRecords: 11,
+      normalizedRecords: 10,
+      droppedRecords: 1,
+    };
+    const first = project(null, { result: droppedBeforeUpload });
+    const second = project(first.record, {
+      result: droppedBeforeUpload,
+      at: AT + MINUTE,
+    });
+
+    assert.equal(second.record.lastDroppedRecords, 1);
+    assert.equal(second.record.consecutiveFailures, 0);
+    assert.equal(second.meta.sourceState, 'ok');
+  });
+
   it('lets a clean run clear a lossy streak', () => {
     const lossy = { inserted: 4, skipped: 0, chunks: 1, abandoned: 0, failedChunks: 2 };
     const dropped = project(project(null, { result: SUCCESS }).record, {
@@ -367,11 +400,12 @@ function stubUpstash({ getResult = null, getStatus = 200, pipelineStatus = 200, 
   const calls = { gets: [], pipelines: [] };
   const fetchImpl = async (url, init) => {
     if (String(url).includes('/pipeline')) {
-      calls.pipelines.push(JSON.parse(init.body));
+      const commands = JSON.parse(init.body);
+      calls.pipelines.push(commands);
       return {
         ok: pipelineStatus >= 200 && pipelineStatus < 300,
         status: pipelineStatus,
-        json: async () => pipelineBody ?? [{ result: 'OK' }, { result: 'OK' }, { result: 'OK' }],
+        json: async () => pipelineBody ?? commands.map(() => ({ result: 'OK' })),
       };
     }
     calls.gets.push(String(url));
@@ -414,6 +448,7 @@ describe('recordHistoryIngestHealth', () => {
     assert.match(calls.gets[0], /intel-history%3Aingest-health%3Aconflict%3Aacled-intel%3Av1$/);
 
     assert.equal(calls.pipelines.length, 1);
+    assert.equal(calls.pipelines[0].length, 3, 'scheduled runs do not create run receipts');
     const [recordCmd, metaCmd, activationCmd] = calls.pipelines[0];
 
     assert.deepEqual(recordCmd.slice(0, 2), ['SET', historyIngestHealthKey(DOMAIN, RESOURCE)]);
@@ -436,6 +471,26 @@ describe('recordHistoryIngestHealth', () => {
       ['SET', historyIngestActivationKey(DOMAIN, RESOURCE), '1'],
       'the activation marker carries NO TTL: it must outlive the 7-day record',
     );
+  });
+
+  it('writes bounded run-scoped receipts for one-off recovery only', async () => {
+    const receipts = [];
+    for (const runId of ['run-9', 'run-10']) {
+      const { fetchImpl, calls } = stubUpstash();
+      await recordHistoryIngestHealth(
+        { domain: DOMAIN, resource: RESOURCE, runId, result: SUCCESS },
+        { env: { ...ENV, WM_ONE_OFF_HISTORY_RECEIPT: '1' }, fetchImpl, now: () => AT },
+      );
+      receipts.push(calls.pipelines[0][3]);
+    }
+
+    assert.notEqual(receipts[0][1], receipts[1][1]);
+    assert.deepEqual(receipts[0].slice(0, 2), [
+      'SET',
+      historyIngestRunReceiptKey(DOMAIN, RESOURCE, 'run-9'),
+    ]);
+    assert.equal(JSON.parse(receipts[0][2]).lastRunId, 'run-9');
+    assert.deepEqual(receipts[0].slice(3), ['EX', HISTORY_INGEST_RUN_RECEIPT_TTL_SECONDS]);
   });
 
   it('continues the failure streak from the persisted record', async () => {

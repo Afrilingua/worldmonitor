@@ -803,11 +803,26 @@ compact-health problem have both advanced. See Railway's official
 [deployment actions reference](https://docs.railway.com/deployments/deployment-actions).
 
 `railway run` is also not production-network evidence: Railway documents it as
-executing locally after injecting service variables. For an immediate long-cron
-backfill, use a controlled temporary Railway cron execution, verify its terminal
-run plus seed metadata and compact health, then restore the captured command and
-schedule and rerun the operational-config audit. The full rollback-safe sequence
-is documented in
+executing locally after injecting service variables. For an authorized
+Cross-Strait history backfill, use the checked-in sandbox runner. It passes only
+server-side references from `seed-bundle-derived-signals`, rejects an incomplete
+canonical/source/history environment before the seeder can start, fetches the
+service's deployed commit, requires a lossless same-run history-ingest
+postflight, and destroys the sandbox after success or failure:
+
+```bash
+npm run railway:cross-strait-history:force -- \
+  --project <project-id> --environment <production-id-or-name> \
+  --confirm-production
+```
+
+The Railway sandbox also has a 15-minute server idle timeout as a cleanup
+backstop if the local process loses its response before it can read the sandbox
+ID. Verify the terminal run plus seed metadata and compact health after the
+authorized execution. Other immediate long-cron backfills still require a
+controlled temporary Railway cron execution, captured command and schedule
+restoration, and a repeated operational-config audit. The full rollback-safe
+sequence is documented in
 [A merged seeder fix is not live until its cron fires](solutions/integration-issues/merged-is-not-ran-long-cron-seeders.md).
 
 ---
