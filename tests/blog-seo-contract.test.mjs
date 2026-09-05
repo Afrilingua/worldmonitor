@@ -53,7 +53,7 @@ function assertNoUnsupportedVendorPrice(post, vendor) {
     `${post.file}: ${vendor} pricing needs a named source before publication`,
   );
 
-  for (const section of post.source.split(/(?=^#{1,6}\\s)/m)) {
+  for (const section of post.source.split(/(?=^#{1,6}\s)/m)) {
     const heading = section.split('\n', 1)[0];
     if (vendorPattern.test(heading)) {
       assert.doesNotMatch(
@@ -150,7 +150,7 @@ describe('blog SEO and GEO corpus contract', () => {
     }
 
     for (const source of [
-      '### World Monitor vs. Dataminr\n\n- Price: free vs. six-figure annual licenses',
+      '---\ntitle: Pricing fixture\n---\n\nThis preamble is not a vendor heading.\n\n### World Monitor vs. Dataminr\n\n- Price: free vs. six-figure annual licenses',
       '| Product | Dataminr |\n| --- | --- |\n| Price | $50K |',
       'A $100K+ Palantir license',
       'A Palantir license costs 100K+ annually',
