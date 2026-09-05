@@ -54,12 +54,19 @@ export const EMBED_KEYED_REFRESH_MS = 10 * 60 * 1000;
  * that reduced version contains, so consumers ask the registry instead of
  * re-listing layers at their own call sites.
  *
+ * `rpcPaths` names the gateway routes a paid-only panel reads with its embed
+ * key, and is the ONLY thing that widens the gateway's `wme_` surface
+ * (`EMBED_KEY_RPC_PATHS` below). A tiered panel has none by construction: it
+ * polls the composed `/api/embed/map-frame`, which authenticates a `wmg_`
+ * grant rather than a key. Moving a paid panel onto that endpoint is how this
+ * field goes away.
+ *
  * This replaced a `'public' | 'api-key'` field, which could not express that
  * `map` is both: free for three layers at an hourly cadence, paid for all
  * fourteen at ten minutes.
  */
 export type EmbedPanelAccess =
-  | { kind: 'paid-only' }
+  | { kind: 'paid-only'; rpcPaths: readonly string[] }
   | { kind: 'tiered'; free: { layers: readonly EmbedLayerId[]; refreshMs: number } };
 
 export interface EmbedPanelDefinition {
@@ -85,16 +92,33 @@ export const EMBEDDABLE_PANELS: readonly EmbedPanelDefinition[] = [
   {
     id: 'chokepoint-strip',
     label: 'Chokepoint Monitor',
-    access: { kind: 'paid-only' },
+    access: { kind: 'paid-only', rpcPaths: ['/api/supply-chain/v1/get-chokepoint-status'] },
     aliases: ['chokepoints', 'chokepoint', 'chokepoint-monitor'],
   },
   {
     id: 'fear-greed',
     label: 'Fear & Greed',
-    access: { kind: 'paid-only' },
+    access: { kind: 'paid-only', rpcPaths: ['/api/market/v1/get-fear-greed-index'] },
     aliases: ['feargreed', 'fear_greed', 'markets-fear-greed'],
   },
 ];
+
+/**
+ * Every gateway route an embed key may authenticate, derived from the panels
+ * that declare one. Read by `server/gateway.ts`.
+ *
+ * Derived rather than hand-listed so the gateway surface cannot grow without a
+ * panel owning the path. Both entries today are routes that already answer an
+ * anonymous `wms_` session token — neither is tier-gated nor in
+ * `PREMIUM_RPC_PATHS` — so accepting `wme_` here adds no reachable data; it
+ * gives a frame that has no session a credential shape the gateway
+ * understands, in place of the `wm_` key it is being migrated off.
+ */
+export const EMBED_KEY_RPC_PATHS: ReadonlySet<string> = new Set(
+  EMBEDDABLE_PANELS.flatMap((panel) =>
+    panel.access.kind === 'paid-only' ? [...panel.access.rpcPaths] : [],
+  ),
+);
 
 export const DEFAULT_EMBED_PANEL_ID: EmbedPanelId = 'map';
 

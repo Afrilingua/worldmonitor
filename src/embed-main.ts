@@ -10,6 +10,27 @@ import { mountEmbedMapPanel } from '@/embed/panels/map';
 import { mountEmbedChokepointStrip } from '@/embed/panels/chokepoint-strip';
 import { mountEmbedFearGreed } from '@/embed/panels/fear-greed';
 
+/**
+ * Tell the partner's own console that the credential in their page HTML does
+ * more than embed.
+ *
+ * The frame is inside an iframe on somebody else's site, so this warning lands
+ * in the console of the person who can actually fix it. It names the risk
+ * rather than the deadline: the `wm_` and enterprise paths still work, and
+ * when they stop is a commercial decision nobody has made yet.
+ */
+function warnOnDeprecatedCredential(kind: string | undefined): void {
+  if (!kind) return;
+  const what = kind === 'enterprise_key'
+    ? 'an enterprise key, which bypasses entitlement checks entirely'
+    : 'a World Monitor user API key (wm_…), which unlocks your whole paid REST allowance';
+  console.warn(
+    `[worldmonitor-embed] This embed authenticates with ${what}. It sits in your page's public HTML, `
+    + 'where anyone can read and reuse it. Replace it with a scoped embed key (wme_…): '
+    + 'World Monitor dashboard → Settings → Embeds. https://www.worldmonitor.app/docs/embed-live-map',
+  );
+}
+
 function mountError(root: HTMLElement, message: string): void {
   root.textContent = '';
   const error = document.createElement('div');
@@ -60,6 +81,7 @@ async function bootEmbed(): Promise<void> {
         document.body.dataset.embedReady = 'error';
         return;
       }
+      warnOnDeprecatedCredential(entitlement.body.deprecatedCredential);
     }
 
     let destroy: (() => void) | undefined;

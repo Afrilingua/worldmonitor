@@ -205,6 +205,10 @@ const SITE_MAP = [
   [/_shared\/direct-llm-quota\.ts/,           { cap: 'llm.direct_quota', note: 'entitlement-derived daily LLM ceiling' , preds: ['tier'] }],
   [/_shared\/embed-entitlement\.ts/,          { cap: 'embed.panels', note: 'entitlement answer for paid-only panels — moved off apiAccess onto embedAccess, so any paid tier carrying the catalog flag may embed' , preds: ['embedAccess'] }],
   [/_shared\/embed-session\.ts/,              { cap: 'embed.panels', note: 'wme_ key -> wmg_ grant exchange — the enforcement point for a keyed embed, since the map frame then polls with the grant instead of the key' , preds: ['embedAccess'] }],
+  // Listed BEFORE the broad gateway.ts exclusion below, which covers every
+  // other predicate in that file. This one is a real paywall rule: a wme_ key
+  // authenticates the two paid embed panels' own RPC paths, and nothing else.
+  [/server\/gateway\.ts/,                     { cap: 'embed.panels', note: 'wme_ key accepted on the RPC paths a paid embed panel declares (EMBED_KEY_RPC_PATHS) — the data read behind the entitlement answer' , preds: ['embedAccess'] }],
   // --- false positive: data LOD tier, not an entitlement tier ---
   [/list-military-bases\.ts/,                 { exclude: 'meta.tier is a base-importance LOD tier for zoom filtering, NOT an entitlement tier' , preds: ['tier'] }],
   // --- server route enforcement points of already-mapped API paths ---
@@ -329,6 +333,7 @@ const SITE_BASELINE = {
   "server/_shared/pro-mcp-gate.ts::mcpAccess": 2,
   "server/_shared/pro-mcp-gate.ts::tier": 1,
   "server/gateway.ts::apiAccess": 3,
+  "server/gateway.ts::embedAccess": 1,
   "server/gateway.ts::tier": 5,
   "server/worldmonitor/economic/v1/get-national-debt.ts::isCallerPremium": 1,
   "server/worldmonitor/intelligence/v1/deduct-situation.ts::isCallerPremium": 1,
