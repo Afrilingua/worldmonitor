@@ -714,32 +714,40 @@ async function writeHistoryIngestRecord({
     // No TTL: "has ever reported" must outlive the 7-day record.
     ['SET', historyIngestActivationKey(domain, resource), '1'],
   ];
+
+  const writePipeline = async (pipelineCommands, label) => {
+    const resp = await fetchImpl(`${url}/pipeline`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(pipelineCommands),
+      signal: AbortSignal.timeout(HISTORY_INGEST_REDIS_TIMEOUT_MS),
+    });
+    if (!resp.ok) throw new Error(`${label} failed: HTTP ${resp.status}`);
+    const results = await resp.json();
+    const failed = Array.isArray(results) ? results.find((entry) => entry?.error) : null;
+    if (failed) throw new Error(`${label} command failed: ${failed.error}`);
+  };
+
+  await writePipeline(commands, 'ingest-health pipeline');
+
   if (writeRunReceipt && runId) {
-    commands.push([
+    await writePipeline([[
       'SET',
       historyIngestRunReceiptKey(domain, resource, runId),
       JSON.stringify(record),
       'EX',
       HISTORY_INGEST_RUN_RECEIPT_TTL_SECONDS,
-    ]);
+    ]], 'ingest-health receipt pipeline');
   }
-  const resp = await fetchImpl(`${url}/pipeline`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(commands),
-    signal: AbortSignal.timeout(HISTORY_INGEST_REDIS_TIMEOUT_MS),
-  });
-  if (!resp.ok) throw new Error(`ingest-health pipeline failed: HTTP ${resp.status}`);
-  const results = await resp.json();
-  const failed = Array.isArray(results) ? results.find((entry) => entry?.error) : null;
-  if (failed) throw new Error(`ingest-health pipeline command failed: ${failed.error}`);
-  // The pipeline is not transactional, so a per-command failure can land the
-  // record without the meta. That degrades the DIAGNOSTIC, never the alarm:
-  // a skipped meta write leaves the PREVIOUS meta in place, and `fetchedAt`
-  // there can only ever be an earlier healthy observation — nothing on this
-  // path can advance it. So the staleness backstop keeps counting on schedule
-  // and only the faster `degraded` signal waits for the next tick. Pinned by
-  // "a meta write that never lands cannot hide a stalled ingest".
+
+  // The shared pipeline is not transactional, so a per-command failure can
+  // land the record without the meta. That degrades the DIAGNOSTIC, never the
+  // alarm: a skipped meta write leaves the PREVIOUS meta in place, and
+  // `fetchedAt` there can only ever be an earlier healthy observation — nothing
+  // on this path can advance it. So the staleness backstop keeps counting on
+  // schedule and only the faster `degraded` signal waits for the next tick.
+  // The one-off success receipt uses a separate request after this pipeline is
+  // confirmed, so a partial shared write cannot produce false acceptance.
 }
 
 /**
