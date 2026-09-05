@@ -533,7 +533,15 @@ describe('recordHistoryIngestHealth', () => {
   });
 
   it('does not write a one-off receipt for malformed or incomplete shared results', async () => {
-    for (const pipelineBody of [[], {}, [{ result: 'OK' }]]) {
+    for (const pipelineBody of [
+      [],
+      {},
+      [{ result: 'OK' }],
+      [null, { result: 'OK' }, { result: 'OK' }],
+      [{ result: 'OK' }, {}, { result: 'OK' }],
+      [{ result: 'OK' }, { result: 'OK' }, { result: null }],
+      [{ result: 'QUEUED' }, { result: 'OK' }, { result: 'OK' }],
+    ]) {
       const { fetchImpl, calls } = stubUpstash({ pipelineBody });
 
       const { value, warns } = await withCapturedWarn(() => recordHistoryIngestHealth(
