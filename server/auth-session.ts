@@ -10,6 +10,7 @@
  */
 
 import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { captureSilentError } from '../api/_sentry-edge.js';
 
 // Clerk Backend API secret -- used to look up user metadata when the JWT
 // does not include a `plan` claim (i.e. standard session token, no template).
@@ -198,6 +199,9 @@ export async function lookupClerkPlan(userId: string): Promise<ClerkPlanLookupRe
     _planCache.set(userId, { role, expiresAt: Date.now() + PLAN_CACHE_TTL_MS });
     return role;
   } catch (err) {
+    void captureSilentError(err, {
+      tags: { route: 'server/auth-session', step: 'clerk-plan-lookup' },
+    });
     console.warn(
       '[auth-session] Clerk plan lookup unavailable:',
       err instanceof Error ? err.message : String(err),
