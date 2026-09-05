@@ -22,6 +22,30 @@
  * and the last one to set a field wins, so the rule is appended: placed before
  * the bypass it would be silently inert.
  *
+ * #7747 widened the same rule to the rest of the sitemap-declared document
+ * surface, which the bypass had kept DYNAMIC for the same reason: the blog
+ * (Astro static output under /blog/), the Mintlify-proxied docs (/docs/), and
+ * the root agent text files (/llms.txt, /world-monitor.md, ...). Each needs BOTH
+ * halves — the CDN-Cache-Control header in vercel.json for the TTL and a claim
+ * here for eligibility. The issue's own diagnosis ("the header is the
+ * discriminator") was a correlation: header and rule were derived from the same
+ * prefix list, so every route had both or neither.
+ *
+ * ## Representations Cloudflare cannot tell apart
+ *
+ * Several of these URLs answer with more than one body. Vercel converts any HTML
+ * document to markdown for `Accept: text/markdown` (corpus and blog; the response
+ * carries `Vary: accept`); Mintlify does the same for `text/markdown` and
+ * `text/plain`, serves an RSC flight for `RSC: 1` or the `next-router-*`
+ * headers, and both match media types case-insensitively (measured 2026-09-05:
+ * `Accept: TEXT/MARKDOWN` answers text/markdown on both origins). Cloudflare keys
+ * its cache on the URL and documents honouring `Vary` only for Accept-Encoding;
+ * nothing in the zone configures otherwise. So the rule admits a request only
+ * when it asks for the HTML representation the way browsers and crawlers do — no
+ * RSC headers, no markdown/plain/x-component media type in Accept. Negotiating
+ * requests fall through to the bypass and stay DYNAMIC, and nothing is stored
+ * that a differently-negotiating client could be handed.
+ *
  * ## Safety of caching these documents at a shared edge
  *
  * The corpus is written at build time by scripts/build-crawlable-corpus.mjs and
@@ -66,6 +90,81 @@ const ZONE_NAME = 'worldmonitor.app';
 /** Apex and the variant subdomains serve different documents from these paths. */
 export const CORPUS_HOST = 'www.worldmonitor.app';
 
+/**
+ * The document families the rule claims by prefix. The corpus families are the
+ * build-time static HTML from scripts/build-crawlable-corpus.mjs; `blog` is the
+ * Astro output copied to public/blog; `docs` is the Mintlify proxy behind the
+ * `/docs/:match*` rewrite. Each has a vercel.json header rule carrying the same
+ * CDN-Cache-Control, and tests/cloudflare-cache-rule.test.mjs fails when the two
+ * lists disagree.
+ */
+export const EDGE_CACHED_FAMILIES = Object.freeze([...CONTENT_CORPUS_PREFIXES, 'blog', 'docs']);
+
+/**
+ * Paths under a family that must stay outside this rule.
+ *
+ * blog: the hashed bundles, OG images and post images already belong to the
+ *   zone's older "Blog" rule (month-long override TTL). Claiming them here would
+ *   make this rule the last writer of `edge_ttl` for those URLs and replace that
+ *   month with "respect origin" — which, for Vercel's static default of
+ *   `max-age=0, must-revalidate`, means an origin round-trip on every request.
+ * docs: `/docs/mcp` is the docs MCP server (api/docs-mcp.ts — no-store JSON-RPC
+ *   over GET and POST), and `/docs/_*` is Mintlify's own asset and API space
+ *   (`/docs/_next/…`, `/docs/_mintlify/…`). Neither is a document.
+ */
+export const FAMILY_EXCLUSIONS = Object.freeze({
+  blog: Object.freeze({ prefixes: Object.freeze(['_astro/', 'og/', 'images/']), exact: Object.freeze([]) }),
+  docs: Object.freeze({ prefixes: Object.freeze(['_', 'mcp/']), exact: Object.freeze(['mcp']) }),
+});
+
+/**
+ * Families whose bare path has no vercel.json header rule to mirror. `/docs` is a
+ * 307 to `/docs/documentation` and nothing more; the corpus bare forms are 308s
+ * too, but they carry a header rule, and `/blog` is the blog index itself.
+ */
+const FAMILIES_WITHOUT_BARE_RULE = new Set(['docs']);
+
+/**
+ * Root-level agent-facing text files: single-representation static files in
+ * public/ that vercel.json already serves `public, max-age=3600` with a canonical
+ * Link. Their extensions (.txt, .md) are not in Cloudflare's default-cacheable
+ * list and two of them are named in the bypass rule outright, so they need the
+ * claim as much as the HTML does. /llms.txt and /world-monitor.md are the
+ * AI-crawler entry points; the rest are the markdown pages those files link to.
+ */
+export const AGENT_TEXT_FILES = Object.freeze([
+  'llms.txt',
+  'llms-full.txt',
+  'agent.txt',
+  'home.md',
+  'world-monitor.md',
+  'agents.md',
+  'ai-search.md',
+  'api-versioning.md',
+  'auth.md',
+  'developers.md',
+  'mcp-server.md',
+  'openapi.md',
+  'pricing.md',
+  'sdks.md',
+  'support.md',
+]);
+
+/** Request headers whose presence makes Mintlify answer with an RSC flight instead of the document. */
+export const RSC_REQUEST_HEADERS = Object.freeze([
+  'rsc',
+  'next-router-state-tree',
+  'next-router-prefetch',
+  'next-router-segment-prefetch',
+]);
+
+/**
+ * Accept media types that make an origin answer with something other than the
+ * HTML document: Vercel and Mintlify both negotiate `text/markdown`, Mintlify
+ * also `text/plain`, and `text/x-component` is the RSC flight's own type.
+ */
+export const NEGOTIATED_MEDIA_TYPES = Object.freeze(['text/markdown', 'text/plain', 'text/x-component']);
+
 const CORPUS_CACHE_RULE_DESCRIPTION = 'WWW corpus HTML - use origin CDN cache headers';
 
 /** Stable ruleset identity, independent of dashboard description edits. */
@@ -77,10 +176,11 @@ const CACHE_PHASE = 'http_request_cache_settings';
 /**
  * Build the wirefilter expression for the corpus families.
  *
- * Both forms of each family are claimed. The nested form is what crawlers fetch;
- * the bare form is a 308 to the trailing-slash canonical and is not cached either
- * way, but omitting it would leave the rule describing a smaller surface than the
- * vercel.json header rule it mirrors, which is how the two drift apart.
+ * Both forms of each family are claimed (FAMILIES_WITHOUT_BARE_RULE lists the
+ * exception). The nested form is what crawlers fetch; a corpus bare form is a 308
+ * to the trailing-slash canonical and is not cached either way, but omitting it
+ * would leave the rule describing a smaller surface than the vercel.json header
+ * rule it mirrors, which is how the two drift apart.
  *
  * `starts_with` also claims the non-HTML members of each family — chiefly the
  * agent-facing markdown twins (`/countries/iran.md`). That is deliberate, though
@@ -95,11 +195,38 @@ const CACHE_PHASE = 'http_request_cache_settings';
  * whole change exists to serve, and production confirms `/countries/iran.md`
  * answers 200 `text/markdown` from a Cloudflare HIT.
  */
-function buildCorpusCacheExpression(prefixes = CONTENT_CORPUS_PREFIXES) {
-  const bare = prefixes.map((prefix) => `"/${prefix}"`).join(' ');
-  const nested = prefixes
-    .map((prefix) => `    or starts_with(http.request.uri.path, "/${prefix}/")`)
-    .join('\n');
+function buildCorpusCacheExpression({
+  families = EDGE_CACHED_FAMILIES,
+  exclusions = FAMILY_EXCLUSIONS,
+  files = AGENT_TEXT_FILES,
+} = {}) {
+  const path = 'http.request.uri.path';
+  const bare = families
+    .filter((family) => !FAMILIES_WITHOUT_BARE_RULE.has(family))
+    .map((family) => `"/${family}"`)
+    .join(' ');
+  const nested = families.map((family) => {
+    const excluded = exclusions[family];
+    if (!excluded) return `    or starts_with(${path}, "/${family}/")`;
+    const carveOuts = [
+      ...excluded.exact.map((exact) => `${path} ne "/${family}/${exact}"`),
+      ...excluded.prefixes.map((prefix) => `not starts_with(${path}, "/${family}/${prefix}")`),
+    ];
+    return [
+      `    or (starts_with(${path}, "/${family}/")`,
+      ...carveOuts.map((clause) => `      and ${clause}`),
+      '    )',
+    ].join('\n');
+  });
+  const agentFiles = files.map((file) => `"/${file}"`).join(' ');
+  // Header names arrive lowercased in http.request.headers.names; Accept values
+  // do not, and both origins match media types case-insensitively, hence lower().
+  const noRscFlight = RSC_REQUEST_HEADERS.map(
+    (name) => `  and not any(http.request.headers.names[*] == "${name}")`,
+  );
+  const noNegotiation = NEGOTIATED_MEDIA_TYPES.map(
+    (type) => `  and not (lower(http.request.headers["accept"][0]) contains "${type}")`,
+  );
   return [
     `(http.host eq "${CORPUS_HOST}"`,
     '  and http.request.method eq "GET"',
@@ -108,9 +235,15 @@ function buildCorpusCacheExpression(prefixes = CONTENT_CORPUS_PREFIXES) {
     // Accept-Encoding, so caching the query-bearing variants risks replaying a
     // crawler's redirect to a human and stripping `ref` before referral capture.
     '  and http.request.uri.query eq ""',
+    // The representations a URL can answer with besides its HTML document; see
+    // the header comment. A request that negotiates is not cached, not served
+    // from cache, and reaches the origin exactly as it did before this rule.
+    ...noRscFlight,
+    ...noNegotiation,
     '  and (',
-    `    http.request.uri.path in {${bare}}`,
-    nested,
+    `    ${path} in {${bare}}`,
+    ...nested,
+    `    or ${path} in {${agentFiles}}`,
     '  ))',
   ].join('\n');
 }
@@ -121,11 +254,11 @@ function buildCorpusCacheExpression(prefixes = CONTENT_CORPUS_PREFIXES) {
  * `action_parameters` mirrors the entry-HTML rule already proven on `/` rather
  * than inventing a second cache policy: one edge TTL, owned by the origin header.
  */
-export function buildCorpusCacheRule(prefixes = CONTENT_CORPUS_PREFIXES) {
+export function buildCorpusCacheRule(surface = {}) {
   return {
     ref: CORPUS_CACHE_RULE_REF,
     description: CORPUS_CACHE_RULE_DESCRIPTION,
-    expression: buildCorpusCacheExpression(prefixes),
+    expression: buildCorpusCacheExpression(surface),
     action: 'set_cache_settings',
     action_parameters: {
       cache: true,
@@ -252,9 +385,14 @@ function identifyLiveRule(rules, rule) {
   const entries = (rules ?? []).map((entry, position) => ({ entry, position }));
   const refMatches = entries.filter(({ entry }) => entry.ref === rule.ref);
   const descriptionMatches = entries.filter(({ entry }) => entry.description === rule.description);
-  const legacyMatches = descriptionMatches.filter(({ entry }) => !entry.ref);
+  // Cloudflare fills an unset `ref` with the rule's own id, so a description
+  // match whose ref merely echoes its id is a legacy rule to adopt, not a foreign
+  // one to refuse. The first corpus rule went live before `ref` existed here and
+  // sat in exactly that state; `--check` called it "ambiguous" until #7747.
+  const hasOwnRef = (entry) => Boolean(entry.ref) && entry.ref !== entry.id;
+  const legacyMatches = descriptionMatches.filter(({ entry }) => !hasOwnRef(entry));
   const conflictingDescriptionMatches = descriptionMatches.filter(
-    ({ entry }) => entry.ref && entry.ref !== rule.ref,
+    ({ entry }) => hasOwnRef(entry) && entry.ref !== rule.ref,
   );
   const candidates = entries.filter(
     ({ entry }) => entry.ref === rule.ref || entry.description === rule.description,
