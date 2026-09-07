@@ -113,10 +113,17 @@ function settle(
       incidents,
     };
   }
+  if (incidents.length > 0) {
+    return { source, state: 'ok', detail: '', fetchedAtMs, incidents };
+  }
+  // An empty producer says so in words too. "Read `sources` before concluding
+  // anything from an empty events list" is only actionable if every non-ok
+  // state carries its reason, and `empty` is the one a caller is most likely
+  // to misread as healthy silence.
   return {
     source,
-    state: incidents.length > 0 ? 'ok' : 'empty',
-    detail: '',
+    state: 'empty',
+    detail: 'The producer responded; nothing in it matched this country inside the window.',
     fetchedAtMs,
     incidents,
   };
