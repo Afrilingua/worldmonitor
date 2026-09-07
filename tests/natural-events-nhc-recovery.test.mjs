@@ -295,6 +295,7 @@ test('accepts time-first advisory dates across NHC time zones', async () => {
     ['800 AM PDT Mon Sep 07 2026', '2026-09-07T15:00:00.000Z'],
     ['800 AM AST Mon Sep 07 2026', '2026-09-07T12:00:00.000Z'],
     ['800 AM HST Mon Sep 07 2026', '2026-09-07T18:00:00.000Z'],
+    ['1230 PM AST Mon Sep 07 2026', '2026-09-07T16:30:00.000Z'],
   ]) {
     const mariePoint = {
       ...currentStormPoint,
@@ -324,6 +325,9 @@ test('accepts time-first advisory dates across NHC time zones', async () => {
 test('rejects malformed time-first NHC advisory dates', async () => {
   for (const advdate of [
     '1299 AM PDT Mon Sep 07 2026',
+    '0000 AM PDT Mon Sep 07 2026',
+    '1300 AM PDT Mon Sep 07 2026',
+    '800 AM XYZ Mon Sep 07 2026',
     '800 AM PDT Mon Feb 31 2026',
     '800 AM PDT Tue Sep 07 2026',
   ]) {
