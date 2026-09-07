@@ -108,6 +108,14 @@ function pipelineCommands(calls) {
     .flatMap(({ body }) => body);
 }
 
+function msetEntries(command) {
+  assert.equal(command?.[0], 'MSET');
+  return new Map(Array.from({ length: (command.length - 1) / 2 }, (_, index) => [
+    command[index * 2 + 1],
+    command[index * 2 + 2],
+  ]));
+}
+
 function assertExpireCohort(calls, expected) {
   const expire = pipelineCommands(calls)
     .filter(([command]) => command === 'EXPIRE')
@@ -558,15 +566,22 @@ describe('seed-bis-extended parser', () => {
     }
   });
 
-  it('publishes the DSR payload and dedicated metadata in one transaction', async () => {
+  it('publishes the DSR payload and both freshness records in one transaction', async () => {
     const payloadValue = {
-      _seed: { fetchedAt: 1 },
+      _seed: {
+        fetchedAt: 1,
+        recordCount: 1,
+        sourceVersion: 'bis-sdmx-csv-extended',
+        newestItemAt: 2,
+        oldestItemAt: 2,
+        maxContentAgeMin: 3,
+      },
       data: { entries: [{ countryCode: 'US', dsrPct: 10.4 }] },
     };
     const transactionOk = ({ body }) => ({
       ok: true,
       status: 200,
-      json: async () => body.map(() => ({ result: 'OK' })),
+      json: async () => body.map(([command]) => ({ result: command === 'MSET' ? 'OK' : 1 })),
     });
 
     await withRedisCapture(transactionOk, async (calls) => {
@@ -579,10 +594,23 @@ describe('seed-bis-extended parser', () => {
         payloadValue,
         ttlSeconds: BIS_TTL_SECONDS,
       });
-      const sets = pipelineCommands(calls).filter(([command]) => command === 'SET');
-      assert.deepEqual(sets.map(([, key]) => key), [KEYS.dsr, META_KEYS.dsr]);
-      assert.deepEqual(JSON.parse(sets[0][2]), payloadValue);
-      assert.equal(JSON.parse(sets[1][2]).recordCount, 1);
+      const transaction = calls.find(({ body }) => body?.[0]?.[0] === 'MSET')?.body;
+      const published = msetEntries(transaction?.[0]);
+      assert.deepEqual([...published.keys()], [
+        KEYS.dsr,
+        META_KEYS.dsr,
+        'seed-meta:economic:bis-extended',
+      ]);
+      assert.deepEqual(JSON.parse(published.get(KEYS.dsr)), payloadValue);
+      assert.equal(JSON.parse(published.get(META_KEYS.dsr)).recordCount, 1);
+      assert.deepEqual(JSON.parse(published.get('seed-meta:economic:bis-extended')), {
+        fetchedAt: 1,
+        recordCount: 1,
+        sourceVersion: 'bis-sdmx-csv-extended',
+        newestItemAt: 2,
+        oldestItemAt: 2,
+        maxContentAgeMin: 3,
+      });
     });
 
     await assert.rejects(

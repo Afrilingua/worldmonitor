@@ -6,6 +6,7 @@ process.env.UPSTASH_REDIS_REST_TOKEN = 'fake-token';
 
 import {
   CANONICAL_KEY,
+  publishFredCohortAtomically,
   runFredRatesSeed,
 } from '../scripts/seed-fred-rates.mjs';
 import {
@@ -45,6 +46,14 @@ const MIN_SERIES_COUNT = Math.ceil(FRED_SEED_SERIES.length * 0.75);
 
 function companionMetaKey(key) {
   return `seed-meta:${key.replace(/:v\d+$/, '')}`;
+}
+
+function msetEntries(command) {
+  assert.equal(command?.[0], 'MSET');
+  return new Map(Array.from({ length: (command.length - 1) / 2 }, (_, index) => [
+    command[index * 2 + 1],
+    command[index * 2 + 2],
+  ]));
 }
 
 function expectedFredSidePreservationTargets() {
@@ -300,70 +309,49 @@ describe('FRED publication gates', () => {
     }
   });
 
-  it('leaves the complete last-good cohort unchanged when a late side publication fails', async () => {
-    const captured = await captureFredSeedOptions();
-    const clock = { now: 1_700_000_000_000 };
-    const entries = primeFredConsumerCohort(clock);
-    const before = new Map([...entries].map(([key, entry]) => [key, clone(entry.value)]));
-    const failedMetaKey = companionMetaKey(`${FRED_KEY_PREFIX}:${FRED_SEED_SERIES[1]}:0`);
+  it('publishes every FRED value and aggregate freshness metadata as one atomic value command', async () => {
     const batch = makeFredBatch(MIN_SERIES_COUNT);
     batch.stress = { components: [{ id: 'A' }], seededAt: '2031-01-01T00:00:00.000Z' };
+    const payloadValue = {
+      _seed: { fetchedAt: 1, recordCount: batch.seriesCount, sourceVersion: 'fred-v1' },
+      data: { seriesCount: batch.seriesCount },
+    };
     const transactions = [];
 
     globalThis.fetch = async (url, init = {}) => {
       const body = init.body ? JSON.parse(init.body) : null;
       if (String(url).endsWith('/multi-exec')) {
         transactions.push(body);
-        return Response.json(body.map((command) => (
-          command[1] === failedMetaKey
-            ? { error: 'ERR simulated late metadata failure' }
-            : { result: 'OK' }
-        )));
-      }
-      if (String(url).endsWith('/pipeline')) {
-        return Response.json(body.map(([, key, ttlSeconds]) => {
-          const entry = entries.get(key);
-          if (!entry) return { result: 0 };
-          entry.expiresAt = clock.now + Number(ttlSeconds) * 1000;
-          return { result: 1 };
-        }));
-      }
-      if (body?.[0] === 'SET') {
-        if (body[1] === failedMetaKey) return new Response('unavailable', { status: 503 });
-        if (entries.has(body[1])) {
-          entries.set(body[1], {
-            value: JSON.parse(body[2]),
-            expiresAt: clock.now + Number(body[4] ?? FRED_TTL) * 1000,
-          });
-        }
+        return Response.json(body.map((command) => command[0] === 'MSET'
+          ? { error: 'ERR simulated cohort value failure' }
+          : { result: 1 }));
       }
       return Response.json({ result: 'OK' });
     };
 
     await assert.rejects(
-      runSeed(
-        captured.domain,
-        captured.resource,
-        captured.canonicalKey,
-        async () => batch,
-        captured.options,
-      ),
-      /seed-meta|metadata|command result/i,
+      publishFredCohortAtomically(batch, {
+        payload: JSON.stringify(payloadValue),
+        payloadValue,
+      }),
+      /command result/i,
     );
 
-    for (const [key, value] of before) {
-      assert.deepEqual(entries.get(key)?.value, value, `${key} must remain on the prior cohort`);
-    }
-    const publishedKeys = transactions[0].map(([, key]) => key);
-    assert.deepEqual(publishedKeys, [
+    const published = msetEntries(transactions[0][0]);
+    assert.deepEqual([...published.keys()], [
       ...batch.seriesIds.flatMap((seriesId) => {
         const key = `${FRED_KEY_PREFIX}:${seriesId}:0`;
         return [key, companionMetaKey(key)];
       }),
       STRESS_INDEX_KEY,
       companionMetaKey(STRESS_INDEX_KEY),
+      'seed-meta:economic:fred-rates',
       CANONICAL_KEY,
     ]);
+    const aggregateMeta = JSON.parse(published.get('seed-meta:economic:fred-rates'));
+    assert.equal(aggregateMeta.fetchedAt, payloadValue._seed.fetchedAt);
+    assert.equal(aggregateMeta.recordCount, batch.seriesCount);
+    assert.equal(aggregateMeta.sourceVersion, 'fred-v1');
   });
 
   it('publishes every consumer key and activation after a retained source failure recovers', async () => {
