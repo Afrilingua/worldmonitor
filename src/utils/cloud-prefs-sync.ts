@@ -58,6 +58,7 @@ import { TimeoutError, withTimeout } from './with-timeout';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 import {
   safeStorageGet,
+  safeStorageGetChecked,
   safeStorageRemove,
   safeStorageRemoveChecked,
   safeStorageSet,
@@ -300,8 +301,13 @@ function markDirtyKey(key: CloudSyncKey): void {
  * current local value.
  */
 function clearSettledDirtyKeys(postedBlob: Record<string, string>): void {
+  const current = buildCloudBlob();
+  // A key is settled iff the posted value still equals the CURRENT local value,
+  // so a failed re-read cannot answer that. Keeping the keys dirty costs one
+  // redundant upload; clearing them on a guess loses the edit.
+  if (current === null) return;
   const settled: string[] = [];
-  for (const key of settledDirtyKeys(postedBlob, buildCloudBlob(), _dirtyKeys)) {
+  for (const key of settledDirtyKeys(postedBlob, current, _dirtyKeys)) {
     if (_dirtyKeys.delete(key as CloudSyncKey)) settled.push(key);
   }
   if (settled.length > 0) persistSettledDirtyKeyRemovals(settled);
@@ -394,11 +400,22 @@ function setState(s: SyncState): void {
 
 // ── Blob helpers ──────────────────────────────────────────────────────────────
 
-function buildCloudBlob(): Record<string, string> {
+/**
+ * The local values to upload, or `null` when a read failed.
+ *
+ * The null return is load-bearing. This blob REPLACES the server's, and a key
+ * is omitted when its local value is absent — so a read that fails and degrades
+ * to `null` is indistinguishable from "the user cleared this", and the upload
+ * deletes a preference from the cloud that was only ever unreadable. The raw
+ * read here before #7833 threw and aborted the upload; `safeStorageGetChecked`
+ * restores that outcome without reintroducing the null-storage crash.
+ */
+function buildCloudBlob(): Record<string, string> | null {
   const blob: Record<string, string> = {};
   for (const key of CLOUD_SYNC_KEYS) {
-    const val = safeStorageGet(key);
-    if (val !== null) blob[key] = val;
+    const read = safeStorageGetChecked(key);
+    if (!read.ok) return null;
+    if (read.value !== null) blob[key] = read.value;
   }
   return blob;
 }
@@ -554,9 +571,10 @@ interface PreparedCloudBlob {
   schemaVersion: number;
 }
 
-function migrateLocalBlobIfNeeded(): PreparedCloudBlob {
+function migrateLocalBlobIfNeeded(): PreparedCloudBlob | null {
   const localSchema = getLocalSchemaVersion();
   const blob = buildCloudBlob();
+  if (blob === null) return null;
   if (localSchema >= CURRENT_PREFS_SCHEMA_VERSION) {
     return { data: blob, schemaVersion: CURRENT_PREFS_SCHEMA_VERSION };
   }
@@ -751,7 +769,14 @@ async function resolveConflictWithMerge(token: string, variant: string, callerGe
     return false;
   }
   const migratedCloud = applyMigrationsWithSchemaVersion(fresh.data, fresh.schemaVersion ?? 1);
-  const merged = mergeCloudWithLocalDirty(migratedCloud.data, buildCloudBlob(), _dirtyKeys);
+  const localBlob = buildCloudBlob();
+  if (localBlob === null) {
+    // Merging against a partial local blob would drop the unread keys from the
+    // merge result, and this path re-posts that result.
+    setState('error');
+    return false;
+  }
+  const merged = mergeCloudWithLocalDirty(migratedCloud.data, localBlob, _dirtyKeys);
   if (!applyCloudBlob(merged, fresh.syncVersion)) {
     // A usable store rejected part of the merge. Advancing the version here
     // would let the next upload post the stale local values back over the
@@ -836,7 +861,15 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
 
       if (cloud && cloud.syncVersion > getSyncVersion()) {
         const isFirstEverSync = getSyncVersion() === 0;
-        const prevBlobJson = isFirstEverSync ? JSON.stringify(buildCloudBlob()) : null;
+        const localBlob = buildCloudBlob();
+        if (localBlob === null) {
+          // An unreadable local blob cannot be merged over, and the undo
+          // snapshot below would record an incomplete "previous" state.
+          setState('error');
+          completeSignInAttempt(attempt, 'error');
+          return;
+        }
+        const prevBlobJson = isFirstEverSync ? JSON.stringify(localBlob) : null;
 
         const cloudSchemaVersion = cloud.schemaVersion ?? 1;
         const migrated = applyMigrationsWithSchemaVersion(cloud.data, cloudSchemaVersion);
@@ -846,7 +879,7 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
         // those dirty keys over the cloud blob instead of clobbering them.
         const hasDirty = _dirtyKeys.size > 0;
         const toApply = hasDirty
-          ? mergeCloudWithLocalDirty(migrated.data, buildCloudBlob(), _dirtyKeys)
+          ? mergeCloudWithLocalDirty(migrated.data, localBlob, _dirtyKeys)
           : migrated.data;
         if (!applyCloudBlob(toApply, cloud.syncVersion)) {
           // Same reasoning as resolveConflictWithMerge: a rejected write must
@@ -882,6 +915,13 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
         // subsequent sign-ins and post the bad blob back at schema 2,
         // cementing the poisoning at the new schema).
         const prepared = migrateLocalBlobIfNeeded();
+        if (prepared === null) {
+          // A preference could not be read. Posting now would replace the
+          // server blob with one that omits it — a deletion, not an update.
+          setState('error');
+          completeSignInAttempt(attempt, 'error');
+          return;
+        }
         const result = await postCloudPrefs(
           token,
           variant,
@@ -1014,6 +1054,9 @@ export function onSignOut(): void {
     // the active operation / next sign-in remains the recovery path.
     if (!_syncOperations.busy) {
       const prepared = migrateLocalBlobIfNeeded();
+      // Best-effort flush, but "best effort" must not mean "post a blob that
+      // deletes an unreadable preference from the cloud". Skip instead.
+      if (prepared === null) return;
       const token = _cachedToken;
       void _syncOperations.run(async () => {
         await fetch('/api/user-prefs', {
@@ -1075,6 +1118,12 @@ async function performUploadNow(variant: string): Promise<'completed' | 'retry-d
     setState('syncing');
 
     const prepared = migrateLocalBlobIfNeeded();
+    if (prepared === null) {
+      // Same as the sign-in post path: an unreadable preference would be
+      // uploaded as an absent one, deleting it from the cloud row.
+      setState('error');
+      return 'stopped';
+    }
     const postedBlob = prepared.data;
     const result = await postCloudPrefs(
       token,
@@ -1261,6 +1310,7 @@ export function install(variant: string): void {
     // CURRENT_PREFS_SCHEMA_VERSION onto unmigrated local data, even on
     // best-effort unload flush.
     const prepared = migrateLocalBlobIfNeeded();
+    if (prepared === null) return;
     const blob = prepared.data;
     const myGeneration = _authGeneration;
     const payload = JSON.stringify({ variant: _currentVariant, data: blob, expectedSyncVersion: getSyncVersion(), schemaVersion: prepared.schemaVersion });

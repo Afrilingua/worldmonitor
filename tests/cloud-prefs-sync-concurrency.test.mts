@@ -64,6 +64,8 @@ interface HarnessControls {
   holdNextPost: () => HeldRequest;
   /** Make the backing store REJECT writes to `key`, as a full disk does. */
   rejectWritesTo: (key: string) => void;
+  /** Make the backing store THROW when `key` is read. */
+  rejectReadsOf: (key: string) => void;
   seedRow: (token: string, data: Record<string, string>, syncVersion: number, schemaVersion?: number) => void;
   setToken: (token: string) => void;
   stateHistory: string[];
@@ -150,7 +152,13 @@ async function runHarness(
   const stateHistory: string[] = [];
   const events: Array<{ detail: unknown; type: string }> = [];
   const rejectedWriteKeys = new Set<string>();
+  const rejectedReadKeys = new Set<string>();
   class TestStorage extends MiniStorage {
+    override getItem(key: string): string | null {
+      if (rejectedReadKeys.has(key)) throw new Error('SecurityError');
+      return super.getItem(key);
+    }
+
     override setItem(key: string, value: string): void {
       // A full disk rejects the write for a large value while still accepting
       // the small sync-version marker written straight afterwards — the exact
@@ -349,6 +357,7 @@ async function runHarness(
     },
     events,
     rejectWritesTo: (key: string) => { rejectedWriteKeys.add(key); },
+    rejectReadsOf: (key: string) => { rejectedReadKeys.add(key); },
     failNextGetTemporarily: () => {
       failNextGetTemporarily = true;
     },
@@ -878,5 +887,31 @@ describe('cloud prefs storage-rejection safety (#7833)', () => {
 
     assert.equal(result.localSyncVersion, 9);
     assert.equal(result.state, 'synced');
+  });
+});
+
+describe('cloud prefs read-failure safety (#7833 review)', () => {
+  it('does not upload a blob that omits a preference it could not read', () => {
+    // The deletion path: this blob REPLACES the server's, and an omitted key
+    // means "cleared". Degrading a throwing read to null therefore turned a
+    // transient read failure into a permanent cloud deletion of that
+    // preference. The raw read before #7833 threw and aborted the upload.
+    return runHarness(async (cloudPrefs, controls) => {
+      controls.seedRow('test-token', { 'wm-market-watchlist-v1': 'cloud-value' }, 1);
+      await cloudPrefs.onSignIn('user-1', 'full');
+      cloudPrefs.install('full');
+      localStorage.setItem('wm-market-watchlist-v1', 'local-edit');
+      controls.rejectReadsOf('wm-market-watchlist-v1');
+      await cloudPrefs.syncNow();
+    }).then((result) => {
+      // The assertion has to be that the key SURVIVES on the server. Accepting
+      // "absent from the posted blob" would accept the deletion itself, which
+      // is how the first version of this test passed against the bug.
+      const row = result.acceptedDataByToken['test-token'] ?? {};
+      assert.ok(
+        'wm-market-watchlist-v1' in row,
+        'an unreadable preference must not be deleted from the cloud row by an upload',
+      );
+    });
   });
 });

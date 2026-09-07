@@ -1,3 +1,5 @@
+import ts from 'typescript';
+
 // ---------------------------------------------------------------------------
 // Shared source-text scanning for the enforce-*.mjs gates
 // ---------------------------------------------------------------------------
@@ -52,132 +54,73 @@
  * regex state here if it ever appears, rather than reverting to regex stripping.
  */
 /**
- * Keywords after which a `/` begins a REGEX, not a division. `return /re/` is
- * the common one; the rest complete the operator-position set.
- */
-const REGEX_PRECEDING_KEYWORDS = new Set([
-  'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
-  'case', 'do', 'else', 'yield', 'await', 'throw',
-]);
-
-/**
- * Is the `/` at `index` the start of a regex literal rather than a division?
+ * Blank out comments while preserving offsets and line count, and report
+ * whether the result can be trusted.
  *
- * The classic JS lexing ambiguity, resolved the classic way: look back at the
- * last significant character. After a value (identifier, number, `)`, `]`, or a
- * closing quote) a `/` divides; after an operator, a punctuator, or one of the
- * keywords above it opens a regex. This is a heuristic, not a parse — which is
- * why `lexSource` still reports an untrustworthy terminal state, so anything it
- * gets wrong surfaces loudly instead of silently blanking code.
+ * Comment ranges come from the TypeScript PARSER, not from a hand lexer. Five
+ * review rounds found five ways a hand lexer loses track — a `/*` inside a line
+ * comment, one inside a string, a nested template interpolation, an untracked
+ * regex literal (live in `src/main.ts:454`, de-syncing that file from line 455
+ * to EOF), and a regex statement after a control condition. Each fix closed one
+ * shape and the next round found another, because separating a regex from a
+ * division genuinely requires parser context. The parser already has it.
+ *
+ * The failure mode being designed out is specific and nasty: a mis-lex does not
+ * throw, it silently blanks real code, and the gate then reports a clean scan
+ * of a file it never read. `ok: false` (a file that does not parse) is the
+ * backstop for that, and callers fail on it rather than scanning less than they
+ * claim.
+ *
+ * String CONTENTS are deliberately preserved. These gates count code idioms,
+ * and blanking strings would be the same silent-blindness trade in another
+ * coat; keeping them can over-count an idiom quoted in a string, which fails
+ * LOUDLY as an inventory mismatch instead.
  */
-function startsRegex(source, index) {
-  let i = index - 1;
-  while (i >= 0 && /\s/.test(source[i])) i--;
-  if (i < 0) return true;
-  const prev = source[i];
-  if (/[)\]}]/.test(prev)) return prev === '}';
-  if (/[A-Za-z0-9_$]/.test(prev)) {
-    let end = i;
-    while (i >= 0 && /[A-Za-z0-9_$]/.test(source[i])) i--;
-    return REGEX_PRECEDING_KEYWORDS.has(source.slice(i + 1, end + 1));
-  }
-  if (prev === "'" || prev === '"' || prev === '`') return false;
-  return true;
-}
-
 export function lexSource(source) {
+  const file = ts.createSourceFile('scan.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const out = source.split('');
-  let mode = 'code';
-  let quote = '';
-  // Inside a regex, `/` within a `[...]` class does not terminate it.
-  let regexInClass = false;
-  // Brace depth per OPEN template interpolation. A template can contain `${…}`
-  // whose expression contains another template, so a single in-string flag is
-  // not enough: it treats the inner opening backtick as the outer closing one,
-  // drops back to code mid-string, and a `/*` in the remaining text then opens
-  // a comment that blanks everything to EOF. Review caught the panel gate
-  // passing green over a newly added direct content write that way.
-  const interpolations = [];
+  const blankRange = (pos, end) => {
+    for (let i = pos; i < end && i < out.length; i++) {
+      // Newlines survive in every range, so byte offsets and line numbers
+      // still line up with the original for error reporting.
+      if (out[i] !== '\n') out[i] = ' ';
+    }
+  };
 
-  for (let i = 0; i < source.length; i++) {
-    const ch = source[i];
-    const next = source[i + 1];
-
-    if (mode === 'code') {
-      if (ch === '/' && next === '/') { mode = 'line'; out[i] = ' '; out[i + 1] = ' '; i++; continue; }
-      if (ch === '/' && next === '*') { mode = 'block'; out[i] = ' '; out[i + 1] = ' '; i++; continue; }
-      if (ch === '/' && startsRegex(source, i)) { mode = 'regex'; regexInClass = false; continue; }
-      if (ch === "'" || ch === '"') { mode = 'string'; quote = ch; continue; }
-      if (ch === '`') { mode = 'template'; continue; }
-      if (interpolations.length > 0) {
-        if (ch === '{') {
-          interpolations[interpolations.length - 1] += 1;
-        } else if (ch === '}') {
-          if (interpolations[interpolations.length - 1] === 0) {
-            interpolations.pop();
-            mode = 'template';
-          } else {
-            interpolations[interpolations.length - 1] -= 1;
-          }
-        }
+  // Comments live in the trivia around each token, so walking every token (not
+  // just every node) reaches all of them, including the ones before EOF.
+  //
+  // BOTH sides are required. `getLeadingCommentRanges` treats a comment sharing
+  // a line with preceding code as TRAILING trivia of that previous token and
+  // does not return it, so a leading-only walk left every end-of-line `/* … */`
+  // in place — which is a silent under-strip, the same failure direction this
+  // scanner exists to avoid.
+  const seenStarts = new Set();
+  const seenEnds = new Set();
+  const visit = (node) => {
+    const fullStart = node.getFullStart();
+    if (!seenStarts.has(fullStart)) {
+      seenStarts.add(fullStart);
+      for (const range of ts.getLeadingCommentRanges(source, fullStart) ?? []) {
+        blankRange(range.pos, range.end);
       }
-      continue;
     }
-
-    if (mode === 'regex') {
-      // A regex body is not code and not a string: `/^'[^']*'$/` has an odd
-      // number of apostrophes, and reading them as quotes de-synced the lexer
-      // for the whole rest of the file. That is live in src/main.ts:454.
-      if (ch === '\\') { i++; continue; }
-      if (ch === '[') { regexInClass = true; continue; }
-      if (ch === ']') { regexInClass = false; continue; }
-      if (ch === '/' && !regexInClass) mode = 'code';
-      continue;
+    const end = node.getEnd();
+    if (!seenEnds.has(end)) {
+      seenEnds.add(end);
+      for (const range of ts.getTrailingCommentRanges(source, end) ?? []) {
+        blankRange(range.pos, range.end);
+      }
     }
+    for (const child of node.getChildren(file)) visit(child);
+  };
+  visit(file);
 
-    if (mode === 'string') {
-      // Consume the escaped character wholesale: a trailing backslash before
-      // the closing quote (`'\\'`) would otherwise swallow it and run the
-      // string state on into real code.
-      if (ch === '\\') { i++; continue; }
-      if (ch === quote) { mode = 'code'; quote = ''; }
-      continue;
-    }
-
-    if (mode === 'template') {
-      if (ch === '\\') { i++; continue; }
-      if (ch === '$' && next === '{') { interpolations.push(0); mode = 'code'; i++; continue; }
-      if (ch === '`') mode = 'code';
-      continue;
-    }
-
-    if (mode === 'line') {
-      // Newlines are never blanked, in any mode, so line numbers hold.
-      if (ch === '\n') mode = 'code';
-      else out[i] = ' ';
-      continue;
-    }
-
-    // mode === 'block'
-    if (ch === '*' && next === '/') {
-      out[i] = ' ';
-      out[i + 1] = ' ';
-      i++;
-      mode = 'code';
-    } else if (ch !== '\n') {
-      out[i] = ' ';
-    }
-  }
-
-  // A correctly-lexed file ends back in code. Ending anywhere else means the
-  // scanner lost track — an untracked regex literal whose brace or slash was
-  // read as syntax is the known way — and the damage is always the same shape:
-  // a spurious open region blanking real code to EOF, which a gate then reports
-  // as a clean scan. Regex-vs-division cannot be disambiguated without parser
-  // context, so rather than pretend to close that, callers get to see it: a
-  // non-`code` terminal state makes the gate fail LOUDLY instead of quietly
-  // scanning less than it claims (#7833 review, fifth round).
-  return { code: out.join(''), ok: mode === 'code' && interpolations.length === 0, terminalMode: mode };
+  // `parseDiagnostics` is TypeScript-internal but stable, and it is the honest
+  // signal here: a file this scanner cannot parse is one it cannot be trusted
+  // to have read.
+  const parseErrors = file.parseDiagnostics ?? [];
+  return { code: out.join(''), ok: parseErrors.length === 0, terminalMode: parseErrors.length === 0 ? 'code' : 'parse-error' };
 }
 
 /**

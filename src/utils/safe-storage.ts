@@ -121,6 +121,26 @@ export function safeStorageRemoveChecked(key: string): boolean {
 }
 
 /**
+ * Like `safeStorageGet`, but distinguishes "key absent" from "read failed".
+ *
+ * Degrading a failed read to `null` is right for a flag with a default and
+ * WRONG for a caller that treats absence as intent. Cloud-prefs builds its
+ * upload blob by reading each synced key and omitting the nulls; a throwing
+ * read therefore looked like "the user cleared this", and the next upload
+ * replaced the server blob and DELETED the unread preference from the cloud.
+ * The raw read this replaced threw and aborted the upload (#7833 review).
+ */
+export function safeStorageGetChecked(key: string): { ok: boolean; value: string | null } {
+  const store = storageHandle();
+  if (store === null) return { ok: false, value: null };
+  try {
+    return { ok: true, value: store.getItem(key) };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
+/**
  * Every key/value pair in storage, or `ok: false` when reading them failed.
  *
  * For the caller that must not report success over a partial read. A handle can
