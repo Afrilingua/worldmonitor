@@ -987,3 +987,25 @@ describe('cloud prefs fail closed on undeterminable state (#7833 review)', () =>
   });
 });
 
+
+describe('cloud prefs marker ordering (#7833 review)', () => {
+  it('does not advance the sync version when the schema marker is rejected', async () => {
+    // Both writes are checked, but ORDER decides what a partial failure leaves
+    // behind. Advancing the version first leaves a durable claim that this
+    // cloud generation was reconciled while the schema marker is still old, and
+    // the next sign-in then sees equal versions, takes the local-upload branch,
+    // and reruns one-shot migrations over already-migrated data.
+    const result = await runHarness(async (cloudPrefs, controls) => {
+      controls.seedRow('test-token', { 'wm-market-watchlist-v1': 'cloud-value' }, 9, 8);
+      controls.rejectWritesTo('wm-cloud-prefs-local-schema-version');
+      await cloudPrefs.onSignIn('user-1', 'full');
+    });
+
+    assert.notEqual(
+      result.localSyncVersion,
+      9,
+      'the sync version must not advance past a rejected schema marker',
+    );
+    assert.equal(result.state, 'error');
+  });
+});

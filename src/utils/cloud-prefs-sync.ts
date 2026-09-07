@@ -874,11 +874,13 @@ async function resolveConflictWithMerge(token: string, variant: string, callerGe
     setState('error');
     return false;
   }
-  if (!setSyncVersion(fresh.syncVersion)) {
+  // Same ordering rule as the sign-in path: schema marker first, so a rejected
+  // marker cannot leave the sync version claiming a reconciliation happened.
+  if (!setLocalSchemaVersion(migratedCloud.schemaVersion)) {
     setState('error');
     return false;
   }
-  if (!setLocalSchemaVersion(migratedCloud.schemaVersion)) {
+  if (!setSyncVersion(fresh.syncVersion)) {
     setState('error');
     return false;
   }
@@ -989,14 +991,21 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
           completeSignInAttempt(attempt, 'error');
           return;
         }
-        if (!setSyncVersion(cloud.syncVersion)) {
+        // ORDER IS LOAD-BEARING: the schema marker persists BEFORE the sync
+        // version. Both writes are checked, but advancing the version first
+        // leaves a durable claim that this cloud generation was reconciled
+        // while the schema marker is still old — and the next sign-in sees
+        // equal versions, takes the local-upload branch, and reruns one-shot
+        // migrations over already-migrated data (#7833 review).
+        //
+        // An ambiguous schema-5 fingerprint deliberately stops at schema 4,
+        // so the same row remains eligible for a future disambiguated retry.
+        if (!setLocalSchemaVersion(migrated.schemaVersion)) {
           setState('error');
           completeSignInAttempt(attempt, 'error');
           return;
         }
-        // An ambiguous schema-5 fingerprint deliberately stops at schema 4,
-        // so the same row remains eligible for a future disambiguated retry.
-        if (!setLocalSchemaVersion(migrated.schemaVersion)) {
+        if (!setSyncVersion(cloud.syncVersion)) {
           setState('error');
           completeSignInAttempt(attempt, 'error');
           return;
@@ -1365,7 +1374,13 @@ export async function syncNow(): Promise<void> {
 // (preferences-content.ts) and nothing else — no branch, no upload, no
 // reconciliation. A failed read renders "Signed out / Never", which is a
 // degraded DISPLAY rather than a wrong decision, so a checked read here would
-// buy nothing. Every read that feeds a decision uses safeStorageGetChecked.
+// buy nothing.
+//
+// Narrower claim than an earlier round of this branch made: the reads that feed
+// a decision are checked, but `getSyncVersion()` deliberately still degrades
+// for the four `expectedSyncVersion` POST bodies, where a wrong value returns
+// 409 and routes into the merge path — loud and self-correcting, unlike the
+// storage-event cancellation, which is checked.
 
 export function getSyncState(): SyncState {
   return (safeStorageGet(KEY_SYNC_STATE) as SyncState) || 'signed-out';
@@ -1406,7 +1421,13 @@ export function install(variant: string): void {
   window.addEventListener('storage', (e) => {
     if (e.key === KEY_SYNC_VERSION && e.newValue !== null) {
       const newV = parseInt(e.newValue, 10);
-      if (newV > getSyncVersion()) {
+      // Checked, because this CANCELS a pending upload. Degrading to 0 makes
+      // any other tab's version look newer, so this tab's debounced local edit
+      // is dropped and reported as synced — silently, unlike the POST sites,
+      // where a wrong expectedSyncVersion returns 409 and routes into the
+      // merge path (#7833 review).
+      const localVersion = getSyncVersionChecked();
+      if (localVersion !== null && newV > localVersion) {
         if (_debounceTimer !== null) {
           clearTimeout(_debounceTimer);
           _debounceTimer = null;
