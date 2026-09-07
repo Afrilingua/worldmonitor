@@ -290,6 +290,31 @@ test('optional cone and past-point failures do not remove a point-confirmed stor
   assert.equal(payload._nhcSnapshot.consecutiveFailures, 0);
 });
 
+test('accepts the time-first advisory date returned by NHC ArcGIS layers', async () => {
+  const mariePoint = {
+    ...currentStormPoint,
+    geometry: { type: 'Point', coordinates: [-124.4, 24.7] },
+    properties: {
+      ...currentStormPoint.properties,
+      stormname: 'Marie',
+      stormnum: 13,
+      advisnum: '26',
+      maxwind: 55,
+      advdate: '800 AM PDT Mon Sep 07 2026',
+    },
+  };
+  const payload = await runNhc({
+    previous: null,
+    nhc: async (_input, id) => Response.json(collection(id === 188 ? [mariePoint] : [])),
+  });
+
+  const storm = payload.events.find(event => event.sourceName === 'NHC');
+  assert.ok(storm);
+  assert.equal(storm.id, 'nhc-EP13-26');
+  assert.equal(storm.date, Date.parse('2026-09-07T15:00:00.000Z'));
+  assert.equal(payload._nhcSnapshot.errorCode, null);
+});
+
 test('invalid optional past-point properties do not remove a point-confirmed storm', async () => {
   const payload = await runNhc({
     previous: null,
