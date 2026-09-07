@@ -10,11 +10,13 @@ import {
 } from '../scripts/seed-fred-rates.mjs';
 import {
   FRED_SEED_SERIES,
+  FRED_KEY_PREFIX,
+  FRED_TTL,
   STRESS_INDEX_KEY,
   STRESS_INDEX_TTL,
 } from '../scripts/_fred-seeder.mjs';
 import { upstashCommand } from '../scripts/_upstash-rest.mjs';
-import { writeSeedMeta } from '../scripts/_seed-utils.mjs';
+import { GRACEFUL_FETCH_FAILURE_EXIT_CODE, runSeed, writeSeedMeta } from '../scripts/_seed-utils.mjs';
 
 const originalFetch = globalThis.fetch;
 const originalRetryDelay = process.env.WM_SEED_RETRY_DELAY_MS;
@@ -36,6 +38,128 @@ function makeSeriesMap(count) {
       observations: [{ date: '2031-01-01', value: index + 1 }],
     }]),
   );
+}
+
+const SEED_META_TTL = 7 * 24 * 60 * 60;
+const MIN_SERIES_COUNT = Math.ceil(FRED_SEED_SERIES.length * 0.75);
+
+function companionMetaKey(key) {
+  return `seed-meta:${key.replace(/:v\d+$/, '')}`;
+}
+
+function expectedFredSidePreservationTargets() {
+  return [
+    { key: 'seed-meta:economic:fred-rates', ttlSeconds: SEED_META_TTL },
+    ...FRED_SEED_SERIES.flatMap((seriesId) => {
+      const key = `${FRED_KEY_PREFIX}:${seriesId}:0`;
+      return [
+        { key, ttlSeconds: FRED_TTL },
+        { key: companionMetaKey(key), ttlSeconds: SEED_META_TTL },
+      ];
+    }),
+    { key: STRESS_INDEX_KEY, ttlSeconds: STRESS_INDEX_TTL },
+    { key: companionMetaKey(STRESS_INDEX_KEY), ttlSeconds: SEED_META_TTL },
+  ];
+}
+
+async function captureFredSeedOptions() {
+  let captured;
+  await runFredRatesSeed({
+    runSeedImpl: async (...args) => {
+      captured = args;
+    },
+  });
+  return {
+    domain: captured[0],
+    resource: captured[1],
+    canonicalKey: captured[2],
+    options: captured[4],
+  };
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+async function trapSeedExit(fn) {
+  const originalExit = process.exit;
+  const originalListeners = new Set(process.rawListeners('SIGTERM'));
+  process.exit = (code) => {
+    const error = new Error(`__fred_seed_exit__:${code}`);
+    error.exitCode = code;
+    throw error;
+  };
+  try {
+    await fn();
+    return null;
+  } catch (error) {
+    if (!String(error.message).startsWith('__fred_seed_exit__:')) throw error;
+    return error.exitCode;
+  } finally {
+    process.exit = originalExit;
+    for (const listener of process.rawListeners('SIGTERM')) {
+      if (!originalListeners.has(listener)) process.removeListener('SIGTERM', listener);
+    }
+  }
+}
+
+function installExpiryAwareRedis(clock, entries, pipelines) {
+  globalThis.fetch = async (url, init = {}) => {
+    const body = init.body ? JSON.parse(init.body) : null;
+    if (String(url).endsWith('/pipeline')) {
+      const result = body.map((command) => {
+        const [, key, ttlSeconds] = command;
+        const entry = entries.get(key);
+        if (!entry || entry.expiresAt <= clock.now) {
+          entries.delete(key);
+          return { result: 0 };
+        }
+        entry.expiresAt = clock.now + Number(ttlSeconds) * 1000;
+        return { result: 1 };
+      });
+      pipelines.push({ at: clock.now, commands: clone(body) });
+      return Response.json(result);
+    }
+    return Response.json({ result: 'OK' });
+  };
+}
+
+function primeFredConsumerCohort(clock) {
+  const entries = new Map();
+  const put = (key, value, ttlSeconds) => entries.set(key, {
+    value: clone(value),
+    expiresAt: clock.now + ttlSeconds * 1000,
+  });
+  put(CANONICAL_KEY, { seeded: 'batch' }, FRED_TTL);
+  put('seed-meta:economic:fred-rates', { fetchedAt: 1, recordCount: 24 }, SEED_META_TTL);
+  for (const seriesId of FRED_SEED_SERIES) {
+    const key = `${FRED_KEY_PREFIX}:${seriesId}:0`;
+    put(key, { series: { seriesId, observations: [{ date: '2031-01-01', value: 1 }] } }, FRED_TTL);
+    put(companionMetaKey(key), { fetchedAt: 1, recordCount: 1 }, SEED_META_TTL);
+  }
+  put(STRESS_INDEX_KEY, { seededAt: '2031-01-01T00:00:00.000Z', components: [] }, STRESS_INDEX_TTL);
+  put(companionMetaKey(STRESS_INDEX_KEY), { fetchedAt: 1, recordCount: 0 }, SEED_META_TTL);
+  return entries;
+}
+
+function assertCohortContentAndTtl(entries, before, clock) {
+  for (const [key, value] of before) {
+    assert.deepEqual(entries.get(key)?.value, value, `${key} content must not be rewritten by retention`);
+    assert.ok(entries.get(key)?.expiresAt > clock.now, `${key} must survive failed refreshes`);
+  }
+}
+
+function makeFredBatch(count) {
+  const seriesById = makeSeriesMap(count);
+  const seriesIds = Object.keys(seriesById);
+  return {
+    fetchedAt: '2031-01-01T00:00:00.000Z',
+    seriesCount: count,
+    seriesIds,
+    missingSeriesIds: FRED_SEED_SERIES.filter((seriesId) => !seriesById[seriesId]),
+    seriesById,
+    stress: null,
+  };
 }
 
 function makeRunSeedHarness(events) {
@@ -63,6 +187,114 @@ function makeRunSeedHarness(events) {
 }
 
 describe('FRED publication gates', () => {
+  it('retains every FRED consumer payload and its unchanged companion metadata across repeated source failures', async () => {
+    const captured = await captureFredSeedOptions();
+    assert.equal(captured.domain, 'economic');
+    assert.equal(captured.resource, 'fred-rates');
+    assert.equal(captured.canonicalKey, CANONICAL_KEY);
+    assert.deepEqual(captured.options.preserveKeyTtls, expectedFredSidePreservationTargets());
+    assert.equal(captured.options.emptyDataIsFailure, true);
+
+    const clock = { now: 1_700_000_000_000 };
+    const entries = primeFredConsumerCohort(clock);
+    const missingKey = `${FRED_KEY_PREFIX}:${FRED_SEED_SERIES.at(-1)}:0`;
+    const missingMetaKey = companionMetaKey(missingKey);
+    entries.delete(missingKey);
+    entries.delete(missingMetaKey);
+    const before = new Map([...entries].map(([key, entry]) => [key, clone(entry.value)]));
+    const pipelines = [];
+    installExpiryAwareRedis(clock, entries, pipelines);
+
+    for (const advanceMs of [0, 5, 10, 15, 20, 25, 30].map((hours) => hours * 60 * 60 * 1000)) {
+      clock.now = 1_700_000_000_000 + advanceMs;
+      const exitCode = await trapSeedExit(() => runSeed(
+        captured.domain,
+        captured.resource,
+        captured.canonicalKey,
+        async () => {
+          throw Object.assign(new Error('FRED upstream unavailable'), { nonRetryable: true });
+        },
+        captured.options,
+      ));
+      assert.equal(exitCode, GRACEFUL_FETCH_FAILURE_EXIT_CODE);
+    }
+
+    assertCohortContentAndTtl(entries, before, clock);
+    assert.equal(entries.has(missingKey), false, 'retention must not recreate a missing FRED payload');
+    assert.equal(entries.has(missingMetaKey), false, 'retention must not recreate metadata for a missing FRED payload');
+
+    const latestGroups = new Map(
+      pipelines.slice(-3).map(({ commands }) => [
+        commands[0][2],
+        commands.map(([, key]) => key).sort(),
+      ]),
+    );
+    assert.deepEqual(latestGroups, new Map([
+      [FRED_TTL, [
+        CANONICAL_KEY,
+        ...FRED_SEED_SERIES.map((seriesId) => `${FRED_KEY_PREFIX}:${seriesId}:0`),
+      ].sort()],
+      [STRESS_INDEX_TTL, [STRESS_INDEX_KEY]],
+      [SEED_META_TTL, [
+        'seed-meta:economic:fred-rates',
+        ...FRED_SEED_SERIES.map((seriesId) => companionMetaKey(`${FRED_KEY_PREFIX}:${seriesId}:0`)),
+        companionMetaKey(STRESS_INDEX_KEY),
+      ].sort()],
+    ]));
+  });
+
+  it('retains the FRED cohort without rewriting metadata on validation or beforePublish failure', async () => {
+    const captured = await captureFredSeedOptions();
+    assert.deepEqual(captured.options.preserveKeyTtls, expectedFredSidePreservationTargets());
+    assert.equal(captured.options.emptyDataIsFailure, true);
+
+    const cases = [
+      {
+        name: 'partial validation failure',
+        run: async () => {
+          const exitCode = await trapSeedExit(() => runSeed(
+            captured.domain,
+            captured.resource,
+            captured.canonicalKey,
+            async () => makeFredBatch(MIN_SERIES_COUNT - 1),
+            captured.options,
+          ));
+          assert.equal(exitCode, 1);
+        },
+      },
+      {
+        name: 'beforePublish failure',
+        run: async () => assert.rejects(
+          runSeed(
+            captured.domain,
+            captured.resource,
+            captured.canonicalKey,
+            async () => makeFredBatch(MIN_SERIES_COUNT),
+            {
+              ...captured.options,
+              beforePublish: async () => {
+                throw new Error('FRED side publication failed');
+              },
+            },
+          ),
+          /FRED side publication failed/,
+        ),
+      },
+    ];
+
+    for (const failure of cases) {
+      const clock = { now: 1_700_000_000_000 };
+      const entries = primeFredConsumerCohort(clock);
+      const before = new Map([...entries].map(([key, entry]) => [key, clone(entry.value)]));
+      const pipelines = [];
+      installExpiryAwareRedis(clock, entries, pipelines);
+
+      await failure.run();
+      assertCohortContentAndTtl(entries, before, clock);
+      assert.equal(pipelines.length, 3, `${failure.name} must extend each TTL cohort once`);
+    }
+  });
+
   it('rejects 17/24 before side writes or activation', async () => {
     const events = [];
     const writes = [];
