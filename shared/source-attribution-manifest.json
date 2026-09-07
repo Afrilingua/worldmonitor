@@ -10225,9 +10225,6 @@
           "path": "server/worldmonitor/infrastructure/v1/reverse-geocode.ts"
         },
         {
-          "path": "src/app/panel-layout.ts"
-        },
-        {
           "path": "src/bootstrap/web-vitals-utils.ts"
         },
         {
@@ -14310,6 +14307,9 @@
         },
         {
           "path": "server/_shared/deprecation-policy.ts"
+        },
+        {
+          "path": "src/app/panel-layout.ts"
         },
         {
           "path": "src/components/RuntimeConfigPanel.ts"
