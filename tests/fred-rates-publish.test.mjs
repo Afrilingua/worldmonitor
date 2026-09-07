@@ -78,7 +78,7 @@ async function captureFredSeedOptions() {
 }
 
 function clone(value) {
-  return JSON.parse(JSON.stringify(value));
+  return structuredClone(value);
 }
 
 async function trapSeedExit(fn) {

@@ -461,9 +461,6 @@ export async function publishDatasetIndependently(key, payload, metaKey) {
     try {
       await writeExtraKey(key, payload, TTL);
       if (metaKey) {
-        // Metadata is written only after the payload succeeds. If the write
-        // is rejected or throws, keep the old metadata body and fetchedAt;
-        // this preserves the health warning without fabricating success.
         const wroteMeta = await writeSeedMeta(key, payload.entries.length, metaKey).catch(() => false);
         if (!wroteMeta) {
           console.warn(`  ${key}: metadata write failed; extending existing payload and metadata TTL`);
