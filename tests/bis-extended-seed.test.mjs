@@ -379,7 +379,26 @@ describe('seed-bis-extended parser', () => {
     ]);
     await withRedisCapture(({ body }) => {
       if (Array.isArray(body) && Array.isArray(body[0])) {
-        if (body.some(([command]) => command === 'SET')) return httpFailure;
+        if (body.some(([command]) => command === 'MSET')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => body.map(([command]) => command === 'MSET'
+              ? { error: 'ERR simulated atomic value failure' }
+              : { result: 1 }),
+          };
+        }
+        if (body.some(([command]) => command === 'SET')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => body.map(([command, key, value]) => {
+              if (key === META_KEYS.spp) return { error: 'ERR simulated metadata failure' };
+              if (command === 'SET') retainedValues.set(key, value);
+              return { result: 'OK' };
+            }),
+          };
+        }
         return pipelineOk({ body });
       }
       if (body?.[0] === 'SET' && body?.[1] === META_KEYS.spp) return httpFailure;
