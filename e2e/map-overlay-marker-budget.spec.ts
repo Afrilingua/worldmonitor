@@ -98,7 +98,7 @@ type DashboardMetric = keyof typeof DASHBOARD_METRIC_BUDGETS;
 type DashboardMetrics = Record<DashboardMetric, number>;
 type ColdDashboardSample = {
   coldLoad: number;
-  initialDataReadyMs: number;
+  mapRenderReadyMs: number;
   collectGarbageMs: number;
   preGc: DashboardMetrics;
   postGc: DashboardMetrics;
@@ -156,7 +156,14 @@ async function installLocalOnlyNetwork(page: Page): Promise<void> {
   });
 }
 
-async function loadColdDashboard(page: Page): Promise<{ initialDataReadyMs: number }> {
+async function waitForSvgMapRender(page: Page): Promise<void> {
+  await expect(page.locator('#mapContainer.svg-mode .map-wrapper')).toBeVisible({ timeout: 30000 });
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+}
+
+async function loadColdDashboard(page: Page): Promise<{ mapRenderReadyMs: number }> {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => {
     localStorage.clear();
@@ -167,9 +174,8 @@ async function loadColdDashboard(page: Page): Promise<{ initialDataReadyMs: numb
   const startedAt = Date.now();
   await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => document.documentElement.dataset.wmEventHandlersReady === 'true');
-  await expect(page.locator('#mapContainer')).toBeVisible({ timeout: 30000 });
-  await page.waitForFunction(() => document.documentElement.dataset.wmInitialDataReady === 'true');
-  return { initialDataReadyMs: Date.now() - startedAt };
+  await waitForSvgMapRender(page);
+  return { mapRenderReadyMs: Date.now() - startedAt };
 }
 
 async function readDashboardMetrics(page: Page): Promise<{
@@ -221,7 +227,7 @@ async function attachColdDashboardMetrics(testInfo: TestInfo, samples: readonly 
   await testInfo.attach('cold-dashboard-metrics.json', {
     contentType: 'application/json',
     body: JSON.stringify({
-      readiness: 'wmInitialDataReady',
+      readiness: 'svg-map-first-paint',
       measurement: 'post-gc',
       samples,
     }, null, 2),
@@ -334,9 +340,9 @@ test.describe('SVG map overlay marker budget (#7112)', () => {
         });
         const page = await context.newPage();
         try {
-          const { initialDataReadyMs } = await loadColdDashboard(page);
+          const { mapRenderReadyMs } = await loadColdDashboard(page);
           const metrics = await readDashboardMetrics(page);
-          samples.push({ coldLoad: attempt + 1, initialDataReadyMs, ...metrics });
+          samples.push({ coldLoad: attempt + 1, mapRenderReadyMs, ...metrics });
         } finally {
           await context.close();
         }
