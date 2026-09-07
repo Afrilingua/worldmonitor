@@ -373,9 +373,19 @@ export function getSyncVersion(): number {
   return parseInt(safeStorageGet(KEY_SYNC_VERSION) ?? '0', 10) || 0;
 }
 
-function setSyncVersion(v: number): void {
+/**
+ * Record the durable sync version. Returns false when a usable store REJECTED
+ * the write.
+ *
+ * The marker is small, so a store that rejects it is nearly full — but the
+ * consequence is not cosmetic: callers follow this by settling dirty keys and
+ * reporting `synced`, and a stale durable version makes every later upload
+ * conflict and every reload re-reconcile. Same contract as applyCloudBlob's,
+ * for the same reason (#7833 review).
+ */
+function setSyncVersion(v: number): boolean {
   // A state key, not a pref key — nothing here should mark the blob dirty.
-  safeStorageSet(KEY_SYNC_VERSION, String(v));
+  return safeStorageSetChecked(KEY_SYNC_VERSION, String(v));
 }
 
 function setState(s: SyncState): void {
@@ -584,22 +594,37 @@ function showUndoToast(prevBlobJson: string): void {
   toast.addEventListener('click', (e) => {
     const action = (e.target as HTMLElement).closest('[data-action]')?.getAttribute('data-action');
     if (action === 'undo') {
+      // Same checked-write contract as applyCloudBlob, for the same reason: a
+      // rejected restore must not be announced as one. `restoredKeys` is built
+      // from a read taken BEFORE the write, so an unchecked write would tell
+      // every CLOUD_PREFS_APPLIED listener to re-read a key that still holds
+      // the cloud value — and dismissing the toast would take away the only
+      // affordance the user had to try again.
       const prev = JSON.parse(prevBlobJson) as Record<string, string>;
       const restoredKeys: CloudSyncKey[] = [];
+      let allRestored = true;
       _suppressPatch = true;
       try {
         for (const [k, v] of Object.entries(prev)) {
           if (!CLOUD_SYNC_KEYS.includes(k as CloudSyncKey)) continue;
           const key = k as CloudSyncKey;
-          if (safeStorageGet(key) !== v) restoredKeys.push(key);
-          safeStorageSet(key, v);
+          const wasDifferent = safeStorageGet(key) !== v;
+          if (safeStorageSetChecked(key, v)) {
+            if (wasDifferent) restoredKeys.push(key);
+          } else {
+            allRestored = false;
+          }
         }
       } finally {
         _suppressPatch = false;
       }
       dispatchCloudPrefsApplied(restoredKeys);
-      toast.remove();
-      clearTimeout(autoTimer);
+      // Leave the toast up when the undo did not fully land, so the action is
+      // still available; the 5s auto-dismiss timer still applies.
+      if (allRestored) {
+        toast.remove();
+        clearTimeout(autoTimer);
+      }
     } else if (action === 'dismiss') {
       toast.remove();
       clearTimeout(autoTimer);
@@ -734,7 +759,10 @@ async function resolveConflictWithMerge(token: string, variant: string, callerGe
     setState('error');
     return false;
   }
-  setSyncVersion(fresh.syncVersion);
+  if (!setSyncVersion(fresh.syncVersion)) {
+    setState('error');
+    return false;
+  }
   setLocalSchemaVersion(migratedCloud.schemaVersion);
   const retry = await postCloudPrefs(token, variant, merged, fresh.syncVersion, migratedCloud.schemaVersion);
   if (_authGeneration !== callerGeneration) return false;
@@ -746,7 +774,11 @@ async function resolveConflictWithMerge(token: string, variant: string, callerGe
   // signed-in user switched during the awaits above, do not clear/persist
   // settled dirty keys — _dirtyKeys now belongs to another user and the
   // write would durably corrupt their persisted dirty-key entry.
-  setSyncVersion(retry.syncVersion);
+  if (!setSyncVersion(retry.syncVersion)) {
+    // As above: do not settle dirty keys against a version that is not durable.
+    setState('error');
+    return false;
+  }
   clearSettledDirtyKeys(merged);
   safeStorageSet(KEY_LAST_SYNC_AT, String(Date.now()));
   setState('synced');
@@ -823,7 +855,11 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
           completeSignInAttempt(attempt, 'error');
           return;
         }
-        setSyncVersion(cloud.syncVersion);
+        if (!setSyncVersion(cloud.syncVersion)) {
+          setState('error');
+          completeSignInAttempt(attempt, 'error');
+          return;
+        }
         // An ambiguous schema-5 fingerprint deliberately stops at schema 4,
         // so the same row remains eligible for a future disambiguated retry.
         setLocalSchemaVersion(migrated.schemaVersion);
@@ -863,11 +899,17 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
             completeSignInAttempt(attempt, 'error');
             return;
           }
-        } else {
-          setSyncVersion(result.syncVersion);
+        } else if (setSyncVersion(result.syncVersion)) {
           clearSettledDirtyKeys(prepared.data);
           safeStorageSet(KEY_LAST_SYNC_AT, String(Date.now()));
           setState('synced');
+        } else {
+        // The durable marker did not land. Settling dirty keys and reporting
+        // synced on top of a stale version would claim a reconciliation that
+        // is not persisted (#7833 review).
+          setState('error');
+          completeSignInAttempt(attempt, 'error');
+          return;
         }
       }
 
@@ -1057,7 +1099,12 @@ async function performUploadNow(variant: string): Promise<'completed' | 'retry-d
       // user's dirty-key entry using this upload's stale postedBlob. Match the
       // 503 retry branch and the flush-success path — bail if the generation
       // moved.
-      setSyncVersion(result.syncVersion);
+      if (!setSyncVersion(result.syncVersion)) {
+        // Same contract as the sign-in branch: a stale durable version must not
+        // be reported as synced with its dirty keys settled.
+        setState('error');
+        return 'stopped';
+      }
       clearSettledDirtyKeys(postedBlob);
       safeStorageSet(KEY_LAST_SYNC_AT, String(Date.now()));
       setState('synced');

@@ -71,21 +71,45 @@ const REPO_ROOT = path.resolve(__dirname, '..');
  * still a hand-rolled half-guard. Inside `safe-storage.ts` it is paired with a
  * try/catch, which is why that file — and only that file — is exempt.
  */
+// Whitespace is permitted between the identifier, the accessor and the member
+// throughout: `localStorage .getItem(k)` and a formatter-wrapped
+//
+//     localStorage
+//       .getItem(k)
+//
+// are ordinary code a bare `localStorage\.` pattern misses entirely, and
+// `stripComments` turns `localStorage /* c */.getItem(k)` into exactly the
+// spaced form. `[^\S\n]` rather than `\s` on the identifier side of a bare
+// dot would forbid the wrapped shape, so `\s` it is — the cost is that a
+// `localStorage` on one line and an unrelated `.foo` on the next can pair up,
+// which over-counts (a LOUD inventory mismatch) rather than under-counting.
 export const RAW_STORAGE_PATTERNS = [
   {
     label: 'localStorage.<member>',
-    re: /(?<![.?])\blocalStorage\.\w/,
+    re: /(?<![.?])\blocalStorage\s*\.\s*\w/,
     probe: 'localStorage.getItem(key);',
+    extraProbes: [
+      'localStorage .getItem(key);',
+      'localStorage\n  .getItem(key);',
+    ],
   },
   {
     label: 'localStorage?.<member>',
-    re: /\blocalStorage\?\.\w/,
+    re: /\blocalStorage\s*\?\.\s*\w/,
     probe: 'localStorage?.getItem(key);',
   },
   {
     label: 'localStorage[<expr>]',
-    re: /\blocalStorage(?:\?\.)?\[/,
+    re: /\blocalStorage\s*(?:\?\.)?\s*\[/,
     probe: 'localStorage[key] = value;',
+  },
+  {
+    // `(localStorage).getItem(k)` reads as deliberate obfuscation more than as
+    // an accident, but it is valid code that crashes identically, and the
+    // parenthesised receiver defeats every identifier-anchored pattern above.
+    label: '(localStorage).<member>',
+    re: /\(\s*localStorage\s*\)\s*\??\.\s*\w/,
+    probe: '(localStorage).getItem(key);',
   },
   {
     // Every global that names the same Storage object. The receiver prefix is

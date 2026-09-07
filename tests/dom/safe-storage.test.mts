@@ -162,3 +162,37 @@ describe('isStorageAvailable', () => {
     expect(isStorageAvailable()).toBe(false);
   });
 });
+
+describe('checked-write call-site contract (#7833 review)', () => {
+  beforeEach(stubWorkingStorage);
+
+  it('lets a caller record only the writes that landed', () => {
+    // The shape both applyCloudBlob and showUndoToast's undo handler use: the
+    // "did this change?" read happens BEFORE the write, so without the checked
+    // result a rejected write still gets announced as applied.
+    const backing = new Map<string, string>([['a', 'old'], ['b', 'old']]);
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => backing.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (k === 'b') throw new Error('QuotaExceededError');
+        backing.set(k, v);
+      },
+      removeItem: (k: string) => { backing.delete(k); },
+    });
+
+    const applied: string[] = [];
+    let allLanded = true;
+    for (const key of ['a', 'b']) {
+      const wasDifferent = safeStorageGet(key) !== 'new';
+      if (safeStorageSetChecked(key, 'new')) {
+        if (wasDifferent) applied.push(key);
+      } else {
+        allLanded = false;
+      }
+    }
+
+    expect(applied).toEqual(['a']);
+    expect(allLanded).toBe(false);
+    expect(backing.get('b')).toBe('old');
+  });
+});

@@ -62,6 +62,27 @@ describe('raw localStorage guard (#7833)', () => {
     }
   });
 
+  it('catches lexical variants of the dereference itself', () => {
+    // A bare `localStorage\.` pattern anchors on the dot immediately following
+    // the identifier, so ordinary spacing defeated it. The wrapped form is what
+    // makes this more than adversarial — a formatter produces it for a long
+    // chain — and `stripComments` turns the inline-comment form into exactly
+    // the spaced one.
+    for (const src of [
+      'localStorage .getItem(k);',
+      'localStorage\n  .getItem(k);',
+      '(localStorage).getItem(k);',
+      '( localStorage ) ?. getItem(k);',
+      'localStorage [k] = v;',
+    ]) {
+      assert.notDeepEqual(
+        rawStorageUsesIn(stripComments(src)),
+        [],
+        `${JSON.stringify(src)} is not caught by any pattern`,
+      );
+    }
+  });
+
   it('every pattern matches its own probe', () => {
     // Asserting something like `re.source.length > 0` would be a tautology:
     // even `new RegExp('').source` is the 4-character string "(?:)". Matching
