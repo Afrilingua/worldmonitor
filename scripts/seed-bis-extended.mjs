@@ -26,6 +26,7 @@
 import {
   loadEnvFile,
   CHROME_UA,
+  getRedisCredentials,
   runSeed,
   extendExistingTtl,
   resolveSeedMetaTtl,
@@ -498,14 +499,49 @@ export async function publishBisDsrAtomically(data, {
   if (planDatasetAction(data?.dsr) !== 'write') {
     throw new Error('BIS DSR atomic publication requires a non-empty DSR slice');
   }
-  await writeExtraKeyWithMetaAtomically({
-    key: canonicalKey,
-    data: payloadValue ?? data.dsr,
-    ttlSeconds,
-    recordCount: data.dsr.entries.length,
-    metaKey: META_KEYS.dsr,
-    metaTtlSeconds: META_TTL,
+  const { url, token } = getRedisCredentials();
+  const recordCount = data.dsr.entries.length;
+  const seed = payloadValue?._seed;
+  const fetchedAt = Number.isFinite(seed?.fetchedAt) ? seed.fetchedAt : Date.now();
+  const aggregateMeta = {
+    fetchedAt,
+    recordCount: Number.isInteger(seed?.recordCount) ? seed.recordCount : recordCount,
+    sourceVersion: typeof seed?.sourceVersion === 'string'
+      ? seed.sourceVersion
+      : 'bis-sdmx-csv-extended',
+  };
+  for (const field of ['newestItemAt', 'oldestItemAt', 'maxContentAgeMin']) {
+    if (Object.hasOwn(seed ?? {}, field)) aggregateMeta[field] = seed[field];
+  }
+  const commands = [
+    ['MSET',
+      canonicalKey, JSON.stringify(payloadValue ?? data.dsr),
+      META_KEYS.dsr, JSON.stringify({ fetchedAt, recordCount }),
+      AGGREGATE_META_KEY, JSON.stringify(aggregateMeta)],
+    ['EXPIRE', canonicalKey, ttlSeconds],
+    ['EXPIRE', META_KEYS.dsr, META_TTL],
+    ['EXPIRE', AGGREGATE_META_KEY, META_TTL],
+  ];
+  const response = await fetch(`${url}/multi-exec`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': CHROME_UA,
+    },
+    body: JSON.stringify(commands),
+    signal: AbortSignal.timeout(5_000),
   });
+  if (!response.ok) throw new Error(`BIS DSR atomic publication failed: HTTP ${response.status}`);
+  const results = await response.json();
+  if (
+    !Array.isArray(results)
+    || results.length !== commands.length
+    || results[0]?.result !== 'OK'
+    || results.slice(1).some((result) => result?.result !== 1)
+  ) {
+    throw new Error('BIS DSR atomic publication returned an invalid command result');
+  }
 }
 
 export async function runBisExtendedSeed({

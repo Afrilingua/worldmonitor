@@ -352,6 +352,16 @@ describe('FRED publication gates', () => {
     assert.equal(aggregateMeta.fetchedAt, payloadValue._seed.fetchedAt);
     assert.equal(aggregateMeta.recordCount, batch.seriesCount);
     assert.equal(aggregateMeta.sourceVersion, 'fred-v1');
+    const ttlByKey = new Map(transactions[0].slice(1).map(([, key, ttl]) => [key, ttl]));
+    for (const seriesId of batch.seriesIds) {
+      const key = `${FRED_KEY_PREFIX}:${seriesId}:0`;
+      assert.equal(ttlByKey.get(key), FRED_TTL);
+      assert.equal(ttlByKey.get(companionMetaKey(key)), SEED_META_TTL);
+    }
+    assert.equal(ttlByKey.get(STRESS_INDEX_KEY), STRESS_INDEX_TTL);
+    assert.equal(ttlByKey.get(companionMetaKey(STRESS_INDEX_KEY)), SEED_META_TTL);
+    assert.equal(ttlByKey.get('seed-meta:economic:fred-rates'), SEED_META_TTL);
+    assert.equal(ttlByKey.get(CANONICAL_KEY), FRED_TTL);
   });
 
   it('publishes every consumer key and activation after a retained source failure recovers', async () => {

@@ -104,6 +104,7 @@ export function validateFredBatch(batch) {
 export async function publishFredCohortAtomically(batch, {
   canonicalKey = CANONICAL_KEY,
   payload,
+  payloadValue,
   ttlSeconds = BATCH_TTL,
   fetchImpl = globalThis.fetch,
   credentials = getRedisCredentials(),
@@ -111,30 +112,39 @@ export async function publishFredCohortAtomically(batch, {
 } = {}) {
   if (typeof payload !== 'string') throw new Error('FRED atomic publish requires a serialized canonical payload');
 
-  const commands = [];
+  const seed = payloadValue?._seed;
+  const cohortFetchedAt = Number.isFinite(seed?.fetchedAt) ? seed.fetchedAt : fetchedAt;
+  const values = [];
+  const expirations = [];
+  const addValue = (key, value, keyTtlSeconds) => {
+    values.push(key, typeof value === 'string' ? value : JSON.stringify(value));
+    expirations.push(['EXPIRE', key, keyTtlSeconds]);
+  };
   for (const seriesId of batch.seriesIds) {
     const key = `${FRED_KEY_PREFIX}:${seriesId}:0`;
     const series = batch.seriesById[seriesId];
-    commands.push(
-      ['SET', key, JSON.stringify({ series }), 'EX', FRED_TTL],
-      ['SET', seedMetaKeyFor(key), JSON.stringify({
-        fetchedAt,
-        recordCount: series.observations.length,
-      }), 'EX', resolveSeedMetaTtl(undefined, FRED_TTL)],
-    );
+    addValue(key, { series }, FRED_TTL);
+    addValue(seedMetaKeyFor(key), {
+      fetchedAt: cohortFetchedAt,
+      recordCount: series.observations.length,
+    }, resolveSeedMetaTtl(undefined, FRED_TTL));
   }
 
   if (batch.stress) {
-    commands.push(
-      ['SET', STRESS_INDEX_KEY, JSON.stringify(batch.stress), 'EX', STRESS_INDEX_TTL],
-      ['SET', seedMetaKeyFor(STRESS_INDEX_KEY), JSON.stringify({
-        fetchedAt,
-        recordCount: batch.stress.components?.length ?? 0,
-      }), 'EX', resolveSeedMetaTtl(undefined, STRESS_INDEX_TTL)],
-    );
+    addValue(STRESS_INDEX_KEY, batch.stress, STRESS_INDEX_TTL);
+    addValue(seedMetaKeyFor(STRESS_INDEX_KEY), {
+      fetchedAt: cohortFetchedAt,
+      recordCount: batch.stress.components?.length ?? 0,
+    }, resolveSeedMetaTtl(undefined, STRESS_INDEX_TTL));
   }
 
-  commands.push(['SET', canonicalKey, payload, 'EX', ttlSeconds]);
+  addValue('seed-meta:economic:fred-rates', {
+    fetchedAt: cohortFetchedAt,
+    recordCount: Number.isInteger(seed?.recordCount) ? seed.recordCount : batch.seriesCount,
+    sourceVersion: typeof seed?.sourceVersion === 'string' ? seed.sourceVersion : 'fred-v1',
+  }, resolveSeedMetaTtl(undefined, ttlSeconds));
+  addValue(canonicalKey, payload, ttlSeconds);
+  const commands = [['MSET', ...values], ...expirations];
   const response = await fetchImpl(`${credentials.url}/multi-exec`, {
     method: 'POST',
     headers: {
@@ -150,7 +160,8 @@ export async function publishFredCohortAtomically(batch, {
   if (
     !Array.isArray(results)
     || results.length !== commands.length
-    || results.some((result) => result?.error || result?.result === 'ERR')
+    || results[0]?.result !== 'OK'
+    || results.slice(1).some((result) => result?.result !== 1)
   ) {
     throw new Error('FRED atomic publication returned an invalid command result');
   }

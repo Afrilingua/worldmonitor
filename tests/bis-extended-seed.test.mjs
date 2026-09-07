@@ -611,6 +611,11 @@ describe('seed-bis-extended parser', () => {
         oldestItemAt: 2,
         maxContentAgeMin: 3,
       });
+      assert.deepEqual(transaction.slice(1), [
+        ['EXPIRE', KEYS.dsr, BIS_TTL_SECONDS],
+        ['EXPIRE', META_KEYS.dsr, BIS_META_TTL_SECONDS],
+        ['EXPIRE', 'seed-meta:economic:bis-extended', BIS_META_TTL_SECONDS],
+      ]);
     });
 
     await assert.rejects(
