@@ -449,11 +449,15 @@ async function fetchNhc(fetchFn = globalThis.fetch) {
         .filter(f => f.geometry?.coordinates)
         .sort((a, b) => (a.properties.dtg || 0) - (b.properties.dtg || 0));
       for (const f of sorted) {
+        const windKt = f.properties?.intensity ?? 0;
+        const timestamp = f.properties?.dtg ?? 0;
+        if (!Number.isFinite(windKt) || windKt < 0 || windKt > 200
+          || !Number.isFinite(timestamp) || timestamp < 0) continue;
         pastTrack.push({
           lat: f.geometry.coordinates[1],
           lon: f.geometry.coordinates[0],
-          windKt: f.properties.intensity ?? 0,
-          timestamp: f.properties.dtg ?? 0,
+          windKt,
+          timestamp,
         });
       }
     }

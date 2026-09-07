@@ -290,6 +290,31 @@ test('optional cone and past-point failures do not remove a point-confirmed stor
   assert.equal(payload._nhcSnapshot.consecutiveFailures, 0);
 });
 
+test('invalid optional past-point properties do not remove a point-confirmed storm', async () => {
+  const payload = await runNhc({
+    previous: null,
+    nhc: async (_input, id) => Response.json(collection(
+      id === 6 ? [currentStormPoint] : id === 11 ? [
+        {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [-61, 19] },
+          properties: { intensity: '45', dtg: NOW - MIN },
+        },
+        {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [-62, 18] },
+          properties: { intensity: 40, dtg: 'not-a-timestamp' },
+        },
+      ] : [],
+    )),
+  });
+
+  const storm = payload.events.find(event => event.sourceName === 'NHC');
+  assert.equal(storm.id, 'nhc-AL01-7');
+  assert.deepEqual(storm.pastTrack, []);
+  assert.equal(payload._nhcSnapshot.consecutiveFailures, 0);
+});
+
 test('complete valid empty NHC coverage replaces prior storms and all-provider empty is publishable', async () => {
   const payload = await runNhc({
     now: NOW + MIN,
