@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import {
+  CHROME_UA,
+  getRedisCredentials,
   loadEnvFile,
   resolveSeedMetaTtl,
   runSeed,
-  withRetry,
-  writeExtraKeyWithMeta,
 } from './_seed-utils.mjs';
 import { getOptionalUpstashCreds, upstashCommand } from './_upstash-rest.mjs';
 import {
@@ -29,8 +29,6 @@ export const BATCH_TTL = FRED_TTL;
 // FRED batch has published successfully.
 export const FRED_RATES_ACTIVATION_KEY = 'seed-activated:economic:fred-rates:v1';
 const MIN_SERIES_COUNT = Math.ceil(FRED_SEED_SERIES.length * 0.75);
-const SIDE_WRITE_RETRIES = 2;
-const SIDE_WRITE_RETRY_DELAY_MS = 1_000;
 
 function seedMetaKeyFor(dataKey) {
   return `seed-meta:${dataKey.replace(/:v\d+$/, '')}`;
@@ -103,46 +101,58 @@ export function validateFredBatch(batch) {
   return Number.isInteger(batch?.seriesCount) && batch.seriesCount >= MIN_SERIES_COUNT;
 }
 
-async function writeSideKeyWithMeta(
-  writeFn,
-  withRetryImpl,
-  errorMessage,
-) {
-  await withRetryImpl(async () => {
-    const wroteMeta = await writeFn();
-    if (wroteMeta !== true) throw new Error(errorMessage);
-  }, SIDE_WRITE_RETRIES, SIDE_WRITE_RETRY_DELAY_MS);
-}
-
-export async function publishFredSideKeys(batch, {
-  writeExtraKeyWithMetaImpl = writeExtraKeyWithMeta,
-  withRetryImpl = withRetry,
+export async function publishFredCohortAtomically(batch, {
+  canonicalKey = CANONICAL_KEY,
+  payload,
+  ttlSeconds = BATCH_TTL,
+  fetchImpl = globalThis.fetch,
+  credentials = getRedisCredentials(),
+  fetchedAt = Date.now(),
 } = {}) {
+  if (typeof payload !== 'string') throw new Error('FRED atomic publish requires a serialized canonical payload');
+
+  const commands = [];
   for (const seriesId of batch.seriesIds) {
+    const key = `${FRED_KEY_PREFIX}:${seriesId}:0`;
     const series = batch.seriesById[seriesId];
-    await writeSideKeyWithMeta(
-      () => writeExtraKeyWithMetaImpl(
-        `${FRED_KEY_PREFIX}:${seriesId}:0`,
-        { series },
-        FRED_TTL,
-        series.observations.length,
-      ),
-      withRetryImpl,
-      `FRED ${seriesId} seed-meta write failed`,
+    commands.push(
+      ['SET', key, JSON.stringify({ series }), 'EX', FRED_TTL],
+      ['SET', seedMetaKeyFor(key), JSON.stringify({
+        fetchedAt,
+        recordCount: series.observations.length,
+      }), 'EX', resolveSeedMetaTtl(undefined, FRED_TTL)],
     );
   }
 
   if (batch.stress) {
-    await writeSideKeyWithMeta(
-      () => writeExtraKeyWithMetaImpl(
-        STRESS_INDEX_KEY,
-        batch.stress,
-        STRESS_INDEX_TTL,
-        batch.stress.components?.length ?? 0,
-      ),
-      withRetryImpl,
-      'FRED stress-index seed-meta write failed',
+    commands.push(
+      ['SET', STRESS_INDEX_KEY, JSON.stringify(batch.stress), 'EX', STRESS_INDEX_TTL],
+      ['SET', seedMetaKeyFor(STRESS_INDEX_KEY), JSON.stringify({
+        fetchedAt,
+        recordCount: batch.stress.components?.length ?? 0,
+      }), 'EX', resolveSeedMetaTtl(undefined, STRESS_INDEX_TTL)],
     );
+  }
+
+  commands.push(['SET', canonicalKey, payload, 'EX', ttlSeconds]);
+  const response = await fetchImpl(`${credentials.url}/multi-exec`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${credentials.token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': CHROME_UA,
+    },
+    body: JSON.stringify(commands),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(`FRED atomic publication failed: HTTP ${response.status}`);
+  const results = await response.json();
+  if (
+    !Array.isArray(results)
+    || results.length !== commands.length
+    || results.some((result) => result?.error || result?.result === 'ERR')
+  ) {
+    throw new Error('FRED atomic publication returned an invalid command result');
   }
 }
 
@@ -171,10 +181,9 @@ export async function runFredRatesSeed(deps = {}) {
     publishTransform: projectFredBatch,
     preserveKeyTtls: fredPreserveKeyTtls(),
     emptyDataIsFailure: true,
-    beforePublish: (batch) => publishFredSideKeys(batch, {
-      writeExtraKeyWithMetaImpl: deps.writeExtraKeyWithMetaImpl,
-      withRetryImpl: deps.withRetryImpl,
-    }),
+    publishAtomically: (batch, context) => (
+      deps.publishFredCohortImpl ?? publishFredCohortAtomically
+    )(batch, context),
     sourceVersion: 'fred-v1',
     recordCount: (data) => data?.seriesCount ?? 0,
     declareRecords: (data) => data?.seriesCount ?? 0,

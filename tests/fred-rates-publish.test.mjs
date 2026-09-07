@@ -179,7 +179,12 @@ function makeRunSeedHarness(events) {
     }
 
     events.push('validated');
-    await options.beforePublish(batch, { canonicalKey: key });
+    await options.publishAtomically(batch, {
+      canonicalKey: key,
+      payload: JSON.stringify(canonical),
+      payloadValue: canonical,
+      ttlSeconds: FRED_TTL,
+    });
     events.push('canonical');
     await options.afterPublish(batch, { canonicalKey: key });
     return { skipped: false, batch, canonical };
@@ -243,7 +248,7 @@ describe('FRED publication gates', () => {
     ]));
   });
 
-  it('retains the FRED cohort without rewriting metadata on validation or beforePublish failure', async () => {
+  it('retains the FRED cohort without rewriting metadata on validation or atomic publication failure', async () => {
     const captured = await captureFredSeedOptions();
     assert.deepEqual(captured.options.preserveKeyTtls, expectedFredSidePreservationTargets());
     assert.equal(captured.options.emptyDataIsFailure, true);
@@ -263,7 +268,7 @@ describe('FRED publication gates', () => {
         },
       },
       {
-        name: 'beforePublish failure',
+        name: 'atomic publication failure',
         run: async () => assert.rejects(
           runSeed(
             captured.domain,
@@ -272,12 +277,12 @@ describe('FRED publication gates', () => {
             async () => makeFredBatch(MIN_SERIES_COUNT),
             {
               ...captured.options,
-              beforePublish: async () => {
-                throw new Error('FRED side publication failed');
+              publishAtomically: async () => {
+                throw new Error('FRED cohort publication failed');
               },
             },
           ),
-          /FRED side publication failed/,
+          /FRED cohort publication failed/,
         ),
       },
     ];
@@ -301,10 +306,14 @@ describe('FRED publication gates', () => {
     const entries = primeFredConsumerCohort(clock);
     const before = new Map([...entries].map(([key, entry]) => [key, clone(entry.value)]));
     const failedMetaKey = companionMetaKey(`${FRED_KEY_PREFIX}:${FRED_SEED_SERIES[1]}:0`);
+    const batch = makeFredBatch(MIN_SERIES_COUNT);
+    batch.stress = { components: [{ id: 'A' }], seededAt: '2031-01-01T00:00:00.000Z' };
+    const transactions = [];
 
     globalThis.fetch = async (url, init = {}) => {
       const body = init.body ? JSON.parse(init.body) : null;
       if (String(url).endsWith('/multi-exec')) {
+        transactions.push(body);
         return Response.json(body.map((command) => (
           command[1] === failedMetaKey
             ? { error: 'ERR simulated late metadata failure' }
@@ -336,7 +345,7 @@ describe('FRED publication gates', () => {
         captured.domain,
         captured.resource,
         captured.canonicalKey,
-        async () => makeFredBatch(MIN_SERIES_COUNT),
+        async () => batch,
         captured.options,
       ),
       /seed-meta|metadata|command result/i,
@@ -345,6 +354,16 @@ describe('FRED publication gates', () => {
     for (const [key, value] of before) {
       assert.deepEqual(entries.get(key)?.value, value, `${key} must remain on the prior cohort`);
     }
+    const publishedKeys = transactions[0].map(([, key]) => key);
+    assert.deepEqual(publishedKeys, [
+      ...batch.seriesIds.flatMap((seriesId) => {
+        const key = `${FRED_KEY_PREFIX}:${seriesId}:0`;
+        return [key, companionMetaKey(key)];
+      }),
+      STRESS_INDEX_KEY,
+      companionMetaKey(STRESS_INDEX_KEY),
+      CANONICAL_KEY,
+    ]);
   });
 
   it('publishes every consumer key and activation after a retained source failure recovers', async () => {
@@ -370,9 +389,9 @@ describe('FRED publication gates', () => {
       fetchFredSeriesImpl: async () => makeSeriesMap(FRED_SEED_SERIES.length),
       fetchGscpiFromRedisImpl: async () => null,
       computeStressIndexImpl: () => ({ components: [{ id: 'stress' }] }),
-      writeExtraKeyWithMetaImpl: async (key) => {
-        writtenKeys.push(key);
-        return true;
+      publishFredCohortImpl: async (batch) => {
+        writtenKeys.push(...batch.seriesIds.map((seriesId) => `${FRED_KEY_PREFIX}:${seriesId}:0`));
+        if (batch.stress) writtenKeys.push(STRESS_INDEX_KEY);
       },
       markFredRatesActivatedImpl: async () => {
         events.push('activation');
@@ -401,9 +420,8 @@ describe('FRED publication gates', () => {
       },
       fetchGscpiFromRedisImpl: async () => null,
       computeStressIndexImpl: () => null,
-      writeExtraKeyWithMetaImpl: async (...args) => {
+      publishFredCohortImpl: async (...args) => {
         writes.push(args);
-        return true;
       },
       markFredRatesActivatedImpl: async () => {
         activations += 1;
@@ -430,10 +448,9 @@ describe('FRED publication gates', () => {
       },
       fetchGscpiFromRedisImpl: async () => null,
       computeStressIndexImpl: () => null,
-      writeExtraKeyWithMetaImpl: async (...args) => {
-        events.push(`side:${args[0]}`);
+      publishFredCohortImpl: async (...args) => {
+        events.push('cohort');
         writes.push(args);
-        return true;
       },
       markFredRatesActivatedImpl: async () => {
         events.push('activation');
@@ -452,17 +469,16 @@ describe('FRED publication gates', () => {
     ]);
     assert.equal('seriesById' in result.canonical, false);
     assert.equal('stress' in result.canonical, false);
-    assert.equal(writes.length, 18);
+    assert.equal(writes.length, 1);
     const canonicalIndex = events.indexOf('canonical');
-    assert.ok(events.filter((event) => event.startsWith('side:')).every((event) => events.indexOf(event) < canonicalIndex));
+    assert.ok(events.indexOf('cohort') < canonicalIndex);
     assert.equal(events.at(-1), 'activation');
   });
 
-  it('retries component metadata locally without refetching upstream', async () => {
+  it('publishes one atomic cohort without refetching upstream', async () => {
     const events = [];
     let upstreamCalls = 0;
-    let firstKeyAttempts = 0;
-    const firstKey = `economic:fred:v1:${FRED_SEED_SERIES[0]}:0`;
+    let cohortCalls = 0;
     const result = await runFredRatesSeed({
       runSeedImpl: makeRunSeedHarness(events),
       fetchFredSeriesImpl: async () => {
@@ -471,22 +487,20 @@ describe('FRED publication gates', () => {
       },
       fetchGscpiFromRedisImpl: async () => null,
       computeStressIndexImpl: () => null,
-      writeExtraKeyWithMetaImpl: async (key) => {
-        if (key !== firstKey) return true;
-        firstKeyAttempts += 1;
-        return firstKeyAttempts >= 3;
+      publishFredCohortImpl: async () => {
+        cohortCalls += 1;
       },
       markFredRatesActivatedImpl: async () => {},
     });
 
     assert.equal(result.skipped, false);
-    assert.equal(firstKeyAttempts, 3);
+    assert.equal(cohortCalls, 1);
     assert.equal(upstreamCalls, 1);
   });
 
-  it('publishes a computed stress index in beforePublish', async () => {
+  it('includes a computed stress index in the atomic cohort', async () => {
     const events = [];
-    const writes = [];
+    let publishedBatch;
     const stress = {
       compositeScore: 42,
       label: 'Elevated',
@@ -498,18 +512,14 @@ describe('FRED publication gates', () => {
       fetchFredSeriesImpl: async () => makeSeriesMap(18),
       fetchGscpiFromRedisImpl: async () => null,
       computeStressIndexImpl: () => stress,
-      writeExtraKeyWithMetaImpl: async (...args) => {
-        writes.push(args);
-        return true;
+      publishFredCohortImpl: async (batch) => {
+        publishedBatch = batch;
       },
       markFredRatesActivatedImpl: async () => {},
     });
 
-    const stressWrite = writes.find(([key]) => key === STRESS_INDEX_KEY);
-    assert.ok(stressWrite);
-    assert.equal(stressWrite[1], stress);
-    assert.equal(stressWrite[2], STRESS_INDEX_TTL);
-    assert.equal(stressWrite[3], 2);
+    assert.equal(publishedBatch.stress, stress);
+    assert.equal(publishedBatch.stress.components.length, 2);
   });
 
   it('keeps stress computation failure non-fatal', async () => {
@@ -522,9 +532,9 @@ describe('FRED publication gates', () => {
       computeStressIndexImpl: () => {
         throw new Error('missing stress component');
       },
-      writeExtraKeyWithMetaImpl: async (key) => {
-        writtenKeys.push(key);
-        return true;
+      publishFredCohortImpl: async (batch) => {
+        writtenKeys.push(...batch.seriesIds.map((seriesId) => `${FRED_KEY_PREFIX}:${seriesId}:0`));
+        if (batch.stress) writtenKeys.push(STRESS_INDEX_KEY);
       },
       markFredRatesActivatedImpl: async () => {},
     });
@@ -534,7 +544,7 @@ describe('FRED publication gates', () => {
     assert.equal(writtenKeys.includes(STRESS_INDEX_KEY), false);
   });
 
-  it('fails before canonical publication when stress metadata cannot be confirmed', async () => {
+  it('does not activate when the atomic cohort publication fails', async () => {
     const events = [];
     let upstreamCalls = 0;
     let stressAttempts = 0;
@@ -546,18 +556,17 @@ describe('FRED publication gates', () => {
       },
       fetchGscpiFromRedisImpl: async () => null,
       computeStressIndexImpl: () => ({ components: [{ id: 'A' }] }),
-      writeExtraKeyWithMetaImpl: async (key) => {
-        if (key !== STRESS_INDEX_KEY) return true;
+      publishFredCohortImpl: async () => {
         stressAttempts += 1;
-        return false;
+        throw new Error('FRED atomic publication returned an invalid command result');
       },
       markFredRatesActivatedImpl: async () => {
         events.push('activation');
       },
-    }), /FRED stress-index seed-meta write failed/);
+    }), /FRED atomic publication returned an invalid command result/);
 
     assert.equal(upstreamCalls, 1);
-    assert.equal(stressAttempts, 3);
+    assert.equal(stressAttempts, 1);
     assert.equal(events.includes('canonical'), false);
     assert.equal(events.includes('activation'), false);
   });

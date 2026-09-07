@@ -27,10 +27,10 @@ import {
   loadEnvFile,
   CHROME_UA,
   runSeed,
-  writeExtraKey,
   extendExistingTtl,
-  writeSeedMeta,
   resolveSeedMetaTtl,
+  withRetry,
+  writeExtraKeyWithMetaAtomically,
 } from './_seed-utils.mjs';
 import { tokensToContentMeta, DAY_MIN } from './_content-age-helpers.mjs';
 
@@ -401,7 +401,7 @@ async function fetchProperty(dataset, kind) {
 
 // Each dataset is handled independently: a single fetch failure in any ONE
 // of DSR/SPP/CPP must not block the healthy ones from publishing fresh data.
-// We do SPP/CPP writes as side-effects of fetchAll (via writeExtraKey or
+// We do SPP/CPP writes as side-effects of fetchAll (via atomic pair writes or
 // extendExistingTtl, per-dataset). The DSR slice flows through the normal
 // runSeed canonical-write path; when DSR is empty, publishTransform yields
 // an empty payload that fails validate() → atomicPublish.skipped=true →
@@ -421,21 +421,7 @@ export async function fetchAll() {
   await publishDatasetIndependently(KEYS.spp, spp, META_KEYS.spp);
   await publishDatasetIndependently(KEYS.cpp, cpp, META_KEYS.cpp);
 
-  // NOTE: DSR per-dataset seed-meta is written by `dsrAfterPublish` (passed to
-  // runSeed below), NOT here. That guarantees seed-meta:economic:bis-dsr is
-  // refreshed only AFTER atomicPublish succeeds on the canonical DSR key — a
-  // Redis hiccup at publish time must not leave health reporting "fresh"
-  // while the canonical key is stale.
-
   return { dsr, spp, cpp };
-}
-
-// runSeed afterPublish hook — fires only on a successful atomicPublish of the
-// canonical DSR key. `data` is the raw fetchAll() return value; we re-derive
-// the DSR slice and refresh its per-dataset seed-meta.
-export async function dsrAfterPublish(data) {
-  if (planDatasetAction(data?.dsr) !== 'write') return;
-  await writeSeedMeta(KEYS.dsr, data.dsr.entries.length, META_KEYS.dsr).catch(() => {});
 }
 
 // Pure decision function: classifies what action should be taken for a
@@ -459,16 +445,16 @@ export async function publishDatasetIndependently(key, payload, metaKey) {
   const action = planDatasetAction(payload);
   if (action === 'write') {
     try {
-      await writeExtraKey(key, payload, TTL);
-      if (metaKey) {
-        const wroteMeta = await writeSeedMeta(key, payload.entries.length, metaKey).catch(() => false);
-        if (!wroteMeta) {
-          console.warn(`  ${key}: metadata write failed; extending existing payload and metadata TTL`);
-          await preserveDatasetLastGood(key, metaKey).catch(() => {});
-        }
-      }
+      await withRetry(() => writeExtraKeyWithMetaAtomically({
+        key,
+        data: payload,
+        ttlSeconds: TTL,
+        recordCount: payload.entries.length,
+        metaKey,
+        metaTtlSeconds: META_TTL,
+      }), 2, 1_000);
     } catch (err) {
-      console.warn(`  ${key}: write failed (${err.message}); extending existing payload and metadata TTL`);
+      console.warn(`  ${key}: atomic publication failed (${err.message}); extending existing payload and metadata TTL`);
       await preserveDatasetLastGood(key, metaKey).catch(() => {});
     }
   } else {
@@ -504,6 +490,24 @@ export function bisDsrContentMeta(data) {
   return tokensToContentMeta(entries.map((e) => e?.period));
 }
 
+export async function publishBisDsrAtomically(data, {
+  canonicalKey = KEYS.dsr,
+  payloadValue,
+  ttlSeconds = TTL,
+} = {}) {
+  if (planDatasetAction(data?.dsr) !== 'write') {
+    throw new Error('BIS DSR atomic publication requires a non-empty DSR slice');
+  }
+  await writeExtraKeyWithMetaAtomically({
+    key: canonicalKey,
+    data: payloadValue ?? data.dsr,
+    ttlSeconds,
+    recordCount: data.dsr.entries.length,
+    metaKey: META_KEYS.dsr,
+    metaTtlSeconds: META_TTL,
+  });
+}
+
 export async function runBisExtendedSeed({
   fetchAllImpl = fetchAll,
   runSeedImpl,
@@ -513,7 +517,7 @@ export async function runBisExtendedSeed({
     ttlSeconds: TTL,
     sourceVersion: 'bis-sdmx-csv-extended',
     publishTransform,
-    afterPublish: dsrAfterPublish,
+    publishAtomically: publishBisDsrAtomically,
     declareRecords,
     schemaVersion: 1,
     maxStaleMin: 1440,
