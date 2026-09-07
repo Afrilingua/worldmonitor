@@ -183,6 +183,20 @@ test('a transient Retry-After beyond the request budget keeps first-failure grac
   assert.ok(verdict(data, NOW + 3 * MIN).sourceFailurePendingUntil);
 });
 
+function runSeedFixture(initial, now, mode, activeFixture = active) {
+  const result = spawnSync(process.execPath, ['--input-type=module', '--eval', `(${seedProcess.toString()})(${JSON.stringify(initial)}, ${now}, ${JSON.stringify(mode)}, ${JSON.stringify(activeFixture)})`], {
+    encoding: 'utf8', timeout: 10_000,
+    env: {
+      PATH: process.env.PATH, NODE_TEST_CONTEXT: 'child', WM_SEED_RETRY_DELAY_MS: '1',
+      WM_SEED_ENV_FILE: '/dev/null', TEST_MODULE_URL: import.meta.url, NASA_FIRMS_API_KEY: 'fixture-only',
+      UPSTASH_REDIS_REST_URL: 'https://redis.cwfis.test', UPSTASH_REDIS_REST_TOKEN: 'fixture-only',
+    },
+  });
+  const output = result.stdout + result.stderr;
+  assert.ok(result.stdout.includes('FIXTURE_RESULT='), output);
+  return { ...JSON.parse(result.stdout.split('FIXTURE_RESULT=')[1].trim()), status: result.status, output };
+}
+
 async function seedProcess(initial, now, mode, activeFixture) {
   let clock = now;
   Date.now = () => clock;
@@ -202,14 +216,14 @@ async function seedProcess(initial, now, mode, activeFixture) {
     if (url.origin === 'https://redis.cwfis.test') {
       if (url.pathname.startsWith('/get/')) return Response.json({ result: store.get(decodeURIComponent(url.pathname.slice(5))) ?? null });
       const body = JSON.parse(init.body);
-      if (mode === 'state-write-fail' && body[0] === 'SET' && body[1] === 'wildfire:cwfis-source:v1') return new Response('', { status: 403 });
-      if (mode === 'meta-write-fail' && body[0] === 'SET' && body[1] === 'seed-meta:wildfire:cwfis-source') return new Response('', { status: 403 });
+      if (mode.endsWith('state-write-fail') && body[0] === 'SET' && body[1] === 'wildfire:cwfis-source:v1') return new Response('', { status: 403 });
+      if (mode.endsWith('meta-write-fail') && body[0] === 'SET' && body[1] === 'seed-meta:wildfire:cwfis-source') return new Response('', { status: 403 });
       return Response.json(Array.isArray(body[0]) ? body.map(command => ({ result: redis(command) })) : { result: redis(body) });
     }
     if (url.hostname === 'firms.modaps.eosdis.nasa.gov') {
       calls.firms++;
       if (calls.firms === 27) clock += 3 * 60_000;
-      if (mode === 'firms-partial' && calls.firms === 1) return new Response('', { status: 403 });
+      if (mode.startsWith('all-sources-fail') || (mode === 'firms-partial' && calls.firms === 1)) return new Response('', { status: 403 });
       const iso = new Date(now - 60_000).toISOString();
       return new Response(`latitude,longitude,acq_date,acq_time,confidence,bright_ti4,frp\n49,-120,${iso.slice(0, 10)},${iso.slice(11, 16).replace(':', '')},h,340,12`);
     }
@@ -221,7 +235,9 @@ async function seedProcess(initial, now, mode, activeFixture) {
         ? { ...activeFixture, numberMatched: activeFixture.features.length, numberReturned: activeFixture.features.length, links: [] }
         : { type: 'FeatureCollection', features: [], numberMatched: 0, numberReturned: 0 });
     }
-    if (url.hostname === 'openmaps.gov.bc.ca') return Response.json({ type: 'FeatureCollection', features: [], numberMatched: 0, numberReturned: 0 });
+    if (url.hostname === 'openmaps.gov.bc.ca') return mode.startsWith('all-sources-fail')
+      ? new Response('', { status: 403 })
+      : Response.json({ type: 'FeatureCollection', features: [], numberMatched: 0, numberReturned: 0 });
     throw new Error(`unexpected network request ${url}`);
   };
   process.on('exit', () => console.log('FIXTURE_RESULT=' + JSON.stringify({ store: [...store], calls })));
@@ -232,17 +248,9 @@ test('real wildfire seeder persists failure history and keeps canonical/bootstra
   let previous = [];
   for (const [index, mode] of ['ok', 'fail', 'firms-partial', 'fail', 'ok', 'state-write-fail', 'meta-write-fail'].entries()) {
     const now = NOW + index * 10 * MIN;
-    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', `(${seedProcess.toString()})(${JSON.stringify(previous)}, ${now}, ${JSON.stringify(mode)}, ${JSON.stringify(active)})`], {
-      encoding: 'utf8', timeout: 10_000,
-      env: {
-        PATH: process.env.PATH, NODE_TEST_CONTEXT: 'child', WM_SEED_RETRY_DELAY_MS: '1',
-        WM_SEED_ENV_FILE: '/dev/null', TEST_MODULE_URL: import.meta.url, NASA_FIRMS_API_KEY: 'fixture-only',
-        UPSTASH_REDIS_REST_URL: 'https://redis.cwfis.test', UPSTASH_REDIS_REST_TOKEN: 'fixture-only',
-      },
-    });
+    const captured = runSeedFixture(previous, now, mode);
     const persistenceFailure = mode.endsWith('write-fail');
-    assert.equal(result.status, persistenceFailure ? 1 : 0, result.stdout + result.stderr);
-    const captured = JSON.parse(result.stdout.split('FIXTURE_RESULT=')[1].trim());
+    assert.equal(captured.status, persistenceFailure ? 1 : 0, captured.output);
     const store = new Map(captured.store);
     const key = health.BOOTSTRAP_KEYS.wildfires;
     const bootstrapKey = 'wildfire:fires-bootstrap:v1';
@@ -273,5 +281,55 @@ test('real wildfire seeder persists failure history and keeps canonical/bootstra
       keyMetaValues: new Map([[health.SEED_META.wildfires.key, store.get(health.SEED_META.wildfires.key)]]), now: now + 3 * MIN,
     });
     assert.equal(health.healthStatusBucket(entry, now + 3 * MIN), index === 2 || index === 3 ? 'warn' : 'ok', `${mode}: ${JSON.stringify(entry)}`);
+  }
+});
+
+test('an all-source outage preserves the CWFIS streak even when its last-good snapshot is empty', () => {
+  const key = health.BOOTSTRAP_KEYS.wildfires;
+  const metaKey = health.SEED_META.wildfires.key;
+  for (const fixture of [active, empty]) {
+    const good = runSeedFixture([], NOW, 'ok', fixture);
+    assert.equal(good.status, 0, good.output);
+    const initial = new Map(good.store);
+    const outage = runSeedFixture(good.store, NOW + 10 * MIN, 'all-sources-fail', fixture);
+    assert.equal(outage.status, 0, outage.output);
+    const during = new Map(outage.store);
+    for (const target of [key, 'wildfire:fires-bootstrap:v1']) assert.equal(during.get(target), initial.get(target));
+    assert.equal(JSON.parse(during.get(metaKey)).fetchedAt, JSON.parse(initial.get(metaKey)).fetchedAt);
+    const first = JSON.parse(during.get('wildfire:cwfis-source:v1'));
+    assert.equal(first.consecutiveFailures, 1);
+    assert.equal(first.firstFailureAt, NOW + 10 * MIN);
+    assert.equal(first.fetchedAt, NOW);
+    assert.deepEqual(outage.calls, { firms: 27, active: 2, prescribed: 1 });
+
+    const next = runSeedFixture(outage.store, NOW + 20 * MIN, 'fail', fixture);
+    assert.equal(next.status, 0, next.output);
+    const store = new Map(next.store);
+    const second = JSON.parse(store.get('wildfire:cwfis-source:v1'));
+    assert.equal(second.consecutiveFailures, 2);
+    assert.equal(second.firstFailureAt, first.firstFailureAt);
+    assert.equal(second.fetchedAt, NOW);
+    const entry = health.classifyKey('wildfires', key, { allowOnDemand: false }, {
+      keyStrens: new Map([[key, store.get(key).length]]), keyErrors: new Map(), keyMetaErrors: new Map(),
+      keyMetaValues: new Map([[metaKey, store.get(metaKey)]]), now: NOW + 23 * MIN,
+    });
+    assert.equal(entry.status, 'SEED_ERROR');
+    assert.equal(entry.sourceFailurePendingUntil, undefined);
+    assert.equal(health.healthStatusBucket(entry, NOW + 23 * MIN), 'warn');
+  }
+});
+
+test('empty-result snapshot write failures preserve worldwide data without replaying sources', () => {
+  const good = runSeedFixture([], NOW, 'ok', empty);
+  assert.equal(good.status, 0, good.output);
+  const initial = new Map(good.store);
+  for (const target of ['state', 'meta']) {
+    const failed = runSeedFixture(good.store, NOW + 10 * MIN, `all-sources-fail-${target}-write-fail`, empty);
+    assert.equal(failed.status, 75, failed.output);
+    const store = new Map(failed.store);
+    for (const key of [health.BOOTSTRAP_KEYS.wildfires, 'wildfire:fires-bootstrap:v1', health.SEED_META.wildfires.key]) {
+      assert.equal(store.get(key), initial.get(key));
+    }
+    assert.deepEqual(failed.calls, { firms: 27, active: 2, prescribed: 1 });
   }
 });
