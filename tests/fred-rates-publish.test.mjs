@@ -295,6 +295,46 @@ describe('FRED publication gates', () => {
     }
   });
 
+  it('publishes every consumer key and activation after a retained source failure recovers', async () => {
+    const captured = await captureFredSeedOptions();
+    const clock = { now: 1_700_000_000_000 };
+    const entries = primeFredConsumerCohort(clock);
+    installExpiryAwareRedis(clock, entries, []);
+    const exitCode = await trapSeedExit(() => runSeed(
+      captured.domain,
+      captured.resource,
+      captured.canonicalKey,
+      async () => {
+        throw Object.assign(new Error('FRED upstream unavailable'), { nonRetryable: true });
+      },
+      captured.options,
+    ));
+    assert.equal(exitCode, GRACEFUL_FETCH_FAILURE_EXIT_CODE);
+
+    const events = [];
+    const writtenKeys = [];
+    await runFredRatesSeed({
+      runSeedImpl: makeRunSeedHarness(events),
+      fetchFredSeriesImpl: async () => makeSeriesMap(FRED_SEED_SERIES.length),
+      fetchGscpiFromRedisImpl: async () => null,
+      computeStressIndexImpl: () => ({ components: [{ id: 'stress' }] }),
+      writeExtraKeyWithMetaImpl: async (key) => {
+        writtenKeys.push(key);
+        return true;
+      },
+      markFredRatesActivatedImpl: async () => {
+        events.push('activation');
+      },
+    });
+
+    assert.deepEqual(
+      writtenKeys.slice(0, -1),
+      FRED_SEED_SERIES.map((seriesId) => `${FRED_KEY_PREFIX}:${seriesId}:0`),
+    );
+    assert.equal(writtenKeys.at(-1), STRESS_INDEX_KEY);
+    assert.equal(events.at(-1), 'activation');
+  });
+
   it('rejects 17/24 before side writes or activation', async () => {
     const events = [];
     const writes = [];
