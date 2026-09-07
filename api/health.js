@@ -2043,7 +2043,8 @@ const ZERO_RECORD_DATA_OK_KEYS = new Set([
   // confirmed result), but stay in the BROAD set until a natural production run
   // proves it: promoting them the moment the producer merges would read the old
   // seeder's legitimate meta-only state as a failed publish and page EMPTY/crit
-  // through the deploy window. Tightening them is tracked separately.
+  // through the deploy window. Tightening them is tracked in #7864, which also
+  // owns the trafficAnomalies TTL headroom that tightening would require.
   'outages',
   // Official disclosure categories are sparse. The canonical snapshot always
   // exists after a successful query, but a quiet 90-day window can validly
