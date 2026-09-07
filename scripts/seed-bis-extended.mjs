@@ -31,7 +31,6 @@ import {
   extendExistingTtl,
   resolveSeedMetaTtl,
   withRetry,
-  writeExtraKeyWithMetaAtomically,
 } from './_seed-utils.mjs';
 import { tokensToContentMeta, DAY_MIN } from './_content-age-helpers.mjs';
 
@@ -442,18 +441,47 @@ async function preserveDatasetLastGood(key, metaKey) {
   ]);
 }
 
+async function publishBisValuesAtomically(entries) {
+  const { url, token } = getRedisCredentials();
+  const commands = [
+    ['MSET', ...entries.flatMap(({ key, value }) => [key, JSON.stringify(value)])],
+    ...entries.map(({ key, ttlSeconds }) => ['EXPIRE', key, ttlSeconds]),
+  ];
+  const response = await fetch(`${url}/multi-exec`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'User-Agent': CHROME_UA,
+    },
+    body: JSON.stringify(commands),
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`BIS atomic publication failed: HTTP ${response.status}`);
+  const results = await response.json();
+  if (
+    !Array.isArray(results)
+    || results.length !== commands.length
+    || results[0]?.result !== 'OK'
+    || results.slice(1).some((result) => result?.result !== 1)
+  ) {
+    throw new Error('BIS atomic publication returned an invalid command result');
+  }
+}
+
 export async function publishDatasetIndependently(key, payload, metaKey) {
   const action = planDatasetAction(payload);
   if (action === 'write') {
     try {
-      await withRetry(() => writeExtraKeyWithMetaAtomically({
-        key,
-        data: payload,
-        ttlSeconds: TTL,
-        recordCount: payload.entries.length,
-        metaKey,
-        metaTtlSeconds: META_TTL,
-      }), 2, 1_000);
+      const fetchedAt = Date.now();
+      await withRetry(() => publishBisValuesAtomically([
+        { key, value: payload, ttlSeconds: TTL },
+        {
+          key: metaKey,
+          value: { fetchedAt, recordCount: payload.entries.length },
+          ttlSeconds: META_TTL,
+        },
+      ]), 2, 1_000);
     } catch (err) {
       console.warn(`  ${key}: atomic publication failed (${err.message}); extending existing payload and metadata TTL`);
       await preserveDatasetLastGood(key, metaKey).catch(() => {});
@@ -499,7 +527,6 @@ export async function publishBisDsrAtomically(data, {
   if (planDatasetAction(data?.dsr) !== 'write') {
     throw new Error('BIS DSR atomic publication requires a non-empty DSR slice');
   }
-  const { url, token } = getRedisCredentials();
   const recordCount = data.dsr.entries.length;
   const seed = payloadValue?._seed;
   const fetchedAt = Number.isFinite(seed?.fetchedAt) ? seed.fetchedAt : Date.now();
@@ -513,35 +540,11 @@ export async function publishBisDsrAtomically(data, {
   for (const field of ['newestItemAt', 'oldestItemAt', 'maxContentAgeMin']) {
     if (Object.hasOwn(seed ?? {}, field)) aggregateMeta[field] = seed[field];
   }
-  const commands = [
-    ['MSET',
-      canonicalKey, JSON.stringify(payloadValue ?? data.dsr),
-      META_KEYS.dsr, JSON.stringify({ fetchedAt, recordCount }),
-      AGGREGATE_META_KEY, JSON.stringify(aggregateMeta)],
-    ['EXPIRE', canonicalKey, ttlSeconds],
-    ['EXPIRE', META_KEYS.dsr, META_TTL],
-    ['EXPIRE', AGGREGATE_META_KEY, META_TTL],
-  ];
-  const response = await fetch(`${url}/multi-exec`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      'User-Agent': CHROME_UA,
-    },
-    body: JSON.stringify(commands),
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (!response.ok) throw new Error(`BIS DSR atomic publication failed: HTTP ${response.status}`);
-  const results = await response.json();
-  if (
-    !Array.isArray(results)
-    || results.length !== commands.length
-    || results[0]?.result !== 'OK'
-    || results.slice(1).some((result) => result?.result !== 1)
-  ) {
-    throw new Error('BIS DSR atomic publication returned an invalid command result');
-  }
+  await publishBisValuesAtomically([
+    { key: canonicalKey, value: payloadValue ?? data.dsr, ttlSeconds },
+    { key: META_KEYS.dsr, value: { fetchedAt, recordCount }, ttlSeconds: META_TTL },
+    { key: AGGREGATE_META_KEY, value: aggregateMeta, ttlSeconds: META_TTL },
+  ]);
 }
 
 export async function runBisExtendedSeed({

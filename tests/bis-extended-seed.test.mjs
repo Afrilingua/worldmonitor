@@ -299,7 +299,7 @@ describe('seed-bis-extended parser', () => {
         ok: true,
         status: 200,
         json: async () => Array.isArray(body[0])
-          ? body.map(() => ({ result: 'OK' }))
+          ? body.map(([command]) => ({ result: command === 'MSET' ? 'OK' : 1 }))
           : ({ result: 'OK' }),
       };
     };
@@ -311,11 +311,9 @@ describe('seed-bis-extended parser', () => {
         { entries: [{ countryCode: 'US', indexValue: 108.5 }], fetchedAt: 't' },
         META_KEYS.spp,
       );
-      const sets = calls.flatMap((body) => Array.isArray(body[0]) ? body : [body])
-        .filter(c => c[0] === 'SET')
-        .map(c => c[1]);
-      assert.ok(sets.includes(KEYS.spp), `expected SET on canonical key ${KEYS.spp}, got ${JSON.stringify(sets)}`);
-      assert.ok(sets.includes(META_KEYS.spp), `expected SET on seed-meta key ${META_KEYS.spp}, got ${JSON.stringify(sets)}`);
+      const published = msetEntries(calls.find((body) => body?.[0]?.[0] === 'MSET')?.[0]);
+      assert.ok(published.has(KEYS.spp), `expected ${KEYS.spp} in MSET`);
+      assert.ok(published.has(META_KEYS.spp), `expected ${META_KEYS.spp} in MSET`);
 
       // 2. Empty payload → canonical key TTL extended, seed-meta NOT written.
       //    (This is the core P1 invariant: a DSR outage must not refresh
@@ -498,7 +496,11 @@ describe('seed-bis-extended parser', () => {
 
   it('publishes fresh property payload and metadata after a retained failure recovers', async () => {
     const pipelineOk = ({ body }) => Array.isArray(body) && Array.isArray(body[0])
-      ? { ok: true, status: 200, json: async () => body.map(() => ({ result: 1 })) }
+      ? {
+          ok: true,
+          status: 200,
+          json: async () => body.map(([command]) => ({ result: command === 'MSET' ? 'OK' : 1 })),
+        }
       : redisOk();
 
     await withRedisCapture(pipelineOk, async (calls) => {
@@ -508,10 +510,8 @@ describe('seed-bis-extended parser', () => {
         fetchedAt: 'recovered',
       }, META_KEYS.spp);
 
-      const sets = pipelineCommands(calls)
-        .filter(([command]) => command === 'SET')
-        .map(([, key]) => key);
-      assert.deepEqual(sets, [KEYS.spp, META_KEYS.spp]);
+      const transaction = calls.find(({ body }) => body?.[0]?.[0] === 'MSET')?.body;
+      assert.deepEqual([...msetEntries(transaction[0]).keys()], [KEYS.spp, META_KEYS.spp]);
     });
   });
 
