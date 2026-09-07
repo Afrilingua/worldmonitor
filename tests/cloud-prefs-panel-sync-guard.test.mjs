@@ -278,7 +278,10 @@ describe('cloud prefs panel sync guardrails', () => {
     );
     assert.match(
       cloudSyncSrc,
-      /if \(_dirtyKeys\.size === 0\) \{[\s\S]*Storage\.prototype\.removeItem\.call\(localStorage, KEY_DIRTY_KEYS\);[\s\S]*return;[\s\S]*\}[\s\S]*if \(!_dirtyKeysUserId\) return;/,
+      // The removal idiom is `rawRemove` since #7833 routed this module's
+      // storage through null-safe accessors; what this pins is the ORDER —
+      // the empty-set delete has to happen before the ownerless bail.
+      /if \(_dirtyKeys\.size === 0\) \{[\s\S]*rawRemove\(KEY_DIRTY_KEYS\);[\s\S]*return;[\s\S]*\}[\s\S]*if \(!_dirtyKeysUserId\) return;/,
       'ownerless dirty writes before sign-in must not delete the previous persisted dirty-key marker',
     );
     assert.match(

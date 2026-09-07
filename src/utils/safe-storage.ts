@@ -40,3 +40,25 @@ export function safeStorageRemove(key: string): void {
     /* storage unavailable */
   }
 }
+
+/**
+ * Every key currently in storage, or `[]` when storage is unusable.
+ *
+ * Snapshotting up front is deliberate: `localStorage.key(i)` is index-based
+ * over a live collection, so a caller that removes while iterating shifts the
+ * indices under itself and silently skips keys. Both callers here scan for a
+ * prefix and then delete or read the matches, which is exactly that shape.
+ */
+export function safeStorageKeys(): string[] {
+  try {
+    if (!localStorage) return [];
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key !== null) keys.push(key);
+    }
+    return keys;
+  } catch {
+    return [];
+  }
+}

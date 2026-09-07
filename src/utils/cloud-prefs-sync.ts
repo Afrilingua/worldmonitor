@@ -210,17 +210,17 @@ let _dirtyKeysUserId: string | null = null;
  */
 function writePersistedDirtyKeys(payload: { userId: string; keys: string[] }): void {
   if (payload.keys.length === 0) {
-    Storage.prototype.removeItem.call(localStorage, KEY_DIRTY_KEYS);
+    rawRemove(KEY_DIRTY_KEYS);
     return;
   }
-  Storage.prototype.setItem.call(localStorage, KEY_DIRTY_KEYS, JSON.stringify(payload));
+  rawSet(KEY_DIRTY_KEYS, JSON.stringify(payload));
 }
 
 function persistDirtyKeyAddition(key: CloudSyncKey): void {
   if (!_dirtyKeysUserId) return;
   try {
     writePersistedDirtyKeys(unionPersistedDirtyKeys(
-      localStorage.getItem(KEY_DIRTY_KEYS),
+      rawGet(KEY_DIRTY_KEYS),
       CLOUD_SYNC_KEYS,
       _dirtyKeysUserId,
       [key],
@@ -234,7 +234,7 @@ function persistSettledDirtyKeyRemovals(removals: string[]): void {
   if (!_dirtyKeysUserId) return;
   try {
     writePersistedDirtyKeys(withoutPersistedDirtyKeys(
-      localStorage.getItem(KEY_DIRTY_KEYS),
+      rawGet(KEY_DIRTY_KEYS),
       CLOUD_SYNC_KEYS,
       _dirtyKeysUserId,
       removals,
@@ -247,11 +247,11 @@ function persistSettledDirtyKeyRemovals(removals: string[]): void {
 function persistDirtyKeys(): void {
   try {
     if (_dirtyKeys.size === 0) {
-      Storage.prototype.removeItem.call(localStorage, KEY_DIRTY_KEYS);
+      rawRemove(KEY_DIRTY_KEYS);
       return;
     }
     if (!_dirtyKeysUserId) return;
-    Storage.prototype.setItem.call(localStorage, KEY_DIRTY_KEYS, JSON.stringify({
+    rawSet(KEY_DIRTY_KEYS, JSON.stringify({
       userId: _dirtyKeysUserId,
       keys: [..._dirtyKeys],
     }));
@@ -264,7 +264,7 @@ function hydrateDirtyKeysFromStorage(userId: string): void {
   try {
     _dirtyKeys.clear();
     _dirtyKeysUserId = userId;
-    const raw = localStorage.getItem(KEY_DIRTY_KEYS);
+    const raw = rawGet(KEY_DIRTY_KEYS);
     for (const key of parsePersistedDirtyKeys(raw, CLOUD_SYNC_KEYS, userId)) {
       _dirtyKeys.add(key as CloudSyncKey);
     }
@@ -360,19 +360,60 @@ export function isCloudSyncEnabled(): boolean {
   return isEnabled();
 }
 
+// ── Storage accessors ─────────────────────────────────────────────────────────
+
+/**
+ * This module's `localStorage` accessors. Android WebView with DOM storage
+ * disabled exposes `localStorage` as NULL rather than throwing, so an
+ * unguarded call is a TypeError — and `onSignIn` runs its ownership-sidecar
+ * reconciliation on the boot path, where that TypeError takes the whole
+ * sign-in down (#7833, the same class as WORLDMONITOR-122).
+ *
+ * These are deliberately NOT `@/utils/safe-storage`. The writes go through
+ * `Storage.prototype` so an own-property override on the `localStorage`
+ * instance cannot intercept them, which is what lets a state-key write stay
+ * distinguishable from the pref-key writes `install()` patches. Reads degrade
+ * to "key absent" and writes to a no-op, matching the shared helper's contract.
+ */
+function rawGet(key: string): string | null {
+  try {
+    return localStorage?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function rawSet(key: string, value: string): void {
+  try {
+    if (!localStorage) return;
+    Storage.prototype.setItem.call(localStorage, key, value);
+  } catch {
+    /* storage unavailable or full */
+  }
+}
+
+function rawRemove(key: string): void {
+  try {
+    if (!localStorage) return;
+    Storage.prototype.removeItem.call(localStorage, key);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 // ── State helpers ─────────────────────────────────────────────────────────────
 
 export function getSyncVersion(): number {
-  return parseInt(localStorage.getItem(KEY_SYNC_VERSION) ?? '0', 10) || 0;
+  return parseInt(rawGet(KEY_SYNC_VERSION) ?? '0', 10) || 0;
 }
 
 function setSyncVersion(v: number): void {
-  // Use direct Storage.prototype.setItem to bypass our patch (state key, not a pref key)
-  Storage.prototype.setItem.call(localStorage, KEY_SYNC_VERSION, String(v));
+  // A state key, not a pref key — nothing here should mark the blob dirty.
+  rawSet(KEY_SYNC_VERSION, String(v));
 }
 
 function setState(s: SyncState): void {
-  Storage.prototype.setItem.call(localStorage, KEY_SYNC_STATE, s);
+  rawSet(KEY_SYNC_STATE, s);
 }
 
 // ── Blob helpers ──────────────────────────────────────────────────────────────
@@ -380,7 +421,7 @@ function setState(s: SyncState): void {
 function buildCloudBlob(): Record<string, string> {
   const blob: Record<string, string> = {};
   for (const key of CLOUD_SYNC_KEYS) {
-    const val = localStorage.getItem(key);
+    const val = rawGet(key);
     if (val !== null) blob[key] = val;
   }
   return blob;
@@ -415,7 +456,7 @@ function dispatchCloudPrefsSignInTerminal(
 }
 
 function clearForeignOwnershipSidecars(userId: string): void {
-  const lastSignedInAs = localStorage.getItem(KEY_LAST_SIGNED_IN_AS);
+  const lastSignedInAs = rawGet(KEY_LAST_SIGNED_IN_AS);
   if (lastSignedInAs === null || lastSignedInAs === userId) return;
 
   // Preferences intentionally survive sign-out, but ownership sidecars are
@@ -423,7 +464,7 @@ function clearForeignOwnershipSidecars(userId: string): void {
   // keeping the prior account's local values attributes A's gate decisions to
   // B. B's explicit cloud values will still be applied later in this attempt.
   for (const key of ACCOUNT_PROVENANCE_SYNC_KEYS) {
-    Storage.prototype.removeItem.call(localStorage, key);
+    rawRemove(key);
   }
 }
 
@@ -438,11 +479,11 @@ function applyCloudBlob(data: Record<string, unknown>, syncVersion?: number): vo
       const action = resolveCloudBlobKeyAction(key, data);
       if (action.kind === 'keep') continue;
       if (action.kind === 'set') {
-        if (localStorage.getItem(key) !== action.value) changedKeys.push(key);
-        localStorage.setItem(key, action.value);
+        if (rawGet(key) !== action.value) changedKeys.push(key);
+        rawSet(key, action.value);
       } else {
-        if (localStorage.getItem(key) !== null) changedKeys.push(key);
-        localStorage.removeItem(key);
+        if (rawGet(key) !== null) changedKeys.push(key);
+        rawRemove(key);
       }
     }
   } finally {
@@ -483,14 +524,14 @@ function applyMigrationsWithSchemaVersion(
 }
 
 function getLocalSchemaVersion(): number {
-  const raw = localStorage.getItem(KEY_LOCAL_SCHEMA_VERSION);
+  const raw = rawGet(KEY_LOCAL_SCHEMA_VERSION);
   if (raw === null) return 1; // No marker yet → assume oldest, run migrations
   const v = parseInt(raw, 10);
   return Number.isFinite(v) && v > 0 ? v : 1;
 }
 
 function setLocalSchemaVersion(v: number): void {
-  Storage.prototype.setItem.call(localStorage, KEY_LOCAL_SCHEMA_VERSION, String(v));
+  rawSet(KEY_LOCAL_SCHEMA_VERSION, String(v));
 }
 
 /**
@@ -553,8 +594,8 @@ function showUndoToast(prevBlobJson: string): void {
         for (const [k, v] of Object.entries(prev)) {
           if (!CLOUD_SYNC_KEYS.includes(k as CloudSyncKey)) continue;
           const key = k as CloudSyncKey;
-          if (localStorage.getItem(key) !== v) restoredKeys.push(key);
-          localStorage.setItem(key, v);
+          if (rawGet(key) !== v) restoredKeys.push(key);
+          rawSet(key, v);
         }
       } finally {
         _suppressPatch = false;
@@ -704,7 +745,7 @@ async function resolveConflictWithMerge(token: string, variant: string, callerGe
   // write would durably corrupt their persisted dirty-key entry.
   setSyncVersion(retry.syncVersion);
   clearSettledDirtyKeys(merged);
-  Storage.prototype.setItem.call(localStorage, KEY_LAST_SYNC_AT, String(Date.now()));
+  rawSet(KEY_LAST_SYNC_AT, String(Date.now()));
   setState('synced');
   return true;
 }
@@ -781,7 +822,7 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
         // catches up — otherwise the migration re-runs every load) OR when we
         // merged in local dirty keys the cloud row doesn't have yet.
         if (migrationChanged || hasDirty) schedulePrefUpload(variant);
-        Storage.prototype.setItem.call(localStorage, KEY_LAST_SYNC_AT, String(Date.now()));
+        rawSet(KEY_LAST_SYNC_AT, String(Date.now()));
 
         if (isFirstEverSync && prevBlobJson && Object.keys(cloud.data).length > 0) {
           showUndoToast(prevBlobJson);
@@ -816,13 +857,13 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
         } else {
           setSyncVersion(result.syncVersion);
           clearSettledDirtyKeys(prepared.data);
-          Storage.prototype.setItem.call(localStorage, KEY_LAST_SYNC_AT, String(Date.now()));
+          rawSet(KEY_LAST_SYNC_AT, String(Date.now()));
           setState('synced');
         }
       }
 
       if (_authGeneration === myGeneration) {
-        Storage.prototype.setItem.call(localStorage, KEY_LAST_SIGNED_IN_AS, userId);
+        rawSet(KEY_LAST_SIGNED_IN_AS, userId);
         completeSignInAttempt(attempt, 'synced');
       }
     } catch (err) {
@@ -955,8 +996,8 @@ export function onSignOut(): void {
   _dirtyKeysUserId = null;
 
   // Preserve prefs; only clear sync metadata
-  localStorage.removeItem(KEY_SYNC_VERSION);
-  localStorage.removeItem(KEY_LAST_SYNC_AT);
+  rawRemove(KEY_SYNC_VERSION);
+  rawRemove(KEY_LAST_SYNC_AT);
   setState('signed-out');
 }
 
@@ -1009,7 +1050,7 @@ async function performUploadNow(variant: string): Promise<'completed' | 'retry-d
       // moved.
       setSyncVersion(result.syncVersion);
       clearSettledDirtyKeys(postedBlob);
-      Storage.prototype.setItem.call(localStorage, KEY_LAST_SYNC_AT, String(Date.now()));
+      rawSet(KEY_LAST_SYNC_AT, String(Date.now()));
       setState('synced');
     }
   } catch (err) {
@@ -1096,11 +1137,11 @@ export async function syncNow(): Promise<void> {
 }
 
 export function getSyncState(): SyncState {
-  return (localStorage.getItem(KEY_SYNC_STATE) as SyncState) || 'signed-out';
+  return (rawGet(KEY_SYNC_STATE) as SyncState) || 'signed-out';
 }
 
 export function getLastSyncAt(): number {
-  return parseInt(localStorage.getItem(KEY_LAST_SYNC_AT) ?? '0', 10) || 0;
+  return parseInt(rawGet(KEY_LAST_SYNC_AT) ?? '0', 10) || 0;
 }
 
 // ── install ───────────────────────────────────────────────────────────────────
@@ -1140,7 +1181,7 @@ export function install(variant: string): void {
           _debounceTimer = null;
           setState('synced');
         }
-        Storage.prototype.setItem.call(localStorage, KEY_SYNC_VERSION, e.newValue);
+        rawSet(KEY_SYNC_VERSION, e.newValue);
       }
     }
   });
@@ -1212,7 +1253,7 @@ export function install(variant: string): void {
           setSyncVersion,
           clearSettledDirtyKeys: () => clearSettledDirtyKeys(blob),
           setLastSyncAt: (timestampMs) => {
-            Storage.prototype.setItem.call(localStorage, KEY_LAST_SYNC_AT, String(timestampMs));
+            rawSet(KEY_LAST_SYNC_AT, String(timestampMs));
           },
           // Only claim 'synced' when no newer edit re-armed the debounce AND no
           // uploadNow is active or queued (performUploadNow does not start

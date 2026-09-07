@@ -13,6 +13,7 @@ export interface ImportResult {
 
 import { CLOUD_SYNC_KEYS } from './sync-keys';
 import { invalidatePanelStorageCacheForKeys } from './panel-storage';
+import { safeStorageGet, safeStorageKeys } from './safe-storage';
 
 const MAX_IMPORT_SIZE_BYTES = 5 * 1024 * 1024;
 
@@ -44,17 +45,20 @@ export const __testing__ = { isSettingsKey };
 export function exportSettings(): void {
   const data: Record<string, string> = {};
 
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (!key || !isSettingsKey(key)) continue;
-    const value = localStorage.getItem(key);
+  // A null `localStorage` (Android WebView with DOM storage disabled) used to
+  // throw straight out of this function, so the Export button did nothing at
+  // all on those devices — #7833. There is nothing to export there, so the
+  // honest outcome is an empty payload the user still receives as a file.
+  for (const key of safeStorageKeys()) {
+    if (!isSettingsKey(key)) continue;
+    const value = safeStorageGet(key);
     if (value !== null) data[key] = value;
   }
 
   const exportData: ExportedSettings = {
     version: 1,
     timestamp: new Date().toISOString(),
-    variant: localStorage.getItem('worldmonitor-variant') || 'full',
+    variant: safeStorageGet('worldmonitor-variant') || 'full',
     data,
   };
 
