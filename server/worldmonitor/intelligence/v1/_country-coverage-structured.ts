@@ -385,7 +385,12 @@ async function collectConflicts(req: StructuredRequest): Promise<StructuredSourc
         severity: event.fatalities > 0 ? 'critical' : 'high',
       });
     }
-    return settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, false);
+    // This lane IS queried globally (country: ''), so rows coming back prove the
+    // upstream answered even when none of them are this country's — that is a
+    // confirmed-quiet `empty`. Only a globally empty result is unverifiable,
+    // because list-acled-events returns exactly that on failure too.
+    const healthConfirmed = response.events.length > 0;
+    return settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, healthConfirmed);
   } catch (error) {
     return failed(source, errorDetail(error));
   }
@@ -437,7 +442,9 @@ async function collectMilitaryFlights(
     // The flights RPC serves a live snapshot and reports no gather time, so
     // there is no fetchedAt to claim. Reporting the newest position instead
     // would read as "gathered then", which is a different fact.
-    const settled = settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, false);
+    // Rows in the bbox prove the flights path answered. An empty bbox cannot:
+    // a quiet country and a dead upstream look identical through this query.
+    const settled = settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, flights.length > 0);
     // One bounded, one-directional divergence from the panel, stated rather
     // than hidden: the browser enriches flights with Wingbits aircraft details
     // after the RPC (military-flights.ts fetchFlightsWithWingbits), and a

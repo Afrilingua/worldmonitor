@@ -7274,10 +7274,19 @@ components:
                 degraded:
                     type: boolean
                     description: |-
-                        True when any producer is in any state other than "ok" or "empty" — that
-                         is, whenever at least one producer's silence is unexplained or its data is
-                         past its freshness budget. An agent must not read an empty `events` list as
+                        True when any producer is "stale" or "failed" — something is wrong now that
+                         was not wrong before. An agent must not read an empty `events` list as
                          "nothing happened" while this is true.
+
+                         Deliberately EXCLUDES "unavailable" and "unknown". Both are STRUCTURAL
+                         properties of this surface, true on every response regardless of upstream
+                         health: two producers have no server-side equivalent at all, and a producer
+                         that returns nothing globally cannot prove it was reached. Folding either in
+                         would pin this flag to true forever and destroy its signal.
+
+                         This hides nothing: `sources` always carries every producer's own state, and
+                         that is where the "an empty list is never silently healthy" guarantee lives.
+                         Read `sources` before interpreting an empty `events` list, always.
                 containment:
                     type: string
                     description: |-
@@ -7386,7 +7395,10 @@ components:
                 contributed:
                     type: integer
                     format: int32
-                    description: Events this producer contributed AFTER window filtering, before clustering.
+                    description: |-
+                        Events this producer contributed to the reconciled timeline, after window
+                         filtering. For a coverage producer this counts clustered incidents, not the
+                         articles behind them, so several outlets reporting one incident count once.
             description: |-
                 CountryCoverageSourceStatus reports what one producer contributed, so an
                  empty event list can never be mistaken for healthy silence.

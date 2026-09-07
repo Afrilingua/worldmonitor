@@ -433,7 +433,10 @@ describe('GetCountryCoverage — source status is explicit', () => {
     assert.equal(response.sources.find(s => s.source === 'structured:protests')?.ageSeconds, 40 * 3600);
   });
 
-  it('an unavailable producer degrades the response', async () => {
+  it('a permanently unavailable producer does NOT degrade the response', async () => {
+    // Two producers are unavailable on every single response, so counting them
+    // would pin degraded to true forever and drain the flag of meaning. The gap
+    // is still reported per-source.
     const response = await getCountryCoverage(ctx, request(), deps({
       structured: [{
         source: 'structured:military-vessels',
@@ -443,9 +446,29 @@ describe('GetCountryCoverage — source status is explicit', () => {
         incidents: [],
       }],
     }));
-    assert.equal(response.degraded, true);
-    assert.equal(response.sources.find(s => s.source === 'structured:military-vessels')?.fetchedAt, '');
-    assert.equal(response.sources.find(s => s.source === 'structured:military-vessels')?.ageSeconds, 0);
+    assert.equal(response.degraded, false, 'a structural gap is not a transient problem');
+    const vessels = response.sources.find(s => s.source === 'structured:military-vessels');
+    assert.equal(vessels?.state, 'unavailable');
+    assert.equal(vessels?.fetchedAt, '');
+    assert.equal(vessels?.ageSeconds, 0);
+  });
+
+  it('an unknown producer does not degrade, but still reports itself', async () => {
+    // `unknown` is structural: some producers can never prove they were
+    // reached, so degrading on it would pin the flag true on every response.
+    // The guarantee lives in `sources`, which must still say so plainly.
+    const response = await getCountryCoverage(ctx, request(), deps({
+      structured: [{
+        source: 'structured:conflicts',
+        state: 'unknown',
+        detail: 'Cannot confirm the upstream was reachable.',
+        fetchedAtMs: 0,
+        incidents: [],
+      }],
+    }));
+    assert.equal(response.degraded, false);
+    assert.equal(sourceState(response, 'structured:conflicts'), 'unknown');
+    assert.ok(response.sources.find(s => s.source === 'structured:conflicts')?.detail.length);
   });
 
   it('states how structured events were tested for country containment', async () => {
@@ -890,5 +913,195 @@ describe('collectStructuredIncidents — producer status', () => {
     const flights = find(results, 'structured:military-flights');
     assert.equal(flights.state, 'unavailable');
     assert.ok(flights.detail.includes('bounding box'));
+  });
+});
+
+describe('GetCountryCoverage — end to end over the real collector', () => {
+  // The suites above inject BOTH halves, which is what let a broken producer
+  // look healthy: every state they assert was hand-built by the test. These
+  // compose the REAL collectStructuredIncidents with the REAL handler and stub
+  // only the leaf RPC calls, so the states are the ones production can produce.
+  const ISRAEL = { lat: 31.78, lon: 35.22 };
+
+  function leafDeps(overrides: Partial<StructuredDependencies> = {}): StructuredDependencies {
+    return {
+      listUnrestEvents: async () => ({ events: [], clusters: [], pagination: undefined }),
+      listEarthquakes: async () => ({ earthquakes: [], pagination: undefined }),
+      listAcledEvents: async () => ({ events: [], pagination: undefined }),
+      listIranEvents: async () => ({ events: [], scrapedAt: '0' }),
+      listMilitaryFlights: async () => ({ flights: [], clusters: [], pagination: undefined }),
+      readSeed: async () => ({ status: 'hit' as const, fetchedAtMs: NOW_MS - HOUR }),
+      ...overrides,
+    } as StructuredDependencies;
+  }
+
+  async function run(
+    structuredOverrides: Partial<StructuredDependencies> = {},
+    coverageOverride?: CoverageFetch,
+  ): Promise<GetCountryCoverageResponse> {
+    return getCountryCoverage(ctx, request(), {
+      now: () => NOW_MS,
+      fetchCoverage: async () => coverageOverride ?? coverage(),
+      collectStructured: collectStructuredIncidents,
+      structuredDeps: leafDeps(structuredOverrides),
+    });
+  }
+
+  it('a healthy but quiet snapshot is NOT degraded', async () => {
+    // The flag has to be able to be false, or it carries no information.
+    const response = await run();
+    assert.equal(response.events.length, 0);
+    assert.equal(response.degraded, false);
+  });
+
+  it('a Redis outage degrades the response instead of reading as a quiet week', async () => {
+    // Production shape of the bug this endpoint exists to prevent: the upstream
+    // handler catches its own failure and RESOLVES EMPTY, so only the seed read
+    // reveals the outage. Nothing may report `empty` here.
+    const response = await run({
+      readSeed: async () => ({ status: 'error' as const, fetchedAtMs: 0 }),
+    });
+    assert.equal(response.degraded, true);
+    const seedBacked = ['structured:protests', 'structured:earthquakes'];
+    for (const source of seedBacked) {
+      const entry = response.sources.find(s => s.source === source);
+      assert.equal(entry?.state, 'failed', `${source} must report failed, not empty`);
+      assert.ok(entry?.detail.includes('not evidence of a quiet period'));
+    }
+    // Scoped to the structured half: the coverage feeds are healthy in this
+    // scenario and their `empty` is a true statement.
+    assert.ok(
+      response.sources
+        .filter(s => s.source.startsWith('structured:'))
+        .every(s => s.state !== 'empty'),
+      'no structured producer may claim a confirmed-quiet state while its cache is unreadable',
+    );
+  });
+
+  it('a producer with no health signal reports unknown end to end', async () => {
+    const response = await run();
+    assert.equal(response.sources.find(s => s.source === 'structured:conflicts')?.state, 'unknown');
+    assert.equal(response.sources.find(s => s.source === 'structured:military-flights')?.state, 'unknown');
+    // Structural, so it does not degrade — but every one of them says why, which
+    // is where the "empty is never silently healthy" guarantee actually lives.
+    assert.equal(response.degraded, false);
+    for (const entry of response.sources) {
+      if (entry.state !== 'ok') {
+        assert.ok(entry.detail.length > 0, `${entry.source} (${entry.state}) must explain itself`);
+      }
+    }
+  });
+
+  it('a globally non-empty conflicts feed with nothing for this country is empty, not unknown', async () => {
+    // ACLED is queried globally, so rows coming back prove it answered even when
+    // none are this country's. That is a confirmed-quiet `empty`.
+    const response = await run({
+      listAcledEvents: async () => ({
+        events: [{
+          id: 'a1',
+          eventType: 'Battles',
+          country: 'Egypt',
+          location: { latitude: 30.0, longitude: 31.2 },
+          occurredAt: NOW_MS - 2 * HOUR,
+          fatalities: 1,
+          actors: [],
+          source: 'acled',
+          admin1: 'Cairo',
+        }],
+        pagination: undefined,
+      }),
+    } as Partial<StructuredDependencies>);
+    assert.equal(response.sources.find(s => s.source === 'structured:conflicts')?.state, 'empty');
+    assert.equal(response.degraded, false);
+  });
+
+  it('carries a real structured incident through to the response', async () => {
+    const response = await run({
+      listUnrestEvents: async () => ({
+        events: [{
+          id: 'u1',
+          title: 'Protest outside the ministry',
+          summary: '',
+          eventType: 'UNREST_EVENT_TYPE_PROTEST',
+          city: 'Jerusalem',
+          country: 'Israel',
+          region: '',
+          location: { latitude: ISRAEL.lat, longitude: ISRAEL.lon },
+          occurredAt: NOW_MS - 2 * HOUR,
+          severity: 'SEVERITY_LEVEL_HIGH',
+          fatalities: 0,
+          sources: [],
+          sourceType: 'UNREST_SOURCE_TYPE_ACLED',
+          tags: [],
+          actors: [],
+          confidence: 'CONFIDENCE_LEVEL_HIGH',
+          sourceUrls: [],
+        }],
+        clusters: [],
+        pagination: undefined,
+      }),
+    } as Partial<StructuredDependencies>);
+    assert.deepEqual(response.events.map(e => e.label), ['Protest outside the ministry']);
+    assert.equal(response.events[0]?.origin, 'structured');
+    assert.equal(response.events[0]?.source, 'structured:protests');
+    assert.equal(response.sources.find(s => s.source === 'structured:protests')?.contributed, 1);
+  });
+
+  it('builds a strike incident and normalizes a seconds-precision stamp', async () => {
+    // The strike lane is retired by default, so its construction path is only
+    // reachable with the flag on — pin it anyway so a future re-enable is not
+    // the first time this code runs.
+    const response = await run({
+      listIranEvents: async () => ({
+        scrapedAt: String(NOW_MS),
+        events: [
+          {
+            id: 's1',
+            title: 'Strike on the northern depot',
+            category: '',
+            sourceUrl: '',
+            latitude: ISRAEL.lat,
+            longitude: ISRAEL.lon,
+            // Seconds, not milliseconds — the panel multiplies these up.
+            timestamp: String(Math.floor((NOW_MS - 3 * HOUR) / 1000)),
+            locationName: 'North',
+            severity: 'high',
+          },
+          // Duplicate id: the panel de-duplicates before rendering.
+          {
+            id: 's1',
+            title: 'Strike on the northern depot',
+            category: '',
+            sourceUrl: '',
+            latitude: ISRAEL.lat,
+            longitude: ISRAEL.lon,
+            timestamp: String(Math.floor((NOW_MS - 3 * HOUR) / 1000)),
+            locationName: 'North',
+            severity: 'high',
+          },
+        ],
+      }),
+    } as Partial<StructuredDependencies>);
+    const strikes = response.events.filter(e => e.source === 'structured:strikes');
+    assert.equal(strikes.length, 1, 'the duplicate id must be dropped');
+    assert.equal(strikes[0]?.label, 'Strike on the northern depot');
+    assert.equal(strikes[0]?.severity, 'critical');
+    assert.equal(strikes[0]?.timestampMs, (NOW_MS - 3 * HOUR) - ((NOW_MS - 3 * HOUR) % 1000));
+  });
+
+  it('bounds the structured half with its own deadline', async () => {
+    // The coverage AbortController does not reach these producers — they are
+    // plain handler calls that take no signal — so one hanging upstream would
+    // otherwise hold the whole response open.
+    const response = await getCountryCoverage(ctx, request(), {
+      now: () => NOW_MS,
+      fetchCoverage: async () => coverage(),
+      collectStructured: () => new Promise(() => { /* never settles */ }),
+    });
+    assert.equal(response.degraded, true);
+    const structured = response.sources.filter(s => s.source.startsWith('structured:'));
+    assert.ok(structured.length > 0, 'timed-out producers must still be reported');
+    assert.ok(structured.every(s => s.state === 'failed'));
+    assert.ok(structured[0]?.detail.includes('did not settle'));
   });
 });

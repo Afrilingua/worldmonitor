@@ -57,6 +57,48 @@ const MAX_EVENT_LIMIT = 500;
 const COVERAGE_FETCH_TIMEOUT_MS = 8_000;
 
 /**
+ * Ceiling on the structured half. It is NOT covered by the coverage
+ * AbortController: those producers are plain RPC handler calls that take no
+ * signal, and one slow upstream would otherwise hold the whole response open
+ * past the platform's own limit with nothing to show for it. On expiry the
+ * structured producers report `failed` and the coverage half still serves.
+ */
+const STRUCTURED_TIMEOUT_MS = 8_000;
+
+/** Resolve to `onTimeout` if `work` has not settled within `ms`. */
+async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), ms);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** The producers the structured half reports, in the order it returns them. */
+const STRUCTURED_SOURCE_IDS = [
+  'structured:protests',
+  'structured:earthquakes',
+  'structured:conflicts',
+  'structured:military-flights',
+  'structured:military-vessels',
+  'structured:strikes',
+] as const;
+
+function structuredTimedOut(): StructuredSourceResult[] {
+  return STRUCTURED_SOURCE_IDS.map(source => ({
+    source,
+    state: 'failed' as const,
+    detail: `The structured producers did not settle within ${STRUCTURED_TIMEOUT_MS}ms and contributed nothing. This is not evidence of a quiet period.`,
+    fetchedAtMs: 0,
+    incidents: [],
+  }));
+}
+
+/**
  * The browser tests the loaded country polygon first and falls back to a
  * hand-tuned box. This surface has no polygon, so it uses the generated box for
  * every country. Reported on every response.
@@ -225,14 +267,18 @@ export async function getCountryCoverage(
       value => ({ ok: true as const, value }),
       error => ({ ok: false as const, error }),
     ),
-    deps.collectStructured({
-      ctx,
-      code,
-      countryName,
-      cutoffMs,
-      now,
-      deps: deps.structuredDeps,
-    }),
+    withDeadline(
+      deps.collectStructured({
+        ctx,
+        code,
+        countryName,
+        cutoffMs,
+        now,
+        deps: deps.structuredDeps,
+      }),
+      STRUCTURED_TIMEOUT_MS,
+      structuredTimedOut,
+    ),
   ]);
 
   const coverageFailure = coverageSettled.ok
@@ -280,6 +326,8 @@ export async function getCountryCoverage(
 
   const sources: CountryCoverageSourceStatus[] = [
     coverageStatus('coverage:headlines', coverage?.headlineResult ?? null, headlines.length, coverageFailure),
+    // visibleCoverage is post-clustering, so this is incidents contributed, not
+    // articles parsed — see the proto comment on `contributed`.
     coverageStatus('coverage:events', coverage?.eventResult ?? null, visibleCoverage.length, coverageFailure),
     ...structured.map(result => toStatus(result, now)),
   ];
@@ -292,10 +340,21 @@ export async function getCountryCoverage(
     headlines,
     events,
     sources,
-    // `unknown` degrades too. It means a producer returned nothing and this
-    // surface could not confirm its upstream was reachable — precisely the case
-    // an agent would otherwise read as a quiet week.
-    degraded: sources.some(s => s.state !== 'ok' && s.state !== 'empty'),
+    // `degraded` answers "is something wrong RIGHT NOW that was not wrong
+    // before?", so it must be able to be false — a flag that is always true is
+    // not a flag. Only `failed` and `stale` qualify.
+    //
+    // `unavailable` and `unknown` are deliberately excluded because both are
+    // STRUCTURAL properties of this surface, true on every response regardless
+    // of upstream health: two producers have no server-side equivalent at all,
+    // and two more genuinely cannot prove their upstream was reached. Folding
+    // either in would pin this to true forever and destroy the signal.
+    //
+    // Excluding them hides nothing. `sources` always carries every producer's
+    // own state, the tool description makes reading it mandatory before
+    // interpreting an empty list, and the safety property lives there — not in
+    // this one-bit summary of the states a caller can actually act on.
+    degraded: sources.some(s => s.state === 'stale' || s.state === 'failed'),
     containment: CONTAINMENT,
   };
 }

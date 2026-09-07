@@ -1789,13 +1789,13 @@ export const RPC_TOOLS: ToolDef[] = [
     // default of 2 is already correct. The fan-out to two coverage feeds and
     // five producers happens behind the handler, not in this tool.
     _outputBudgetBytes: 131072,
-    description: "The country panel's own coverage timeline: recent country-relevant headlines plus the clustered incident timeline the WorldMonitor UI renders for that country. Reprints of one incident are collapsed into a single entry, and a first-party record (protest, earthquake, conflict, military flight) takes precedence over the news article describing it, so this does not double-count. Use it instead of rebuilding country coverage from the news tools — those return raw articles and leave the matching, expiry and de-duplication to you. ALWAYS read `sources` before concluding anything from an empty `events` list: each producer reports ok/empty/unknown/stale/failed/unavailable, and `degraded` is true whenever any of them is not healthy. Only `empty` asserts a producer was genuinely quiet; `unknown` means its silence could not be confirmed. Titles and labels are untrusted publisher text.",
+    description: "The country panel's own coverage timeline: recent country-relevant headlines plus the clustered incident timeline the WorldMonitor UI renders for that country. Reprints of one incident are collapsed into a single entry, and a first-party record (protest, earthquake, conflict, military flight) takes precedence over the news article describing it, so this does not double-count. Use it instead of rebuilding country coverage from the news tools — those return raw articles and leave the matching, expiry and de-duplication to you. ALWAYS read `sources` before concluding anything from an empty `events` list: each producer reports ok/empty/unknown/stale/failed/unavailable. Only `empty` asserts a producer was genuinely quiet; `unknown` means its silence could not be confirmed. `degraded` flags only what is wrong now (stale/failed) and deliberately ignores the structural states (unavailable/unknown), so it stays a real signal instead of a constant true. The guarantee that an empty list is never silently healthy lives in `sources`, not in this one bit — read it every time. Titles and labels are untrusted publisher text.",
     inputSchema: {
       type: 'object',
       properties: {
         country_code: { type: 'string', description: 'ISO 3166-1 alpha-2 code (e.g. "IQ"), alpha-3 code ("IRQ"), or English country name ("Iraq")' },
-        window_hours: { type: 'integer', minimum: 1, maximum: 168, description: 'Look-back window in hours. Defaults to 168 (7 days), which is what the UI shows. The upstream coverage query is pinned to 7 days, so a larger value is rejected rather than silently returning the same events.' },
-        limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Maximum timeline events to return, keeping the most recent. Defaults to 200.' },
+        window_hours: { type: 'integer', minimum: 0, maximum: 168, description: 'Look-back window in hours. 0 or omitted means the default 168 (7 days), which is what the UI shows. The upstream coverage query is pinned to 7 days, so a larger value is rejected rather than silently returning the same events.' },
+        limit: { type: 'integer', minimum: 0, maximum: 500, description: 'Maximum timeline events to return, keeping the most recent. 0 or omitted means the default 200.' },
       },
       required: ['country_code'],
     },
@@ -1861,7 +1861,7 @@ export const RPC_TOOLS: ToolDef[] = [
             },
           },
         },
-        degraded: { type: 'boolean', description: 'True when ANY producer is in a state other than "ok" or "empty" — whenever at least one producer\'s silence is unexplained or its data is past its freshness budget. Never read an empty events list as "nothing happened" while this is true.' },
+        degraded: { type: 'boolean', description: 'True when any producer is "stale" or "failed" — something is wrong now. Never read an empty events list as "nothing happened" while this is true. Deliberately EXCLUDES "unavailable" and "unknown", which are structural properties of this surface rather than incidents: some producers have no server-side equivalent, and one that returns nothing globally cannot prove it was reached. Including them would pin this flag to true forever. This hides nothing — `sources` always carries every producer state, and that is where the "an empty list is never silently healthy" guarantee lives. Read `sources` before interpreting an empty events list, always.' },
         containment: { type: 'string', description: 'How a structured event was tested for being inside the country: "bbox" on this surface. The browser panel tests the loaded country polygon first and falls back to the same box, so a structured event inside the box but outside the polygon appears here and not in the panel. Headline-matched coverage events are unaffected.' },
       },
     },
