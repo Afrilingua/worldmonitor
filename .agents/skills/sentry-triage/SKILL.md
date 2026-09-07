@@ -116,8 +116,15 @@ State one class before touching code or Sentry status:
 
 - Cross-check frames against the codebase. If Sentry Releases exist, diff the event's release, not an assumed `main`.
 - Fix the cause. Add a test that reproduces the failure with synthetic data when the surface has a test suite.
-- Link the work with `Fixes WORLDMONITOR-12A` in the commit or PR body, then resolve the issue **plainly** and read `statusDetails` back to confirm it is empty.
-- Do not let the commit do the resolving. While the Sentry GitHub integration has resolve-on-commit enabled, that phrase resolves `inRelease: <commit-sha>`, which no browser event can ever outrank, so the issue reads resolved and can never reopen (issue #7838).
+- Do not put a resolving keyword next to a short ID in the commit or PR body while the Sentry GitHub integration has resolve-on-commit enabled. `Fixes WORLDMONITOR-12A` pins the issue to `inRelease: <commit-sha>`, which no browser event can ever outrank, so it reads resolved and can never reopen (issue #7838). It fires even when the text only quotes the marker while discussing the bug, and backticks do not escape it. File content is never scanned; only commit messages and PR bodies are.
+- Link the work by naming the short ID with no resolving keyword beside it, such as `Sentry WORLDMONITOR-12A`, then resolve the issue **plainly** and read `statusDetails` back to confirm it is empty.
+- Scan the branch before pushing. Any hit means rewrite the message.
+
+  ```bash
+  git log <base>..HEAD --format=%B \
+    | grep -Eio '(fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)[[:space:]]+WORLDMONITOR-[A-Z0-9]+'
+  ```
+
 - Follow WorldMonitor delivery rules (preflight, no `--no-verify`, no merge unless asked).
 
 **Archive / mute (any class)**
