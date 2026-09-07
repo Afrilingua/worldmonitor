@@ -536,17 +536,31 @@ function applyCloudBlob(data: Record<string, unknown>, syncVersion?: number): bo
       // client during rolling deployments. See resolveCloudBlobKeyAction.
       const action = resolveCloudBlobKeyAction(key, data);
       if (action.kind === 'keep') continue;
+      // The pre-read decides whether to ANNOUNCE the key, and a failed read
+      // degrading to null answers wrongly in both directions: a `set` looks
+      // different when it was not, and a `remove` looks absent when it was
+      // present — so the deletion lands but is never announced, and consumers
+      // keep serving the removed preference until a reload (#7833 review).
+      //
+      // On an undeterminable pre-read this ANNOUNCES the key rather than
+      // aborting, which is a deliberate departure from the suggested fix. The
+      // write itself is separately checked, so storage is already correct; a
+      // spurious announcement just makes consumers re-read a key that did not
+      // change, which is a no-op. Aborting would fail a whole reconciliation
+      // over a recoverable read, and announcing self-heals.
       if (action.kind === 'set') {
-        const wasDifferent = safeStorageGet(key) !== action.value;
+        const before = safeStorageGetChecked(key);
+        const shouldAnnounce = !before.ok || before.value !== action.value;
         if (safeStorageSetChecked(key, action.value)) {
-          if (wasDifferent) changedKeys.push(key);
+          if (shouldAnnounce) changedKeys.push(key);
         } else {
           allWritesLanded = false;
         }
       } else {
-        const wasPresent = safeStorageGet(key) !== null;
+        const before = safeStorageGetChecked(key);
+        const shouldAnnounce = !before.ok || before.value !== null;
         if (safeStorageRemoveChecked(key)) {
-          if (wasPresent) changedKeys.push(key);
+          if (shouldAnnounce) changedKeys.push(key);
         } else {
           allWritesLanded = false;
         }
@@ -700,9 +714,11 @@ function showUndoToast(prevBlobJson: string): void {
         for (const [k, v] of Object.entries(prev)) {
           if (!CLOUD_SYNC_KEYS.includes(k as CloudSyncKey)) continue;
           const key = k as CloudSyncKey;
-          const wasDifferent = safeStorageGet(key) !== v;
+          // Same announce-on-doubt rule as applyCloudBlob above.
+          const before = safeStorageGetChecked(key);
+          const shouldAnnounce = !before.ok || before.value !== v;
           if (safeStorageSetChecked(key, v)) {
-            if (wasDifferent) restoredKeys.push(key);
+            if (shouldAnnounce) restoredKeys.push(key);
           } else {
             allRestored = false;
           }
@@ -1343,6 +1359,13 @@ export async function syncNow(): Promise<void> {
   }
   await uploadNow(_currentVariant);
 }
+
+// The last two DEGRADING reads in this module, and deliberately so. Both feed
+// the settings panel's status dot, label, and "Last synced" line
+// (preferences-content.ts) and nothing else — no branch, no upload, no
+// reconciliation. A failed read renders "Signed out / Never", which is a
+// degraded DISPLAY rather than a wrong decision, so a checked read here would
+// buy nothing. Every read that feeds a decision uses safeStorageGetChecked.
 
 export function getSyncState(): SyncState {
   return (safeStorageGet(KEY_SYNC_STATE) as SyncState) || 'signed-out';

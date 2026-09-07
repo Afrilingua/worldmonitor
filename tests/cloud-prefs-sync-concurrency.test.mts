@@ -986,3 +986,4 @@ describe('cloud prefs fail closed on undeterminable state (#7833 review)', () =>
     assert.equal(result.postCount, 0, 'nothing may be uploaded on a provenance failure');
   });
 });
+
