@@ -136,6 +136,11 @@ describe('production sitemap verifier helpers', () => {
     assert.equal(inspect('<meta name="googlebot" content="none">').indexable, false);
     assert.equal(inspect('', 'googlebot: noindex, follow').indexable, false);
     assert.equal(inspect('', 'otherbot: noindex, googlebot: index').indexable, true);
+    assert.equal(inspect('<meta name="robots" content="max-image-preview:none">').indexable, true);
+    assert.equal(inspect('', 'max-image-preview: none').indexable, true);
+    assert.equal(inspect('', 'googlebot: max-image-preview:none').indexable, true);
+    assert.equal(inspect('', 'none').indexable, false);
+    assert.equal(inspect('', 'max-image-preview:none, noindex').indexable, false);
   });
 
   it('parses each HTTP canonical without treating quoted Link parameters as declarations', () => {
@@ -149,7 +154,7 @@ describe('production sitemap verifier helpers', () => {
     assert.deepEqual(inspect(`<${url}>; title="example, <not-a-link>; rel='canonical'"; rel="alternate"`).canonicalErrors, []);
   });
 
-  it('GET-checks both CII locales and fails the overall audit on a conflicting canonical', async () => {
+  it('GET-checks both CII locales and rejects conflicting canonicals or missing locales', async () => {
     const origin = 'https://www.worldmonitor.app';
     const pages = ['/', '/blog/', '/docs/about', '/docs/country-instability-index', '/docs/zh/country-instability-index'];
     const documents = new Map([
@@ -160,10 +165,11 @@ describe('production sitemap verifier helpers', () => {
       ]),
     ]);
     const fetches = [];
+    let conflicting = true;
     const fetchImpl = async (url, { method }) => {
       fetches.push({ url, method });
       if (documents.has(url)) return new Response(documents.get(url), { headers: { 'content-type': 'application/xml' } });
-      const href = url.includes('/zh/') ? 'https://mirror.example/docs/zh/country-instability-index' : url;
+      const href = conflicting && url.includes('/zh/') ? 'https://mirror.example/docs/zh/country-instability-index' : url;
       return new Response(`<html><head><link rel="canonical" href="${href}"></head></html>`, {
         headers: { 'content-type': 'text/html', link: `<${url}>; rel="canonical"` },
       });
@@ -173,6 +179,15 @@ describe('production sitemap verifier helpers', () => {
     assert.match(result.errors.join('\n'), /conflicting/i);
     for (const path of pages.slice(3)) {
       assert.ok(fetches.some(entry => entry.url === `${origin}${path}` && entry.method === 'GET'), path);
+    }
+    conflicting = false;
+    assert.equal((await verifyProductionSitemaps({ fetchImpl })).passed, true);
+    const sitemap = documents.get(`${origin}/docs/sitemap.xml`);
+    for (const path of pages.slice(3)) {
+      documents.set(`${origin}/docs/sitemap.xml`, sitemap.replace(`<url><loc>${origin}${path}</loc></url>`, ''));
+      const missingLocale = await verifyProductionSitemaps({ fetchImpl });
+      assert.equal(missingLocale.passed, false);
+      assert.ok(missingLocale.errors.includes(`required docs page missing from sitemap: ${origin}${path}`));
     }
   });
 
@@ -199,10 +214,15 @@ describe('production sitemap verifier helpers', () => {
       ['https://www.worldmonitor.app/docs/', '<html><head><link rel="canonical" href="https://www.worldmonitor.app/docs/"></head></html>'],
       [mcpUrl, '# World Monitor MCP'],
     ]);
+    for (const path of ['/docs/country-instability-index', '/docs/zh/country-instability-index']) {
+      const url = `https://www.worldmonitor.app${path}`;
+      responses.set(docsSitemap, responses.get(docsSitemap).replace('</urlset>', `<url><loc>${url}</loc></url></urlset>`));
+      responses.set(url, `<html><head><link rel="canonical" href="${url}"></head></html>`);
+    }
     const fetchImpl = async (url) => {
       const value = String(url);
       const isMcp = value === mcpUrl;
-      const isPage = value.endsWith('/') || isMcp;
+      const isPage = value.endsWith('/') || value.endsWith('/country-instability-index') || isMcp;
       return new Response(responses.get(value), {
         status: responses.has(value) ? 200 : 404,
         headers: isMcp
