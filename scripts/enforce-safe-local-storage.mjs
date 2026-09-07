@@ -125,6 +125,8 @@ export const DEREF_PROBES = {
     '(localStorage as Storage).getItem(key);',
     'localStorage[key] = value;',
     'localStorage!["k"];',
+    'async function f() { (await localStorage).getItem(key); }',
+    '(0, localStorage).getItem(key);',
   ],
   [DEREF_LABELS.global]: [
     'const ls = window.localStorage;',
@@ -141,7 +143,19 @@ export const DEREF_PROBES = {
   ],
 };
 
-/** Strip the receiver wrappers TypeScript allows around an expression. */
+/**
+ * Strip the value-preserving wrappers that can sit between an expression and
+ * the receiver position, so the identifier underneath is still recognized.
+ *
+ * The list is the one hand-maintained surface left in this matcher, and review
+ * has extended it twice (`!`/`as`, then `await`). DEREF_PROBES is its guard:
+ * every shape here has a fixture. Note the boundary though — this closes shapes
+ * an engineer might plausibly WRITE, not every shape one could construct. A
+ * receiver deliberately obfuscated past this point is not a threat a
+ * non-typechecking gate can close, and anyone editing this file could simply
+ * add an inventory entry instead; the gate exists to catch ACCIDENTAL
+ * reintroduction of the crash class.
+ */
 function unwrapReceiver(node) {
   let current = node;
   for (;;) {
@@ -149,10 +163,17 @@ function unwrapReceiver(node) {
       ts.isParenthesizedExpression(current)
       || ts.isNonNullExpression(current)
       || ts.isAsExpression(current)
+      || ts.isAwaitExpression(current)
       || (ts.isSatisfiesExpression?.(current) ?? false)
       || (ts.isTypeAssertionExpression?.(current) ?? false)
     ) {
       current = current.expression;
+      continue;
+    }
+    // `(0, localStorage).getItem(k)` — the comma operator yields its right
+    // operand, and is a real idiom (it unbinds `this` on the callee).
+    if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+      current = current.right;
       continue;
     }
     return current;

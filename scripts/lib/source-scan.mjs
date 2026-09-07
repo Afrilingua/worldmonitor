@@ -33,8 +33,9 @@
 /**
  * Blank out comments while preserving offsets and line count.
  *
- * Tracks four states in one pass — code, line comment, block comment, and
- * string (`'`, `"`, and template literals, honoring backslash escapes) — so a
+ * Tracks five states in one pass — code, line comment, block comment, quoted
+ * string, and template literal (honoring backslash escapes), with a stack of
+ * open `${…}` interpolations so nested templates resume the right one — so a
  * `/*` or `//` inside a string or another comment can never open a region.
  * Comment characters become spaces and newlines survive, so byte offsets and
  * line numbers still line up with the original for error reporting.
@@ -52,53 +53,69 @@
  */
 export function stripComments(source) {
   const out = source.split('');
-  let state = 'code';
+  let mode = 'code';
   let quote = '';
+  // Brace depth per OPEN template interpolation. A template can contain `${…}`
+  // whose expression contains another template, so a single in-string flag is
+  // not enough: it treats the inner opening backtick as the outer closing one,
+  // drops back to code mid-string, and a `/*` in the remaining text then opens
+  // a comment that blanks everything to EOF. Review caught the panel gate
+  // passing green over a newly added direct content write that way.
+  const interpolations = [];
 
   for (let i = 0; i < source.length; i++) {
     const ch = source[i];
     const next = source[i + 1];
 
-    if (state === 'code') {
-      if (ch === '/' && next === '/') {
-        state = 'line';
-        out[i] = ' ';
-        out[i + 1] = ' ';
-        i++;
-      } else if (ch === '/' && next === '*') {
-        state = 'block';
-        out[i] = ' ';
-        out[i + 1] = ' ';
-        i++;
-      } else if (ch === "'" || ch === '"' || ch === '`') {
-        state = 'string';
-        quote = ch;
+    if (mode === 'code') {
+      if (ch === '/' && next === '/') { mode = 'line'; out[i] = ' '; out[i + 1] = ' '; i++; continue; }
+      if (ch === '/' && next === '*') { mode = 'block'; out[i] = ' '; out[i + 1] = ' '; i++; continue; }
+      if (ch === "'" || ch === '"') { mode = 'string'; quote = ch; continue; }
+      if (ch === '`') { mode = 'template'; continue; }
+      if (interpolations.length > 0) {
+        if (ch === '{') {
+          interpolations[interpolations.length - 1] += 1;
+        } else if (ch === '}') {
+          if (interpolations[interpolations.length - 1] === 0) {
+            interpolations.pop();
+            mode = 'template';
+          } else {
+            interpolations[interpolations.length - 1] -= 1;
+          }
+        }
       }
       continue;
     }
 
-    if (state === 'string') {
+    if (mode === 'string') {
       // Consume the escaped character wholesale: a trailing backslash before
       // the closing quote (`'\\'`) would otherwise swallow it and run the
       // string state on into real code.
       if (ch === '\\') { i++; continue; }
-      if (ch === quote) { state = 'code'; quote = ''; }
+      if (ch === quote) { mode = 'code'; quote = ''; }
       continue;
     }
 
-    if (state === 'line') {
-      // Newlines are never blanked, in any state, so line numbers hold.
-      if (ch === '\n') state = 'code';
+    if (mode === 'template') {
+      if (ch === '\\') { i++; continue; }
+      if (ch === '$' && next === '{') { interpolations.push(0); mode = 'code'; i++; continue; }
+      if (ch === '`') mode = 'code';
+      continue;
+    }
+
+    if (mode === 'line') {
+      // Newlines are never blanked, in any mode, so line numbers hold.
+      if (ch === '\n') mode = 'code';
       else out[i] = ' ';
       continue;
     }
 
-    // state === 'block'
+    // mode === 'block'
     if (ch === '*' && next === '/') {
       out[i] = ' ';
       out[i + 1] = ' ';
       i++;
-      state = 'code';
+      mode = 'code';
     } else if (ch !== '\n') {
       out[i] = ' ';
     }
