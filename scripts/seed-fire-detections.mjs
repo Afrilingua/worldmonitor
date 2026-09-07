@@ -85,7 +85,7 @@ async function fetchMergedWildfires() {
     process.exit(1);
   }
   console.log('  FIRMS key configured');
-  return mergeWildfireSourcesWithBc({
+  const data = await mergeWildfireSourcesWithBc({
     fetchFirms: () => fetchAllFirmsRegions(apiKey),
     fetchCwfis: async () => fetchCwfisFires({
       fetchFn: globalThis.fetch, cache,
@@ -93,6 +93,12 @@ async function fetchMergedWildfires() {
     }),
     fetchBcWildfire: () => fetchBcFirePoints({ fetchFn: globalThis.fetch, cache }),
   });
+  if (data.fireDetections.length === 0) {
+    await persistCwfisSnapshot(data).catch(error => {
+      throw Object.assign(error, { nonRetryable: true });
+    });
+  }
+  return data;
 }
 
 async function persistCwfisSnapshot(data) {
