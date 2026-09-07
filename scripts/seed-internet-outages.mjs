@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
-import { loadEnvFile, CHROME_UA, runSeed, writeExtraKeyWithMeta, writeSeedMeta } from './_seed-utils.mjs';
+import {
+  loadEnvFile,
+  CHROME_UA,
+  runSeed,
+  extendExistingTtl,
+  writeExtraKeyWithMetaAtomically,
+} from './_seed-utils.mjs';
 
 loadEnvFile(import.meta.url);
 
@@ -66,6 +72,53 @@ function toEpochMs(value) {
   return Number.isNaN(d.getTime()) ? 0 : d.getTime();
 }
 
+/**
+ * Unwrap a Cloudflare Radar success envelope, or throw.
+ *
+ * Radar reports source-side failures with HTTP 200 and `success: false` plus an
+ * `errors` array, so `resp.ok` alone does not mean the body carries data. Every
+ * `result.<field> || []` read downstream of an unvalidated envelope silently
+ * becomes "the source is quiet" — which is exactly the empty result this seeder
+ * now publishes authoritatively. Validating first keeps "confirmed empty" and
+ * "failed" distinguishable (issue #7845).
+ *
+ * A non-array `errors` is rejected rather than ignored: the shape is unknown, so
+ * the envelope cannot be read as a confirmed success.
+ */
+function requireRadarResult(data, source) {
+  if (
+    !data
+    || typeof data !== 'object'
+    || Array.isArray(data)
+    || data.configured === false
+    || data.success !== true
+    || (data.errors != null && (!Array.isArray(data.errors) || data.errors.length > 0))
+    || !data.result
+    || typeof data.result !== 'object'
+    || Array.isArray(data.result)
+  ) {
+    throw new Error(`Cloudflare Radar ${source}: response is not a valid success envelope`);
+  }
+  return data.result;
+}
+
+/** Require an array-valued result field — an absent one is a failure, not zero records. */
+function requireRadarArray(result, field, source) {
+  if (!Array.isArray(result[field])) {
+    throw new Error(`Cloudflare Radar ${source}: result.${field} is missing or not an array`);
+  }
+  return result[field];
+}
+
+/** Require an object-valued result field (Radar summary maps). */
+function requireRadarObject(result, field, source) {
+  const value = result[field];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Cloudflare Radar ${source}: result.${field} is missing or not an object`);
+  }
+  return value;
+}
+
 async function fetchOutages() {
   const token = process.env.CLOUDFLARE_API_TOKEN;
   if (!token) {
@@ -82,13 +135,11 @@ async function fetchOutages() {
   });
   if (!resp.ok) throw new Error(`Cloudflare Radar API error: ${resp.status}`);
 
-  const data = await resp.json();
-  if (data.configured === false || !data.success || data.errors?.length) {
-    throw new Error(`Cloudflare Radar error: ${JSON.stringify(data.errors || [])}`);
-  }
+  const result = requireRadarResult(await resp.json(), 'outage annotations');
+  const annotations = requireRadarArray(result, 'annotations', 'outage annotations');
 
   const outages = [];
-  for (const raw of data.result?.annotations || []) {
+  for (const raw of annotations) {
     if (!raw.locations?.length) continue;
     const countryCode = raw.locations[0];
     if (!countryCode) continue;
@@ -125,31 +176,60 @@ async function fetchOutages() {
   return { outages, pagination: undefined };
 }
 
+/**
+ * DDoS slice contract.
+ *
+ * REQUIRED: `summary/protocol` and `summary/vector`. They are the payload the
+ * DDoS panel and RPC are about, and both feed `recordCount`. If either one
+ * cannot be confirmed, there is no DDoS result to publish — the whole companion
+ * fails and last-good is retained.
+ *
+ * OPTIONAL: `top/locations/target`. It only decorates the map with target
+ * countries. A failure there degrades `topTargetLocations` to empty and is
+ * logged, but must not withhold a confirmed protocol/vector summary. Keep this
+ * distinction explicit: silently promoting the optional slice to required (or
+ * demoting a required one) changes published coverage without changing counts.
+ */
 async function fetchDdosData(token) {
   const headers = {
     'User-Agent': CHROME_UA,
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
 
-  const [protocolResp, vectorResp, targetResp] = await Promise.all([
+  const fetchOptionalTargetLocations = async () => {
+    try {
+      const resp = await fetch(`${CF_RADAR_BASE}/radar/attacks/layer3/top/locations/target?dateRange=7d`, { headers, signal: AbortSignal.timeout(15_000) });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const result = requireRadarResult(await resp.json(), 'DDoS target locations');
+      return requireRadarArray(result, 'top_0', 'DDoS target locations')
+        .filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+    } catch (err) {
+      console.warn(`  CF Radar DDoS target locations unavailable (optional slice): ${err?.message || err}`);
+      return [];
+    }
+  };
+
+  const [protocolResp, vectorResp, targetItems] = await Promise.all([
     fetch(`${CF_RADAR_BASE}/radar/attacks/layer3/summary/protocol?dateRange=7d`, { headers, signal: AbortSignal.timeout(15_000) }),
     fetch(`${CF_RADAR_BASE}/radar/attacks/layer3/summary/vector?dateRange=7d`, { headers, signal: AbortSignal.timeout(15_000) }),
-    fetch(`${CF_RADAR_BASE}/radar/attacks/layer3/top/locations/target?dateRange=7d`, { headers, signal: AbortSignal.timeout(15_000) }),
+    fetchOptionalTargetLocations(),
   ]);
 
   if (!protocolResp.ok || !vectorResp.ok) {
     throw new Error(`CF Radar DDoS API error: protocol=${protocolResp.status} vector=${vectorResp.status}`);
   }
 
-  const [protocolData, vectorData] = await Promise.all([protocolResp.json(), vectorResp.json()]);
-  const targetData = targetResp.ok ? await targetResp.json() : null;
+  const [protocolResult, vectorResult] = await Promise.all([
+    protocolResp.json().then((data) => requireRadarResult(data, 'DDoS protocol')),
+    vectorResp.json().then((data) => requireRadarResult(data, 'DDoS vector')),
+  ]);
 
   function toEntries(summary) {
-    return Object.entries(summary || {}).map(([label, pct]) => ({ label, percentage: parseFloat(pct) || 0 }))
+    return Object.entries(summary).map(([label, pct]) => ({ label, percentage: parseFloat(pct) || 0 }))
       .sort((a, b) => b.percentage - a.percentage);
   }
 
-  const topTargetLocations = (targetData?.result?.top_0 || []).map((item) => {
+  const topTargetLocations = targetItems.map((item) => {
     const code = item.clientCountryAlpha2 || '';
     const coords = COUNTRY_COORDS[code] || null;
     return {
@@ -161,10 +241,10 @@ async function fetchDdosData(token) {
     };
   }).filter((item) => item.latitude !== 0 || item.longitude !== 0);
 
-  const meta = protocolData.result?.meta;
+  const meta = protocolResult.meta;
   return {
-    protocol: toEntries(protocolData.result?.summary_0),
-    vector: toEntries(vectorData.result?.summary_0),
+    protocol: toEntries(requireRadarObject(protocolResult, 'summary_0', 'DDoS protocol')),
+    vector: toEntries(requireRadarObject(vectorResult, 'summary_0', 'DDoS vector')),
     dateRangeStart: meta?.dateRange?.[0]?.startTime || '',
     dateRangeEnd: meta?.dateRange?.[0]?.endTime || '',
     topTargetLocations,
@@ -184,8 +264,8 @@ async function fetchTrafficAnomalies(token) {
   });
   if (!resp.ok) throw new Error(`CF Radar traffic anomalies API error: ${resp.status}`);
 
-  const data = await resp.json();
-  const raw = data.result?.trafficAnomalies || [];
+  const result = requireRadarResult(await resp.json(), 'traffic anomalies');
+  const raw = requireRadarArray(result, 'trafficAnomalies', 'traffic anomalies');
 
   const anomalies = raw.map((item) => {
     const coords = COUNTRY_COORDS[item.locationDetails?.code] || null;
@@ -207,35 +287,93 @@ async function fetchTrafficAnomalies(token) {
   return { anomalies, totalCount: anomalies.length };
 }
 
-// NOTE: runSeed() calls process.exit(0) after writing the primary key.
-// All secondary keys MUST be written inside fetchAll() before returning.
+// The two Radar companion products. Each owns its consumer key, its TTL and its
+// own success clock; neither is derived from the canonical outage annotations.
+const COMPANIONS = [
+  {
+    label: 'DDoS',
+    key: DDOS_KEY,
+    ttlSeconds: DDOS_TTL,
+    fetch: fetchDdosData,
+    recordCount: (data) => data.protocol.length + data.vector.length,
+  },
+  {
+    label: 'traffic anomalies',
+    key: TRAFFIC_ANOMALIES_KEY,
+    ttlSeconds: ANOMALIES_TTL,
+    fetch: fetchTrafficAnomalies,
+    recordCount: (data) => data.totalCount,
+  },
+];
+
+/**
+ * Fetch and publish one companion, or retain its last-good data.
+ *
+ * A confirmed result — including a confirmed EMPTY one — publishes payload and
+ * seed-meta in a single transaction, so no reader can ever see a fresh success
+ * clock next to an older or different payload. A failed fetch or a failed write
+ * publishes nothing, leaves the success clock where it was, and extends the
+ * consumer key's own TTL through the shared retention path so last-good keeps
+ * being served while /api/health ages the untouched clock into STALE_SEED.
+ *
+ * Never rejects: a companion's outcome is its own, and must not decide the
+ * annotations leg's.
+ */
+async function runCompanion(companion, token) {
+  try {
+    const data = await companion.fetch(token);
+    const recordCount = companion.recordCount(data);
+    await writeExtraKeyWithMetaAtomically({
+      key: companion.key,
+      data,
+      ttlSeconds: companion.ttlSeconds,
+      recordCount,
+    });
+    console.log(`  CF Radar ${companion.label}: published ${recordCount} record(s)`);
+    return { published: true };
+  } catch (err) {
+    console.warn(`  CF Radar ${companion.label} update failed: ${err?.message || err}`);
+    const retained = await extendExistingTtl([companion.key], companion.ttlSeconds);
+    console.warn(
+      retained
+        ? `  CF Radar ${companion.label}: last-good ${companion.key} retained at ${companion.ttlSeconds}s`
+        : `  CF Radar ${companion.label}: last-good ${companion.key} could not be retained — /api/health is the alarm`,
+    );
+    return { published: false, retained };
+  }
+}
+
+/**
+ * Companion attempts, memoized for the life of the process.
+ *
+ * runSeed wraps fetchAll in withRetry, so a retryable annotations failure
+ * re-enters fetchAll. Without this memo each retry would replay four Radar
+ * requests that already succeeded and republish keys that already published.
+ * One bounded pass per companion per run; the cron tick is the retry for a
+ * companion that failed.
+ */
+const companionAttempts = new Map();
+
+function publishCompanion(companion, token) {
+  if (!companionAttempts.has(companion.key)) {
+    companionAttempts.set(companion.key, runCompanion(companion, token));
+  }
+  return companionAttempts.get(companion.key);
+}
+
+// NOTE: runSeed() writes only the canonical key and its own extraKeys, and the
+// canonical publish is skipped whenever the annotations leg fails. The companion
+// keys MUST therefore be published here, before the annotations rejection is
+// rethrown, or an annotations outage would withhold two healthy sibling updates.
 async function fetchAll() {
   const token = process.env.CLOUDFLARE_API_TOKEN;
 
-  const [outagesResult, ddosResult, anomaliesResult] = await Promise.allSettled([
+  const [outagesResult] = await Promise.allSettled([
     fetchOutages(),
-    fetchDdosData(token),
-    fetchTrafficAnomalies(token),
+    ...COMPANIONS.map((companion) => publishCompanion(companion, token)),
   ]);
 
   if (outagesResult.status === 'rejected') throw outagesResult.reason;
-  if (ddosResult.status === 'rejected') console.warn(`  CF Radar DDoS fetch failed: ${ddosResult.reason?.message || ddosResult.reason}`);
-  if (anomaliesResult.status === 'rejected') console.warn(`  CF Radar traffic anomalies fetch failed: ${anomaliesResult.reason?.message || anomaliesResult.reason}`);
-
-  const ddos = ddosResult.status === 'fulfilled' ? ddosResult.value : null;
-  const anomalies = anomaliesResult.status === 'fulfilled' ? anomaliesResult.value : null;
-
-  if (ddos && (ddos.protocol.length > 0 || ddos.vector.length > 0)) {
-    await writeExtraKeyWithMeta(DDOS_KEY, ddos, DDOS_TTL, ddos.protocol.length + ddos.vector.length);
-  } else if (ddos) {
-    await writeSeedMeta(DDOS_KEY, 0);
-  }
-  if (anomalies && anomalies.anomalies.length > 0) {
-    await writeExtraKeyWithMeta(TRAFFIC_ANOMALIES_KEY, anomalies, ANOMALIES_TTL, anomalies.totalCount);
-  } else if (anomalies) {
-    await writeSeedMeta(TRAFFIC_ANOMALIES_KEY, 0);
-  }
-
   return outagesResult.value;
 }
 
@@ -253,6 +391,16 @@ runSeed('infra', 'outages', CANONICAL_KEY, fetchAll, {
   sourceVersion: 'cloudflare-radar-28d',
 
   declareRecords,
+  // The companion keys are written by publishCompanion(), outside runSeed's own
+  // extra-key phase, so runSeed does not know to retain them when the
+  // annotations leg fails, times out or is SIGTERMed. Each is declared at its
+  // OWN TTL — the canonical 3h would quietly triple the anomalies key's 1h
+  // contract. Their seed-meta keys are deliberately absent: those carry the
+  // 7-day floor and an EXPIRE at a data TTL would shorten them.
+  preserveKeyTtls: [
+    { key: DDOS_KEY, ttlSeconds: DDOS_TTL },
+    { key: TRAFFIC_ANOMALIES_KEY, ttlSeconds: ANOMALIES_TTL },
+  ],
   // CF Radar curated outage annotations are sparse (~1-2/wk, clustered, with
   // multi-day gaps). Zero mappable outages is the NORMAL state, not a fetch
   // failure — without this, runSeed takes the contract RETRY path on every

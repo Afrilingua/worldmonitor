@@ -37,8 +37,12 @@ const NOW = Date.parse('2026-09-07T12:00:00Z');
 const REDIS_ORIGIN = 'https://redis.radar-fixture.test';
 const GRACEFUL_FETCH_FAILURE_EXIT_CODE = 75;
 
-/** The child body. Serialized into `node --eval`, so it must stay self-contained. */
-async function seedFixture(entries, plan, now) {
+/**
+ * The child body. Serialized into `node --eval`, so it must stay
+ * self-contained: everything it needs arrives as an argument, never as a free
+ * identifier this module happens to have in scope.
+ */
+async function seedFixture(entries, plan, now, redisOrigin) {
   Date.now = () => now;
   const store = new Map(entries);
   const radarCalls = [];
@@ -112,7 +116,7 @@ async function seedFixture(entries, plan, now) {
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.url);
 
-    if (url.origin === REDIS_ORIGIN_PLACEHOLDER) {
+    if (url.origin === redisOrigin) {
       if (url.pathname.startsWith('/get/')) {
         const key = decodeURIComponent(url.pathname.slice('/get/'.length));
         return Response.json({ result: store.get(key) ?? null });
@@ -162,15 +166,13 @@ const DEFAULT_PLAN = {
 
 function runSeeder({ entries = [], plan = {}, now = NOW } = {}) {
   const merged = { ...DEFAULT_PLAN, ...plan };
-  const source = seedFixture
-    .toString()
-    .replace(/REDIS_ORIGIN_PLACEHOLDER/g, JSON.stringify(REDIS_ORIGIN));
+  const args = [entries, merged, now, REDIS_ORIGIN].map((value) => JSON.stringify(value)).join(', ');
   const result = spawnSync(
     process.execPath,
     [
       '--input-type=module',
       '--eval',
-      `await (${source})(${JSON.stringify(entries)}, ${JSON.stringify(merged)}, ${now});`,
+      `await (${seedFixture.toString()})(${args});`,
     ],
     {
       encoding: 'utf8',
