@@ -12,11 +12,12 @@ export interface FakeRedisState {
 
 export interface FakeRedisOptions {
   now?: () => number;
+  initialExpiresAt?: Record<string, number>;
 }
 
 export function createRedisFetch(
   fixtures: Record<string, unknown>,
-  { now = () => Date.now() }: FakeRedisOptions = {},
+  { now = () => Date.now(), initialExpiresAt = {} }: FakeRedisOptions = {},
 ): FakeRedisState {
   const redis = new Map<string, string>();
   const sortedSets = new Map<string, FakeRedisSortedSetEntry[]>();
@@ -44,6 +45,14 @@ export function createRedisFetch(
       if (deadline <= current) removeKey(key);
     }
   };
+
+  for (const [key, deadline] of Object.entries(initialExpiresAt)) {
+    if (redis.has(key) && Number.isFinite(deadline)) {
+      expiryAt.set(key, deadline);
+      expires.set(key, Math.max(0, (deadline - now()) / 1000));
+    }
+  }
+  expireDueKeys();
 
   const setExpiry = (key: string, ttlSeconds: number) => {
     const ttlMs = Math.max(0, ttlSeconds * 1000);
@@ -328,12 +337,12 @@ export function createRedisFetch(
 
 export function installRedis(
   fixtures: Record<string, unknown>,
-  opts: { keepVercelEnv?: boolean; now?: () => number } = {},
+  opts: FakeRedisOptions & { keepVercelEnv?: boolean } = {},
 ): FakeRedisState {
   process.env.UPSTASH_REDIS_REST_URL = 'https://redis.example';
   process.env.UPSTASH_REDIS_REST_TOKEN = 'token';
   if (!opts.keepVercelEnv) delete process.env.VERCEL_ENV;
-  const state = createRedisFetch(fixtures, { now: opts.now });
+  const state = createRedisFetch(fixtures, opts);
   globalThis.fetch = state.fetchImpl;
   return state;
 }
