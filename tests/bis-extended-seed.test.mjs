@@ -5,6 +5,12 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  GRACEFUL_FETCH_FAILURE_EXIT_CODE,
+  resolveSeedMetaTtl,
+  runSeed,
+} from '../scripts/_seed-utils.mjs';
+
+import {
   parseBisCSV,
   selectBestSeriesByCountry,
   buildDsr,
@@ -51,6 +57,54 @@ const SPP_CSV = [
   'Q,XM,628,R,2023-Q4,99.0',
   'Q,XM,628,R,2024-Q4,100.5',
 ].join('\n');
+
+const BIS_TTL_SECONDS = 3 * 24 * 3600;
+const BIS_META_TTL_SECONDS = resolveSeedMetaTtl(undefined, BIS_TTL_SECONDS);
+
+async function withRedisCapture(fetchImpl, fn) {
+  const originalUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const originalToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  process.env.UPSTASH_REDIS_REST_URL = 'https://mock.upstash.invalid';
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-token';
+  globalThis.fetch = async (url, options = {}) => {
+    const body = options.body ? JSON.parse(options.body) : null;
+    calls.push({ url: String(url), body });
+    return fetchImpl({ url: String(url), body, options });
+  };
+  try {
+    return await fn(calls);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.UPSTASH_REDIS_REST_URL;
+    else process.env.UPSTASH_REDIS_REST_URL = originalUrl;
+    if (originalToken === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    else process.env.UPSTASH_REDIS_REST_TOKEN = originalToken;
+  }
+}
+
+function redisOk(result = 'OK') {
+  return { ok: true, status: 200, json: async () => ({ result }) };
+}
+
+function pipelineCommands(calls) {
+  return calls
+    .filter(({ body }) => Array.isArray(body) && Array.isArray(body[0]))
+    .flatMap(({ body }) => body);
+}
+
+function assertExpireCohort(calls, expected) {
+  const expire = pipelineCommands(calls)
+    .filter(([command]) => command === 'EXPIRE')
+    .map(([, key, ttl]) => [key, ttl]);
+  for (const [key, ttl] of expected) {
+    assert.ok(
+      expire.some(([actualKey, actualTtl]) => actualKey === key && actualTtl === ttl),
+      `expected EXPIRE ${key} ${ttl}, got ${JSON.stringify(expire)}`,
+    );
+  }
+}
 
 describe('seed-bis-extended parser', () => {
   it('exports the canonical Redis keys', () => {
@@ -202,6 +256,143 @@ describe('seed-bis-extended parser', () => {
       globalThis.fetch = origFetch;
       if (origUrl === undefined) delete process.env.UPSTASH_REDIS_REST_URL; else process.env.UPSTASH_REDIS_REST_URL = origUrl;
       if (origTok === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN; else process.env.UPSTASH_REDIS_REST_TOKEN = origTok;
+    }
+  });
+
+  it('retains property payload and companion metadata with independent TTLs on empty or failed publication', async () => {
+    const pipelineOk = ({ body }) => Array.isArray(body) && Array.isArray(body[0])
+      ? { ok: true, status: 200, json: async () => body.map(() => ({ result: 1 })) }
+      : redisOk();
+    const httpFailure = {
+      ok: false,
+      status: 500,
+      headers: { get: () => null },
+      json: async () => ({ result: 'ERR' }),
+    };
+
+    await withRedisCapture(pipelineOk, async (calls) => {
+      await publishDatasetIndependently(KEYS.spp, null, META_KEYS.spp);
+      assert.equal(calls.filter(({ body }) => body?.[0] === 'SET').length, 0);
+      assertExpireCohort(calls, [
+        [KEYS.spp, BIS_TTL_SECONDS],
+        [META_KEYS.spp, BIS_META_TTL_SECONDS],
+      ]);
+    });
+
+    await withRedisCapture(({ body }) => {
+      if (body?.[0] === 'SET' && body?.[1] === KEYS.cpp) return httpFailure;
+      return pipelineOk({ body });
+    }, async (calls) => {
+      await publishDatasetIndependently(KEYS.cpp, {
+        entries: [{ countryCode: 'US', indexValue: 95.2 }],
+        fetchedAt: 'old',
+      }, META_KEYS.cpp);
+      assertExpireCohort(calls, [
+        [KEYS.cpp, BIS_TTL_SECONDS],
+        [META_KEYS.cpp, BIS_META_TTL_SECONDS],
+      ]);
+    });
+
+    await withRedisCapture(({ body }) => {
+      if (body?.[0] === 'SET' && body?.[1] === META_KEYS.spp) return httpFailure;
+      return pipelineOk({ body });
+    }, async (calls) => {
+      await publishDatasetIndependently(KEYS.spp, {
+        entries: [{ countryCode: 'US', indexValue: 108.5 }],
+        fetchedAt: 'new-payload',
+      }, META_KEYS.spp);
+      assertExpireCohort(calls, [
+        [KEYS.spp, BIS_TTL_SECONDS],
+        [META_KEYS.spp, BIS_META_TTL_SECONDS],
+      ]);
+    });
+  });
+
+  it('retention keeps missing property pairs absent when Redis reports EXPIRE 0', async () => {
+    const pipelineMissing = ({ body }) => Array.isArray(body) && Array.isArray(body[0])
+      ? { ok: true, status: 200, json: async () => body.map(() => ({ result: 0 })) }
+      : redisOk();
+
+    await withRedisCapture(pipelineMissing, async (calls) => {
+      await publishDatasetIndependently(KEYS.spp, null, META_KEYS.spp);
+      assert.equal(calls.filter(({ body }) => body?.[0] === 'SET').length, 0);
+      const expire = pipelineCommands(calls)
+        .filter(([command]) => command === 'EXPIRE')
+        .map(([, key, ttl]) => [key, ttl]);
+      assert.deepEqual(expire.sort(), [
+        [KEYS.spp, BIS_TTL_SECONDS],
+        [META_KEYS.spp, BIS_META_TTL_SECONDS],
+      ].sort());
+    });
+  });
+
+  it('runner retention manifest reaches both BIS property payload/meta pairs on total source failure', async () => {
+    const bis = await import('../scripts/seed-bis-extended.mjs');
+    assert.equal(typeof bis.runBisExtendedSeed, 'function');
+    let invocation;
+    await bis.runBisExtendedSeed({
+      runSeedImpl: async (...args) => {
+        invocation = args;
+      },
+    });
+    const manifest = invocation?.[4]?.preserveKeyTtls;
+    assert.ok(Array.isArray(manifest), 'runner must pass its preservation manifest to runSeed');
+    const ttlByKey = new Map(manifest.map(({ key, ttlSeconds }) => [key, ttlSeconds]));
+    for (const key of [KEYS.spp, KEYS.cpp]) {
+      assert.equal(ttlByKey.get(key), BIS_TTL_SECONDS, `missing payload retention for ${key}`);
+    }
+    for (const key of [META_KEYS.spp, META_KEYS.cpp]) {
+      assert.equal(ttlByKey.get(key), BIS_META_TTL_SECONDS, `missing metadata retention for ${key}`);
+    }
+    const originalExit = process.exit;
+    const originalListeners = new Set(process.rawListeners('SIGTERM'));
+    const pipelineOk = ({ body }) => Array.isArray(body) && Array.isArray(body[0])
+      ? { ok: true, status: 200, json: async () => body.map(() => ({ result: 1 })) }
+      : redisOk();
+    try {
+      process.exit = (code) => {
+        const error = new Error(`__bis_test_exit__:${code}`);
+        error.exitCode = code;
+        throw error;
+      };
+      await withRedisCapture(pipelineOk, async (calls) => {
+        let exitCode;
+        try {
+          await runSeed('economic', 'bis-extended', KEYS.dsr, async () => {
+            throw Object.assign(new Error('all BIS sources failed'), { nonRetryable: true });
+          }, {
+            ttlSeconds: BIS_TTL_SECONDS,
+            preserveKeyTtls: manifest,
+          });
+        } catch (error) {
+          exitCode = error.exitCode;
+        }
+        assert.equal(exitCode, GRACEFUL_FETCH_FAILURE_EXIT_CODE);
+        assertExpireCohort(calls, [
+          [KEYS.spp, BIS_TTL_SECONDS],
+          [META_KEYS.spp, BIS_META_TTL_SECONDS],
+          [KEYS.cpp, BIS_TTL_SECONDS],
+          [META_KEYS.cpp, BIS_META_TTL_SECONDS],
+        ]);
+        const retainedKeys = new Set([
+          KEYS.dsr,
+          KEYS.spp,
+          KEYS.cpp,
+          META_KEYS.dsr,
+          META_KEYS.spp,
+          META_KEYS.cpp,
+          'seed-meta:economic:bis-extended',
+        ]);
+        assert.equal(
+          calls.filter(({ body }) => body?.[0] === 'SET' && retainedKeys.has(body[1])).length,
+          0,
+        );
+      });
+    } finally {
+      process.exit = originalExit;
+      for (const listener of process.rawListeners('SIGTERM')) {
+        if (!originalListeners.has(listener)) process.removeListener('SIGTERM', listener);
+      }
     }
   });
 
