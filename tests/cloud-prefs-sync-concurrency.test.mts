@@ -62,6 +62,8 @@ interface HarnessControls {
   fireSignInRetry: () => void;
   holdNextGet: () => HeldRequest;
   holdNextPost: () => HeldRequest;
+  /** Make the backing store REJECT writes to `key`, as a full disk does. */
+  rejectWritesTo: (key: string) => void;
   seedRow: (token: string, data: Record<string, string>, syncVersion: number, schemaVersion?: number) => void;
   setToken: (token: string) => void;
   stateHistory: string[];
@@ -97,6 +99,14 @@ async function getBundledSource(enabled = true): Promise<string> {
           loader: 'ts',
         }));
         buildApi.onResolve({ filter: /^@\// }, (args) => {
+          // safe-storage is bundled REAL, not stubbed. It is the accessor every
+          // storage call in cloud-prefs-sync now goes through (#7833), so a
+          // stub would quietly replace the exact code this harness exists to
+          // drive against its fake Storage — including safeStorageSetChecked,
+          // whose quota-rejection report the sync-version guard depends on.
+          if (args.path === '@/utils/safe-storage') {
+            return { path: resolve(root, 'src/utils/safe-storage.ts'), namespace: 'file' };
+          }
           if (!(args.path in stubs)) throw new Error(`unexpected alias import: ${args.path}`);
           return { path: args.path, namespace: 'stub' };
         });
@@ -139,8 +149,13 @@ async function runHarness(
   const originalSetTimeout = globalThis.setTimeout;
   const stateHistory: string[] = [];
   const events: Array<{ detail: unknown; type: string }> = [];
+  const rejectedWriteKeys = new Set<string>();
   class TestStorage extends MiniStorage {
     override setItem(key: string, value: string): void {
+      // A full disk rejects the write for a large value while still accepting
+      // the small sync-version marker written straight afterwards — the exact
+      // asymmetry that let stale prefs overwrite cloud data (#7833 review).
+      if (rejectedWriteKeys.has(key)) throw new Error('QuotaExceededError');
       super.setItem(key, value);
       if (key === 'wm-cloud-sync-state') stateHistory.push(value);
     }
@@ -333,6 +348,7 @@ async function runHarness(
       for (const listener of documentListeners.get('visibilitychange') ?? []) listener();
     },
     events,
+    rejectWritesTo: (key: string) => { rejectedWriteKeys.add(key); },
     failNextGetTemporarily: () => {
       failNextGetTemporarily = true;
     },
@@ -826,5 +842,41 @@ describe('two-tab dirty-key persistence (#4746)', () => {
         'a settled upload must remove only the keys that tab durably synced',
       );
     });
+  });
+});
+
+describe('cloud prefs storage-rejection safety (#7833)', () => {
+  it('does not advance the sync version when a pref write is rejected', async () => {
+    // The data-loss shape review found: safeStorageSet swallowed a
+    // QuotaExceededError, so applyCloudBlob "succeeded", setSyncVersion
+    // advanced local to the cloud row's version, and the NEXT upload posted the
+    // stale local value back over good cloud data with no conflict to stop it.
+    // The pref value is what gets rejected; the small version marker would
+    // still fit, which is exactly why the version must not be written.
+    const result = await runHarness(async (cloudPrefs, controls) => {
+      controls.seedRow('test-token', { 'wm-market-watchlist-v1': 'cloud-value' }, 9);
+      controls.rejectWritesTo('wm-market-watchlist-v1');
+      await cloudPrefs.onSignIn('user-1', 'full');
+    });
+
+    assert.notEqual(
+      result.localSyncVersion,
+      9,
+      'local must not claim the cloud version after a write that never landed',
+    );
+    assert.equal(result.state, 'error', 'a rejected reconciliation must surface as error');
+  });
+
+  it('still reconciles normally when the same write is accepted', async () => {
+    // The control. Without it the assertions above would also pass if sign-in
+    // were broken outright, which is the failure mode a negative-only
+    // regression test cannot see.
+    const result = await runHarness(async (cloudPrefs, controls) => {
+      controls.seedRow('test-token', { 'wm-market-watchlist-v1': 'cloud-value' }, 9);
+      await cloudPrefs.onSignIn('user-1', 'full');
+    });
+
+    assert.equal(result.localSyncVersion, 9);
+    assert.equal(result.state, 'synced');
   });
 });

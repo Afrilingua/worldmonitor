@@ -64,21 +64,37 @@ describe('cloud-prefs-sync under a null localStorage', () => {
 });
 
 describe('settings export under a null localStorage', () => {
-  it('exports an empty settings payload instead of throwing', async () => {
+  // NOT "returns an empty export". The caller does
+  // `try { exportSettings(); showToast(exportSuccess) } catch { showToast(exportFailed) }`,
+  // so returning quietly turns an unreadable store into a green "Exported"
+  // toast over a file containing nothing. Failing is the correct outcome; what
+  // #7833 owes this path is a legible failure, not a silent one.
+  it('fails loudly rather than handing back an empty backup', async () => {
     const { exportSettings } = await import('@/utils/settings-persistence');
-    // Spy rather than stubGlobal: replacing `URL` wholesale leaves happy-dom
-    // without a URL constructor, and the anchor click below then blows up
-    // inside its navigator instead of inside the code under test.
     const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:stub');
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
-    // The download anchor is clicked for real; happy-dom would try to navigate.
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     stubNullStorage();
 
-    expect(() => exportSettings()).not.toThrow();
+    expect(() => exportSettings()).toThrow(/storage/i);
+    // The decisive assertion: no file was ever produced, so nothing downstream
+    // can mistake this for a successful backup.
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
 
+  it('still exports normally when storage works', async () => {
+    const { exportSettings } = await import('@/utils/settings-persistence');
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:stub');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    localStorage.setItem('worldmonitor-variant', 'full');
+    localStorage.setItem('positive-threshold', '7');
+
+    expect(() => exportSettings()).not.toThrow();
     const blob = createObjectURL.mock.calls[0]?.[0] as Blob;
-    expect(JSON.parse(await blob.text()).data).toEqual({});
+    const exported = JSON.parse(await blob.text());
+    expect(exported.variant).toBe('full');
+    expect(exported.data['positive-threshold']).toBe('7');
   });
 });
 
@@ -88,5 +104,22 @@ describe('persistent-cache prefix invalidation under a null localStorage', () =>
     stubNullStorage();
 
     expect(() => __testing__.deleteFromLocalStorageByPrefix('news')).not.toThrow();
+  });
+});
+
+describe('custom widgets under a null localStorage', () => {
+  it('degrades the whole load chain to an empty list rather than throwing', async () => {
+    // NOTE what this does and does not prove. `loadFromStorage` already
+    // catches, so `materializeWidgets` never reaches its PRO side-key read on
+    // a broken store — routing that read through safeStorageGet was defence in
+    // depth and a guard requirement, NOT a live crash fix. What this pins is
+    // the chain-level resilience the module documents ("degrades those failures
+    // to [] for dashboard resilience"), which nothing else asserted.
+    stubNullStorage();
+
+    const { loadWidgets } = await import('@/services/widget-store');
+
+    expect(() => loadWidgets()).not.toThrow();
+    expect(loadWidgets()).toEqual([]);
   });
 });

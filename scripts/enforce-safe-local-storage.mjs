@@ -35,16 +35,26 @@
 //
 // Note what a green run does and does not mean. It means "no NEW dereference
 // outside `safe-storage.ts`, and the recorded legacy population still matches
-// the tree". It does NOT mean storage access is safe everywhere: a local alias
-// (`const ls = globalThis.localStorage; ls.getItem(k)`) still slips through, as
-// does a `sessionStorage` deref, which has the same null shape. Widen the
-// patterns when a new idiom appears rather than reading silence as proof.
+// the tree". It does NOT mean storage access is safe everywhere. Known gaps,
+// all of which need an AST pass rather than a wider regex to close:
+//
+//   - a local alias (`const ls = globalThis.localStorage; ls.getItem(k)`) or a
+//     destructure (`const { getItem } = localStorage`);
+//   - a `sessionStorage` deref, which has the identical null shape;
+//   - a count-NEUTRAL swap inside an already-inventoried file: deleting one
+//     dereference and adding another keeps N the same and passes green.
+//
+// Widen the patterns when a new idiom appears rather than reading silence as
+// proof. The review that shipped this gate found three separate bypasses in its
+// own first draft, which is the honest calibration for how much a green run
+// buys you.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, lstatSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isMainModule } from './lib/main-module.mjs';
+import { collectTsFiles, stripComments } from './lib/source-scan.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -78,16 +88,29 @@ export const RAW_STORAGE_PATTERNS = [
     probe: 'localStorage[key] = value;',
   },
   {
-    label: 'window.localStorage',
-    re: /\bwindow(?:\?\.)?\.localStorage\b/,
+    // Every global that names the same Storage object. The receiver prefix is
+    // load-bearing for two reasons: `(?<![.?])` above deliberately refuses to
+    // match a dotted `X.localStorage`, so WITHOUT this alternation
+    // `globalThis.localStorage.getItem(k)` matched nothing at all — and the
+    // repo already ships the safe `globalThis.localStorage?.getItem(k)` at
+    // ChatAnalystPanel.ts:133, so the crashing variant was one deleted
+    // character away with CI green.
+    //
+    // The optional chain is `\??\.`, not `(?:\?\.)?\.` — the latter demanded
+    // `window?..localStorage` (two dots) and could never match anything.
+    label: '<global>.localStorage',
+    re: /\b(?:window|globalThis|self|top|parent)\??\.localStorage\b/,
     probe: 'const ls = window.localStorage;',
+    extraProbes: [
+      'globalThis.localStorage.getItem(key);',
+      'self.localStorage.setItem(key, value);',
+      'window?.localStorage.getItem(key);',
+    ],
   },
   {
     // `Storage.prototype.setItem.call(localStorage, …)` throws exactly the same
     // TypeError on a null receiver, and reads as deliberate enough that a
-    // reviewer waves it through. cloud-prefs-sync needs the prototype form so
-    // an own-property override on the instance cannot intercept a state-key
-    // write; it wraps each one in a null-safe accessor instead.
+    // reviewer waves it through.
     label: 'Storage.prototype.<member>.call(…)',
     re: /\bStorage\.prototype\.\w+\.call\(/,
     probe: 'Storage.prototype.setItem.call(localStorage, key, value);',
@@ -99,12 +122,15 @@ export const RAW_STORAGE_PATTERNS = [
  * currently lives at this path — move it and this entry has to move with it,
  * which is the point.
  *
- * Nothing else is exempt. The other three "safe storage" implementations
+ * Nothing else is exempt. The remaining "safe storage" implementations
  * (`loadFromStorage`/`saveToStorage` in `src/utils/index.ts`, the file-private
- * helpers in `browser-key-session.ts` and `cloud-prefs-sync.ts`, and
- * `safeLocalStorage()` in `passkey-offer-state.ts`) are counted in the
- * inventory below rather than waved through, so the duplication stays visible
- * and a fourth implementation cannot land quietly.
+ * helpers in `browser-key-session.ts`, and `safeLocalStorage()` in
+ * `passkey-offer-state.ts`) are counted in the inventory below rather than
+ * waved through, so the duplication stays visible and a further implementation
+ * cannot land quietly. #7833 review caught this file's own author adding one:
+ * cloud-prefs-sync grew a private rawGet/rawSet/rawRemove trio justified by a
+ * threat (an own-property override of `localStorage`) that exists nowhere in
+ * this repo. It now uses the shared helper.
  */
 export const GUARD_EXEMPT_FILES = new Set(['src/utils/safe-storage.ts']);
 
@@ -154,10 +180,11 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
   'src/App.ts :: localStorage.<member> x74',
   'src/app/event-handlers.ts :: localStorage.<member> x5',
   'src/app/map-dimension-control.ts :: localStorage.<member> x1',
-  'src/app/panel-layout.ts :: localStorage.<member> x7',
-  'src/app/pro-activation-controller.ts :: window.localStorage x8',
+  'src/app/panel-layout.ts :: localStorage.<member> x9',
+  'src/app/pro-activation-controller.ts :: <global>.localStorage x8',
   'src/bootstrap/sw-update.ts :: localStorage.<member> x1',
   'src/components/AviationCommandBar.ts :: localStorage.<member> x1',
+  'src/components/ChatAnalystPanel.ts :: <global>.localStorage x2',
   'src/components/ChatAnalystPanel.ts :: localStorage?.<member> x2',
   'src/components/ConsumerPricesPanel.ts :: localStorage.<member> x2',
   'src/components/GlobeMap.ts :: localStorage.<member> x2',
@@ -172,10 +199,10 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
   'src/config/basemap.ts :: localStorage.<member> x2',
   'src/config/beta.ts :: localStorage.<member> x1',
   'src/config/variant.ts :: localStorage.<member> x1',
-  'src/main.ts :: localStorage.<member> x2',
+  'src/main.ts :: localStorage.<member> x4',
   'src/mcp-grant-main.ts :: localStorage.<member> x1',
   'src/services/ai-flow-settings.ts :: localStorage.<member> x4',
-  'src/services/analytics.ts :: window.localStorage x3',
+  'src/services/analytics.ts :: <global>.localStorage x3',
   'src/services/anonymous-identity-storage.ts :: localStorage.<member> x5',
   'src/services/aviation/watchlist.ts :: localStorage.<member> x2',
   'src/services/breaking-news-alerts.ts :: localStorage.<member> x4',
@@ -186,7 +213,7 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
   'src/services/font-scale-settings.ts :: localStorage.<member> x2',
   'src/services/font-settings.ts :: localStorage.<member> x2',
   'src/services/globe-render-settings.ts :: localStorage.<member> x6',
-  'src/services/i18n.ts :: localStorage.<member> x2',
+  'src/services/i18n.ts :: localStorage.<member> x3',
   'src/services/live-stream-settings.ts :: localStorage.<member> x2',
   'src/services/map-mode-preference.ts :: localStorage.<member> x1',
   'src/services/market-watchlist.ts :: localStorage.<member> x6',
@@ -197,12 +224,10 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
   'src/services/sentiment-gate.ts :: localStorage.<member> x1',
   'src/services/tab-store.ts :: localStorage.<member> x2',
   'src/services/telegram-watchlist.ts :: localStorage.<member> x2',
+  'src/services/trending-keywords.ts :: <global>.localStorage x1',
   'src/services/trending-keywords.ts :: localStorage.<member> x2',
-  'src/services/trending-keywords.ts :: window.localStorage x1',
   'src/services/webcams/pinned-store.ts :: localStorage.<member> x2',
   'src/services/widget-store.ts :: localStorage.<member> x4',
-  'src/utils/cloud-prefs-sync.ts :: Storage.prototype.<member>.call(…) x2',
-  'src/utils/cloud-prefs-sync.ts :: localStorage?.<member> x1',
   'src/utils/followed-only-chip.ts :: localStorage.<member> x4',
   'src/utils/index.ts :: localStorage.<member> x2',
   'src/utils/panel-storage.ts :: localStorage.<member> x3',
@@ -218,19 +243,6 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
  */
 export const MIN_SCANNED_FILES = 700;
 
-/**
- * Blank out comments while preserving offsets and line count. A mention of an
- * idiom in a comment is not a dereference: scanning raw text both false-fails
- * a correctly-migrated file that documents the rule, and — worse, because it
- * is silent — keeps a legacy entry "observed" after its only real call is
- * gone, so the stale check never asks anyone to delete it.
- */
-export function stripComments(source) {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, ' '));
-}
-
 /** `<idiom> xN` for every raw-storage idiom present in `code`, with counts. */
 export function rawStorageUsesIn(code) {
   return RAW_STORAGE_PATTERNS.flatMap(({ label, re }) => {
@@ -239,19 +251,9 @@ export function rawStorageUsesIn(code) {
   });
 }
 
-export function collectTsFiles(dir) {
-  const out = [];
-  for (const entry of readdirSync(dir)) {
-    const abs = path.join(dir, entry);
-    if (statSync(abs).isDirectory()) out.push(...collectTsFiles(abs));
-    else if (abs.endsWith('.ts')) out.push(abs);
-  }
-  return out.sort();
-}
-
 /** Scan the tree and return everything the assertions and the CLI both need. */
 export function scanRepo(root = REPO_ROOT) {
-  const allFiles = collectTsFiles(path.join(root, 'src'));
+  const allFiles = collectTsFiles(path.join(root, 'src'), { readdirSync, lstatSync, join: path.join });
   const scanned = allFiles.filter(
     (abs) => !GUARD_EXEMPT_FILES.has(path.relative(root, abs)),
   );

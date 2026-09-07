@@ -629,7 +629,7 @@ fi
 # — WORLDMONITOR-122 came in through src/App.ts and src/main.ts (#7833).
 if changed '^(src/|scripts/enforce-safe-local-storage\.mjs$)'; then
   echo "Running raw localStorage check..."
-  npm run lint:local-storage || exit 1
+  npm run lint:safe-local-storage || exit 1
 fi
 
 if changed '^(src/|api/|server/|scripts/check-sentry-coverage\.mjs$)'; then

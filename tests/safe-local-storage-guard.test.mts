@@ -9,8 +9,8 @@ import {
   RAW_STORAGE_PATTERNS,
   rawStorageUsesIn,
   scanRepo,
-  stripComments,
 } from '../scripts/enforce-safe-local-storage.mjs';
+import { stripComments } from '../scripts/lib/source-scan.mjs';
 
 // ---------------------------------------------------------------------------
 // Why this test exists (#7833)
@@ -44,12 +44,33 @@ describe('raw localStorage guard (#7833)', () => {
     );
   });
 
+  it('catches every receiver prefix that names the same Storage object', () => {
+    // Negative coverage, and the reason it exists: "every pattern matches its
+    // own probe" is circular — it cannot see an idiom class no probe covers.
+    // All three of these returned [] in the first draft of this gate, while the
+    // SAFE `globalThis.localStorage?.getItem(k)` was the one form it caught, so
+    // the crashing variant was one deleted character away with CI green.
+    for (const src of [
+      'globalThis.localStorage.getItem(k);',
+      'self.localStorage.setItem(k, v);',
+      'window?.localStorage.getItem(k);',
+      'window.localStorage.removeItem(k);',
+      'top.localStorage.getItem(k);',
+      'parent.localStorage.getItem(k);',
+    ]) {
+      assert.notDeepEqual(rawStorageUsesIn(src), [], `${src} is not caught by any pattern`);
+    }
+  });
+
   it('every pattern matches its own probe', () => {
     // Asserting something like `re.source.length > 0` would be a tautology:
     // even `new RegExp('').source` is the 4-character string "(?:)". Matching
     // a fixture is the only assertion that goes red on a typo'd pattern.
-    for (const { label, re, probe } of RAW_STORAGE_PATTERNS) {
+    for (const { label, re, probe, extraProbes = [] } of RAW_STORAGE_PATTERNS) {
       assert.ok(re.test(probe), `${label} no longer matches its own probe — the pattern has drifted`);
+      for (const extra of extraProbes) {
+        assert.ok(re.test(extra), `${label} no longer matches its recorded variant: ${extra}`);
+      }
       assert.deepEqual(
         rawStorageUsesIn(probe).filter((entry) => entry.startsWith(`${label} `)),
         [`${label} x1`],
@@ -79,6 +100,23 @@ describe('raw localStorage guard (#7833)', () => {
       rawStorageUsesIn('const v = localStorage.getItem(k);'),
       ['localStorage.<member> x1'],
     );
+  });
+
+  it('preserves real code that merely LOOKS like a comment boundary', () => {
+    // The bug that made this gate blind on 1826 lines of panel-layout.ts: the
+    // old two-regex stripper ran its block-comment pass over RAW source, so a
+    // `/*` inside a line comment or a string opened a bogus region that ran to
+    // the next `*/` and swallowed everything between. Asserting only that
+    // comments are REMOVED cannot catch that; this asserts code SURVIVES.
+    const tricky = [
+      "// see the panels declared in src/components/*Panel.ts for the list",
+      "const glob = '../locales/*.json';",
+      "const url = 'https://example.com/x'; localStorage.getItem('a');",
+      "localStorage.setItem('b', '1');",
+      "/* a real block comment mentioning localStorage.getItem */",
+      "localStorage.removeItem('c');",
+    ].join('\n');
+    assert.deepEqual(rawStorageUsesIn(stripComments(tricky)), ['localStorage.<member> x3']);
   });
 
   it('does not count a dereference that only appears in a comment', () => {
@@ -142,6 +180,11 @@ describe('raw localStorage guard (#7833)', () => {
       'src/services/runtime.ts',
       'src/services/tv-mode.ts',
       'src/settings-main.ts',
+      // Re-listing this one would mean the private rawGet/rawSet/rawRemove
+      // trio came back. It was added by #7833 itself and removed in review:
+      // its justification (bypassing an own-property override of
+      // `localStorage`) described a threat that exists nowhere in this repo.
+      'src/utils/cloud-prefs-sync.ts',
     ]) {
       assert.equal(
         LEGACY_RAW_LOCAL_STORAGE.some((entry) => entry.startsWith(`${file} ::`)),

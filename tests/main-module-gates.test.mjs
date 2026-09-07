@@ -15,7 +15,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const MAIN_MODULE_HELPER = join(REPO_ROOT, 'scripts/lib/main-module.mjs');
+// Every scripts/lib/ module a gate imports has to be copied into the fixture,
+// not just main-module.mjs — a gate that also imports source-scan.mjs would
+// otherwise fail the symlink run with a module-resolution error that looks
+// exactly like the silent no-op this test exists to detect.
+const SHARED_LIB_MODULES = ['scripts/lib/main-module.mjs', 'scripts/lib/source-scan.mjs'];
 const INLINE_MAIN_GUARD = /(?:import\.meta\.url\s*===\s*pathToFileURL\s*\(\s*process\.argv\s*\[\s*1\s*\]\s*\)\.href|pathToFileURL\s*\(\s*process\.argv\s*\[\s*1\s*\]\s*\)\.href\s*===\s*import\.meta\.url)/;
 
 const GATES = [
@@ -77,7 +81,7 @@ function createSymlinkedGateFixture(gate) {
   mkdirSync(dirname(scriptPath), { recursive: true });
   mkdirSync(join(root, 'scripts/lib'), { recursive: true });
   copyFileSync(join(REPO_ROOT, gate.file), scriptPath);
-  copyFileSync(MAIN_MODULE_HELPER, join(root, 'scripts/lib/main-module.mjs'));
+  for (const lib of SHARED_LIB_MODULES) copyFileSync(join(REPO_ROOT, lib), join(root, lib));
   gate.setup(root);
 
   const linkedRoot = join(root, 'linked-checkout');

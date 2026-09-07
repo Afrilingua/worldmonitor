@@ -13,7 +13,7 @@ export interface ImportResult {
 
 import { CLOUD_SYNC_KEYS } from './sync-keys';
 import { invalidatePanelStorageCacheForKeys } from './panel-storage';
-import { safeStorageGet, safeStorageKeys } from './safe-storage';
+import { isStorageAvailable, safeStorageGet, safeStorageKeys } from './safe-storage';
 
 const MAX_IMPORT_SIZE_BYTES = 5 * 1024 * 1024;
 
@@ -45,10 +45,15 @@ export const __testing__ = { isSettingsKey };
 export function exportSettings(): void {
   const data: Record<string, string> = {};
 
-  // A null `localStorage` (Android WebView with DOM storage disabled) used to
-  // throw straight out of this function, so the Export button did nothing at
-  // all on those devices — #7833. There is nothing to export there, so the
-  // honest outcome is an empty payload the user still receives as a file.
+  // Storage that cannot be read has no settings to export, and handing the
+  // user a downloadable file anyway is worse than failing: the caller in
+  // preferences-content.ts wraps this in try/catch and shows `exportSuccess`
+  // when it returns, so a silent empty payload becomes a green "Exported"
+  // toast over a backup containing nothing (#7833 review). Stay loud.
+  if (!isStorageAvailable()) {
+    throw new Error('Settings export requires browser storage, which is unavailable here.');
+  }
+
   for (const key of safeStorageKeys()) {
     if (!isSettingsKey(key)) continue;
     const value = safeStorageGet(key);

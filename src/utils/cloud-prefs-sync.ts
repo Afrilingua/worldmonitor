@@ -56,6 +56,13 @@ import { applyObservableCloudPrefsFlushSuccess } from './cloud-prefs-flush';
 import { SerializedAsyncQueue } from './serialized-async-queue';
 import { TimeoutError, withTimeout } from './with-timeout';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+import {
+  safeStorageGet,
+  safeStorageRemove,
+  safeStorageRemoveChecked,
+  safeStorageSet,
+  safeStorageSetChecked,
+} from '@/utils/safe-storage';
 
 export { isTemporaryCloudPrefsStatus, parseRetryAfterSeconds } from './cloud-prefs-retry';
 
@@ -210,17 +217,17 @@ let _dirtyKeysUserId: string | null = null;
  */
 function writePersistedDirtyKeys(payload: { userId: string; keys: string[] }): void {
   if (payload.keys.length === 0) {
-    rawRemove(KEY_DIRTY_KEYS);
+    safeStorageRemove(KEY_DIRTY_KEYS);
     return;
   }
-  rawSet(KEY_DIRTY_KEYS, JSON.stringify(payload));
+  safeStorageSet(KEY_DIRTY_KEYS, JSON.stringify(payload));
 }
 
 function persistDirtyKeyAddition(key: CloudSyncKey): void {
   if (!_dirtyKeysUserId) return;
   try {
     writePersistedDirtyKeys(unionPersistedDirtyKeys(
-      rawGet(KEY_DIRTY_KEYS),
+      safeStorageGet(KEY_DIRTY_KEYS),
       CLOUD_SYNC_KEYS,
       _dirtyKeysUserId,
       [key],
@@ -234,7 +241,7 @@ function persistSettledDirtyKeyRemovals(removals: string[]): void {
   if (!_dirtyKeysUserId) return;
   try {
     writePersistedDirtyKeys(withoutPersistedDirtyKeys(
-      rawGet(KEY_DIRTY_KEYS),
+      safeStorageGet(KEY_DIRTY_KEYS),
       CLOUD_SYNC_KEYS,
       _dirtyKeysUserId,
       removals,
@@ -247,11 +254,11 @@ function persistSettledDirtyKeyRemovals(removals: string[]): void {
 function persistDirtyKeys(): void {
   try {
     if (_dirtyKeys.size === 0) {
-      rawRemove(KEY_DIRTY_KEYS);
+      safeStorageRemove(KEY_DIRTY_KEYS);
       return;
     }
     if (!_dirtyKeysUserId) return;
-    rawSet(KEY_DIRTY_KEYS, JSON.stringify({
+    safeStorageSet(KEY_DIRTY_KEYS, JSON.stringify({
       userId: _dirtyKeysUserId,
       keys: [..._dirtyKeys],
     }));
@@ -264,7 +271,7 @@ function hydrateDirtyKeysFromStorage(userId: string): void {
   try {
     _dirtyKeys.clear();
     _dirtyKeysUserId = userId;
-    const raw = rawGet(KEY_DIRTY_KEYS);
+    const raw = safeStorageGet(KEY_DIRTY_KEYS);
     for (const key of parsePersistedDirtyKeys(raw, CLOUD_SYNC_KEYS, userId)) {
       _dirtyKeys.add(key as CloudSyncKey);
     }
@@ -360,60 +367,19 @@ export function isCloudSyncEnabled(): boolean {
   return isEnabled();
 }
 
-// ── Storage accessors ─────────────────────────────────────────────────────────
-
-/**
- * This module's `localStorage` accessors. Android WebView with DOM storage
- * disabled exposes `localStorage` as NULL rather than throwing, so an
- * unguarded call is a TypeError — and `onSignIn` runs its ownership-sidecar
- * reconciliation on the boot path, where that TypeError takes the whole
- * sign-in down (#7833, the same class as WORLDMONITOR-122).
- *
- * These are deliberately NOT `@/utils/safe-storage`. The writes go through
- * `Storage.prototype` so an own-property override on the `localStorage`
- * instance cannot intercept them, which is what lets a state-key write stay
- * distinguishable from the pref-key writes `install()` patches. Reads degrade
- * to "key absent" and writes to a no-op, matching the shared helper's contract.
- */
-function rawGet(key: string): string | null {
-  try {
-    return localStorage?.getItem(key) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function rawSet(key: string, value: string): void {
-  try {
-    if (!localStorage) return;
-    Storage.prototype.setItem.call(localStorage, key, value);
-  } catch {
-    /* storage unavailable or full */
-  }
-}
-
-function rawRemove(key: string): void {
-  try {
-    if (!localStorage) return;
-    Storage.prototype.removeItem.call(localStorage, key);
-  } catch {
-    /* storage unavailable */
-  }
-}
-
 // ── State helpers ─────────────────────────────────────────────────────────────
 
 export function getSyncVersion(): number {
-  return parseInt(rawGet(KEY_SYNC_VERSION) ?? '0', 10) || 0;
+  return parseInt(safeStorageGet(KEY_SYNC_VERSION) ?? '0', 10) || 0;
 }
 
 function setSyncVersion(v: number): void {
   // A state key, not a pref key — nothing here should mark the blob dirty.
-  rawSet(KEY_SYNC_VERSION, String(v));
+  safeStorageSet(KEY_SYNC_VERSION, String(v));
 }
 
 function setState(s: SyncState): void {
-  rawSet(KEY_SYNC_STATE, s);
+  safeStorageSet(KEY_SYNC_STATE, s);
 }
 
 // ── Blob helpers ──────────────────────────────────────────────────────────────
@@ -421,7 +387,7 @@ function setState(s: SyncState): void {
 function buildCloudBlob(): Record<string, string> {
   const blob: Record<string, string> = {};
   for (const key of CLOUD_SYNC_KEYS) {
-    const val = rawGet(key);
+    const val = safeStorageGet(key);
     if (val !== null) blob[key] = val;
   }
   return blob;
@@ -456,7 +422,7 @@ function dispatchCloudPrefsSignInTerminal(
 }
 
 function clearForeignOwnershipSidecars(userId: string): void {
-  const lastSignedInAs = rawGet(KEY_LAST_SIGNED_IN_AS);
+  const lastSignedInAs = safeStorageGet(KEY_LAST_SIGNED_IN_AS);
   if (lastSignedInAs === null || lastSignedInAs === userId) return;
 
   // Preferences intentionally survive sign-out, but ownership sidecars are
@@ -464,12 +430,28 @@ function clearForeignOwnershipSidecars(userId: string): void {
   // keeping the prior account's local values attributes A's gate decisions to
   // B. B's explicit cloud values will still be applied later in this attempt.
   for (const key of ACCOUNT_PROVENANCE_SYNC_KEYS) {
-    rawRemove(key);
+    safeStorageRemove(key);
   }
 }
 
-function applyCloudBlob(data: Record<string, unknown>, syncVersion?: number): void {
+/**
+ * Write the cloud blob over local prefs. Returns false when a usable store
+ * REJECTED one of the writes.
+ *
+ * The return value is load-bearing, not decoration. Every caller follows this
+ * with `setSyncVersion` / `setLocalSchemaVersion`, and those markers are tiny
+ * while the pref values are not — so a `QuotaExceededError` can drop the value
+ * and still let the marker land. Local then claims to be at cloud's version
+ * while holding stale values, and the next upload posts them back over good
+ * cloud data. Before #7833 the raw `setItem` threw and aborted the whole
+ * reconciliation, which is the safety this restores.
+ *
+ * `changedKeys` now records only writes that actually landed, so a consumer of
+ * CLOUD_PREFS_APPLIED cannot re-read storage for a key that never changed.
+ */
+function applyCloudBlob(data: Record<string, unknown>, syncVersion?: number): boolean {
   const changedKeys: CloudSyncKey[] = [];
+  let allWritesLanded = true;
   _suppressPatch = true;
   try {
     for (const key of CLOUD_SYNC_KEYS) {
@@ -479,17 +461,26 @@ function applyCloudBlob(data: Record<string, unknown>, syncVersion?: number): vo
       const action = resolveCloudBlobKeyAction(key, data);
       if (action.kind === 'keep') continue;
       if (action.kind === 'set') {
-        if (rawGet(key) !== action.value) changedKeys.push(key);
-        rawSet(key, action.value);
+        const wasDifferent = safeStorageGet(key) !== action.value;
+        if (safeStorageSetChecked(key, action.value)) {
+          if (wasDifferent) changedKeys.push(key);
+        } else {
+          allWritesLanded = false;
+        }
       } else {
-        if (rawGet(key) !== null) changedKeys.push(key);
-        rawRemove(key);
+        const wasPresent = safeStorageGet(key) !== null;
+        if (safeStorageRemoveChecked(key)) {
+          if (wasPresent) changedKeys.push(key);
+        } else {
+          allWritesLanded = false;
+        }
       }
     }
   } finally {
     _suppressPatch = false;
   }
   dispatchCloudPrefsApplied(changedKeys, syncVersion);
+  return allWritesLanded;
 }
 
 interface AppliedMigrations {
@@ -524,14 +515,14 @@ function applyMigrationsWithSchemaVersion(
 }
 
 function getLocalSchemaVersion(): number {
-  const raw = rawGet(KEY_LOCAL_SCHEMA_VERSION);
+  const raw = safeStorageGet(KEY_LOCAL_SCHEMA_VERSION);
   if (raw === null) return 1; // No marker yet → assume oldest, run migrations
   const v = parseInt(raw, 10);
   return Number.isFinite(v) && v > 0 ? v : 1;
 }
 
 function setLocalSchemaVersion(v: number): void {
-  rawSet(KEY_LOCAL_SCHEMA_VERSION, String(v));
+  safeStorageSet(KEY_LOCAL_SCHEMA_VERSION, String(v));
 }
 
 /**
@@ -561,7 +552,13 @@ function migrateLocalBlobIfNeeded(): PreparedCloudBlob {
   }
   const migrated = applyMigrationsWithSchemaVersion(blob, localSchema);
   const migratedData = migrated.data as Record<string, string>;
-  if (migratedData !== blob) applyCloudBlob(migratedData);
+  if (migratedData !== blob && !applyCloudBlob(migratedData)) {
+    // The migrated blob did not land. Recording the new schema version anyway
+    // would cement the unmigrated local data at the new version — the exact
+    // poisoning KEY_LOCAL_SCHEMA_VERSION exists to prevent. Post what we have
+    // at the OLD version so the next attempt migrates again.
+    return { data: blob, schemaVersion: localSchema };
+  }
   setLocalSchemaVersion(migrated.schemaVersion);
   return { data: migratedData, schemaVersion: migrated.schemaVersion };
 }
@@ -594,8 +591,8 @@ function showUndoToast(prevBlobJson: string): void {
         for (const [k, v] of Object.entries(prev)) {
           if (!CLOUD_SYNC_KEYS.includes(k as CloudSyncKey)) continue;
           const key = k as CloudSyncKey;
-          if (rawGet(key) !== v) restoredKeys.push(key);
-          rawSet(key, v);
+          if (safeStorageGet(key) !== v) restoredKeys.push(key);
+          safeStorageSet(key, v);
         }
       } finally {
         _suppressPatch = false;
@@ -730,7 +727,13 @@ async function resolveConflictWithMerge(token: string, variant: string, callerGe
   }
   const migratedCloud = applyMigrationsWithSchemaVersion(fresh.data, fresh.schemaVersion ?? 1);
   const merged = mergeCloudWithLocalDirty(migratedCloud.data, buildCloudBlob(), _dirtyKeys);
-  applyCloudBlob(merged, fresh.syncVersion);
+  if (!applyCloudBlob(merged, fresh.syncVersion)) {
+    // A usable store rejected part of the merge. Advancing the version here
+    // would let the next upload post the stale local values back over the
+    // cloud row we just fetched (#7833 review).
+    setState('error');
+    return false;
+  }
   setSyncVersion(fresh.syncVersion);
   setLocalSchemaVersion(migratedCloud.schemaVersion);
   const retry = await postCloudPrefs(token, variant, merged, fresh.syncVersion, migratedCloud.schemaVersion);
@@ -745,7 +748,7 @@ async function resolveConflictWithMerge(token: string, variant: string, callerGe
   // write would durably corrupt their persisted dirty-key entry.
   setSyncVersion(retry.syncVersion);
   clearSettledDirtyKeys(merged);
-  rawSet(KEY_LAST_SYNC_AT, String(Date.now()));
+  safeStorageSet(KEY_LAST_SYNC_AT, String(Date.now()));
   setState('synced');
   return true;
 }
@@ -813,7 +816,13 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
         const toApply = hasDirty
           ? mergeCloudWithLocalDirty(migrated.data, buildCloudBlob(), _dirtyKeys)
           : migrated.data;
-        applyCloudBlob(toApply, cloud.syncVersion);
+        if (!applyCloudBlob(toApply, cloud.syncVersion)) {
+          // Same reasoning as resolveConflictWithMerge: a rejected write must
+          // not leave local claiming cloud's version over stale values.
+          setState('error');
+          completeSignInAttempt(attempt, 'error');
+          return;
+        }
         setSyncVersion(cloud.syncVersion);
         // An ambiguous schema-5 fingerprint deliberately stops at schema 4,
         // so the same row remains eligible for a future disambiguated retry.
@@ -822,7 +831,7 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
         // catches up — otherwise the migration re-runs every load) OR when we
         // merged in local dirty keys the cloud row doesn't have yet.
         if (migrationChanged || hasDirty) schedulePrefUpload(variant);
-        rawSet(KEY_LAST_SYNC_AT, String(Date.now()));
+        safeStorageSet(KEY_LAST_SYNC_AT, String(Date.now()));
 
         if (isFirstEverSync && prevBlobJson && Object.keys(cloud.data).length > 0) {
           showUndoToast(prevBlobJson);
@@ -857,13 +866,13 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
         } else {
           setSyncVersion(result.syncVersion);
           clearSettledDirtyKeys(prepared.data);
-          rawSet(KEY_LAST_SYNC_AT, String(Date.now()));
+          safeStorageSet(KEY_LAST_SYNC_AT, String(Date.now()));
           setState('synced');
         }
       }
 
       if (_authGeneration === myGeneration) {
-        rawSet(KEY_LAST_SIGNED_IN_AS, userId);
+        safeStorageSet(KEY_LAST_SIGNED_IN_AS, userId);
         completeSignInAttempt(attempt, 'synced');
       }
     } catch (err) {
@@ -996,8 +1005,8 @@ export function onSignOut(): void {
   _dirtyKeysUserId = null;
 
   // Preserve prefs; only clear sync metadata
-  rawRemove(KEY_SYNC_VERSION);
-  rawRemove(KEY_LAST_SYNC_AT);
+  safeStorageRemove(KEY_SYNC_VERSION);
+  safeStorageRemove(KEY_LAST_SYNC_AT);
   setState('signed-out');
 }
 
@@ -1050,7 +1059,7 @@ async function performUploadNow(variant: string): Promise<'completed' | 'retry-d
       // moved.
       setSyncVersion(result.syncVersion);
       clearSettledDirtyKeys(postedBlob);
-      rawSet(KEY_LAST_SYNC_AT, String(Date.now()));
+      safeStorageSet(KEY_LAST_SYNC_AT, String(Date.now()));
       setState('synced');
     }
   } catch (err) {
@@ -1137,11 +1146,11 @@ export async function syncNow(): Promise<void> {
 }
 
 export function getSyncState(): SyncState {
-  return (rawGet(KEY_SYNC_STATE) as SyncState) || 'signed-out';
+  return (safeStorageGet(KEY_SYNC_STATE) as SyncState) || 'signed-out';
 }
 
 export function getLastSyncAt(): number {
-  return parseInt(rawGet(KEY_LAST_SYNC_AT) ?? '0', 10) || 0;
+  return parseInt(safeStorageGet(KEY_LAST_SYNC_AT) ?? '0', 10) || 0;
 }
 
 // ── install ───────────────────────────────────────────────────────────────────
@@ -1181,7 +1190,7 @@ export function install(variant: string): void {
           _debounceTimer = null;
           setState('synced');
         }
-        rawSet(KEY_SYNC_VERSION, e.newValue);
+        safeStorageSet(KEY_SYNC_VERSION, e.newValue);
       }
     }
   });
@@ -1253,7 +1262,7 @@ export function install(variant: string): void {
           setSyncVersion,
           clearSettledDirtyKeys: () => clearSettledDirtyKeys(blob),
           setLastSyncAt: (timestampMs) => {
-            rawSet(KEY_LAST_SYNC_AT, String(timestampMs));
+            safeStorageSet(KEY_LAST_SYNC_AT, String(timestampMs));
           },
           // Only claim 'synced' when no newer edit re-armed the debounce AND no
           // uploadNow is active or queued (performUploadNow does not start

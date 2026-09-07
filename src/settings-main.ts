@@ -631,6 +631,12 @@ function renderDebug(area: HTMLElement): void {
   });
 
   area.querySelector('#exportSettingsBtn')?.addEventListener('click', () => {
+    // NOTE: exportSettings throws when storage is unreadable, and this handler
+    // does not catch — same as before #7833. The user-visible fix landed on the
+    // dashboard surface (preferences-content.ts), which already shows
+    // `exportFailed`. Reporting it here needs `components.settings.exportFailed`
+    // in en.shell.json, and that file has ~128 bytes of first-paint budget left
+    // (tests/i18n-english-shell.test.mjs) — not worth spending on an error path.
     exportSettings();
   });
 
