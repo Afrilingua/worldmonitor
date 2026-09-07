@@ -227,8 +227,15 @@ function writePersistedDirtyKeys(payload: { userId: string; keys: string[] }): v
 function persistDirtyKeyAddition(key: CloudSyncKey): void {
   if (!_dirtyKeysUserId) return;
   try {
+    // Read-modify-write over a sidecar SHARED with other tabs. A read that
+    // degrades to null makes the union treat the persisted set as empty, so the
+    // write replaces another tab's durable markers with just this key and its
+    // unsynced edits become overwritable. Abandon the update instead — the
+    // in-memory set still guards this page view (#7833 review).
+    const existing = safeStorageGetChecked(KEY_DIRTY_KEYS);
+    if (!existing.ok) return;
     writePersistedDirtyKeys(unionPersistedDirtyKeys(
-      safeStorageGet(KEY_DIRTY_KEYS),
+      existing.value,
       CLOUD_SYNC_KEYS,
       _dirtyKeysUserId,
       [key],
@@ -241,8 +248,12 @@ function persistDirtyKeyAddition(key: CloudSyncKey): void {
 function persistSettledDirtyKeyRemovals(removals: string[]): void {
   if (!_dirtyKeysUserId) return;
   try {
+    // Same shared-sidecar hazard as the addition path: a failed read here would
+    // settle the set down to empty, dropping another tab's pending markers.
+    const existing = safeStorageGetChecked(KEY_DIRTY_KEYS);
+    if (!existing.ok) return;
     writePersistedDirtyKeys(withoutPersistedDirtyKeys(
-      safeStorageGet(KEY_DIRTY_KEYS),
+      existing.value,
       CLOUD_SYNC_KEYS,
       _dirtyKeysUserId,
       removals,
@@ -548,8 +559,17 @@ function getLocalSchemaVersion(): number {
   return Number.isFinite(v) && v > 0 ? v : 1;
 }
 
-function setLocalSchemaVersion(v: number): void {
-  safeStorageSet(KEY_LOCAL_SCHEMA_VERSION, String(v));
+/**
+ * Record the schema the LOCAL blob has reached. Returns false when a usable
+ * store rejected the write.
+ *
+ * Same contract as setSyncVersion, and the consequence of skipping it is worse:
+ * a stale marker makes one-shot migrations run again, and schema 2 re-enables
+ * a whole source category — which a user may have deliberately disabled after
+ * the first migration ran (#7833 review).
+ */
+function setLocalSchemaVersion(v: number): boolean {
+  return safeStorageSetChecked(KEY_LOCAL_SCHEMA_VERSION, String(v));
 }
 
 /**
@@ -587,7 +607,13 @@ function migrateLocalBlobIfNeeded(): PreparedCloudBlob | null {
     // at the OLD version so the next attempt migrates again.
     return { data: blob, schemaVersion: localSchema };
   }
-  setLocalSchemaVersion(migrated.schemaVersion);
+  if (!setLocalSchemaVersion(migrated.schemaVersion)) {
+    // The marker did not persist, so the migration is not durably recorded.
+    // Posting at the NEW version would tell the cloud the data is migrated
+    // while the local marker still says otherwise, and the next load would run
+    // one-shot migrations again over already-migrated data.
+    return { data: blob, schemaVersion: localSchema };
+  }
   return { data: migratedData, schemaVersion: migrated.schemaVersion };
 }
 
@@ -788,7 +814,10 @@ async function resolveConflictWithMerge(token: string, variant: string, callerGe
     setState('error');
     return false;
   }
-  setLocalSchemaVersion(migratedCloud.schemaVersion);
+  if (!setLocalSchemaVersion(migratedCloud.schemaVersion)) {
+    setState('error');
+    return false;
+  }
   const retry = await postCloudPrefs(token, variant, merged, fresh.syncVersion, migratedCloud.schemaVersion);
   if (_authGeneration !== callerGeneration) return false;
   if ('conflict' in retry) {
@@ -895,7 +924,11 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
         }
         // An ambiguous schema-5 fingerprint deliberately stops at schema 4,
         // so the same row remains eligible for a future disambiguated retry.
-        setLocalSchemaVersion(migrated.schemaVersion);
+        if (!setLocalSchemaVersion(migrated.schemaVersion)) {
+          setState('error');
+          completeSignInAttempt(attempt, 'error');
+          return;
+        }
         // Force an upload when the cloud row's schemaVersion is behind (so it
         // catches up — otherwise the migration re-runs every load) OR when we
         // merged in local dirty keys the cloud row doesn't have yet.
@@ -1055,10 +1088,12 @@ export function onSignOut(): void {
     if (!_syncOperations.busy) {
       const prepared = migrateLocalBlobIfNeeded();
       // Best-effort flush, but "best effort" must not mean "post a blob that
-      // deletes an unreadable preference from the cloud". Skip instead.
-      if (prepared === null) return;
+      // deletes an unreadable preference from the cloud". Skip the FLUSH only —
+      // returning here would abandon the sign-out cleanup below, leaving the
+      // auth generation un-bumped, the retry timers live, and `_cachedToken`
+      // holding the signed-out user's token for a later unload handler to use.
       const token = _cachedToken;
-      void _syncOperations.run(async () => {
+      if (prepared !== null) void _syncOperations.run(async () => {
         await fetch('/api/user-prefs', {
           method: 'POST',
           keepalive: true,

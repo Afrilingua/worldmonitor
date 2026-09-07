@@ -915,3 +915,31 @@ describe('cloud prefs read-failure safety (#7833 review)', () => {
     });
   });
 });
+
+describe('cloud prefs sign-out cleanup (#7833 review)', () => {
+  it('completes sign-out cleanup even when the pending flush cannot be built', async () => {
+    // The flush is best-effort; the CLEANUP is not. Returning early from
+    // onSignOut on an unreadable preference left the auth generation un-bumped,
+    // the retry timers live, and _cachedToken holding the signed-out user's
+    // token — which a later unload handler could still post with.
+    const result = await runHarness(async (cloudPrefs, controls) => {
+      controls.seedRow('test-token', { 'wm-market-watchlist-v1': 'cloud-value' }, 1);
+      await cloudPrefs.onSignIn('user-1', 'full');
+      cloudPrefs.install('full');
+      localStorage.setItem('wm-market-watchlist-v1', 'local-edit');
+      controls.rejectReadsOf('wm-market-watchlist-v1');
+      cloudPrefs.onSignOut();
+    });
+
+    assert.equal(
+      result.state,
+      'signed-out',
+      'sign-out must reach its state cleanup even when the flush is skipped',
+    );
+    assert.equal(
+      result.localSyncVersion,
+      0,
+      'sign-out must clear the durable sync-version metadata',
+    );
+  });
+});
