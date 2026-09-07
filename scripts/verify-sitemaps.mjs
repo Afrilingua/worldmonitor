@@ -8,6 +8,7 @@ import { decodeHtmlEntities } from './_html-entities.mjs';
 
 const DEFAULT_ORIGIN = 'https://www.worldmonitor.app';
 const DEFAULT_TIMEOUT_MS = 15_000;
+const REQUIRED_DOCS_PATHS = ['/docs/country-instability-index', '/docs/zh/country-instability-index'];
 const EXPECTED_PAGE_HOSTS = new Set([
   'worldmonitor.app',
   'www.worldmonitor.app',
@@ -148,16 +149,15 @@ export function inspectIndexability({ url, headers, body }) {
   const effectiveRobots = [...metaRobots];
   for (const part of headerRobots.split(',')) {
     const scope = /^\s*([\w-]+):\s*(.*)$/.exec(part);
-    if (scope && !/^(?:unavailable_after|max-image-preview|max-snippet|max-video-preview)$/i.test(scope[1])) {
-      robot = scope[1].toLowerCase();
-    }
-    if (robot === '*' || robot === 'googlebot') effectiveRobots.push(scope?.[2] ?? part);
+    const scoped = scope && !/^(?:unavailable_after|max-image-preview|max-snippet|max-video-preview)$/i.test(scope[1]);
+    if (scoped) robot = scope[1].toLowerCase();
+    if (robot === '*' || robot === 'googlebot') effectiveRobots.push(scoped ? scope[2] : part);
   }
   return {
     canonical: canonicalErrors.length === 0 ? [...targets][0] ?? null : null,
     canonicalDeclarations,
     canonicalErrors,
-    indexable: !/\b(?:noindex|none)\b/i.test(effectiveRobots.join(', ')),
+    indexable: !effectiveRobots.some(value => value.split(',').some(directive => /^(?:noindex|none)$/i.test(directive.trim()))),
     robots: [headerRobots, ...metaRobots].filter(Boolean).join(', ') || null,
   };
 }
@@ -375,7 +375,7 @@ function selectSamples(urls, samplePerFamily) {
   for (const url of [...urls].sort()) {
     const family = classifySitemapUrl(url);
     const count = counts.get(family) ?? 0;
-    const ciiDocs = /^\/docs\/(?:zh\/)?country-instability-index$/.test(new URL(url).pathname);
+    const ciiDocs = REQUIRED_DOCS_PATHS.includes(new URL(url).pathname);
     if (count >= samplePerFamily && !ciiDocs) continue;
     selected.add(url);
     if (count < samplePerFamily) counts.set(family, count + 1);
@@ -424,6 +424,10 @@ export async function verifyProductionSitemaps({
   );
   errors.push(...inventoryErrors);
   const allUrls = [...urls.keys()];
+  for (const path of REQUIRED_DOCS_PATHS) {
+    const requiredUrl = `${normalizedOrigin}${path}`;
+    if (!urls.has(requiredUrl)) errors.push(`required docs page missing from sitemap: ${requiredUrl}`);
+  }
   const samples = selectSamples(allUrls, samplePerFamily);
   errors.push(...ownershipOverlaps.map(
     ({ url, sitemaps }) => `${url} is owned by multiple sitemap documents: ${sitemaps.join(', ')}`,
