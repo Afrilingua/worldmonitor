@@ -21,9 +21,11 @@ import {
   planDatasetAction,
   publishDatasetIndependently,
   dsrAfterPublish,
+  fetchAll,
   KEYS,
   META_KEYS,
 } from '../scripts/seed-bis-extended.mjs';
+import { __testing__ as healthTesting } from '../api/health.js';
 
 // Minimal BIS-style SDMX CSV fixture covering:
 //   - Two DSR series per country (one private/adjusted → preferred, one
@@ -60,14 +62,23 @@ const SPP_CSV = [
 
 const BIS_TTL_SECONDS = 3 * 24 * 3600;
 const BIS_META_TTL_SECONDS = resolveSeedMetaTtl(undefined, BIS_TTL_SECONDS);
+const {
+  classifyKey,
+  BOOTSTRAP_KEYS,
+  STANDALONE_KEYS,
+  SEED_META,
+  ACTIVATION_MARKERS,
+} = healthTesting;
 
 async function withRedisCapture(fetchImpl, fn) {
   const originalUrl = process.env.UPSTASH_REDIS_REST_URL;
   const originalToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const originalRetryDelay = process.env.WM_SEED_RETRY_DELAY_MS;
   const originalFetch = globalThis.fetch;
   const calls = [];
   process.env.UPSTASH_REDIS_REST_URL = 'https://mock.upstash.invalid';
   process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-token';
+  process.env.WM_SEED_RETRY_DELAY_MS = '0';
   globalThis.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : null;
     calls.push({ url: String(url), body });
@@ -81,6 +92,8 @@ async function withRedisCapture(fetchImpl, fn) {
     else process.env.UPSTASH_REDIS_REST_URL = originalUrl;
     if (originalToken === undefined) delete process.env.UPSTASH_REDIS_REST_TOKEN;
     else process.env.UPSTASH_REDIS_REST_TOKEN = originalToken;
+    if (originalRetryDelay === undefined) delete process.env.WM_SEED_RETRY_DELAY_MS;
+    else process.env.WM_SEED_RETRY_DELAY_MS = originalRetryDelay;
   }
 }
 
@@ -106,7 +119,52 @@ function assertExpireCohort(calls, expected) {
   }
 }
 
+function classifyRetainedBis(name, { now, fetchedAt }) {
+  const key = BOOTSTRAP_KEYS[name] ?? STANDALONE_KEYS[name];
+  return classifyKey(
+    name,
+    key,
+    { allowOnDemand: false },
+    {
+      keyStrens: new Map([[key, 128]]),
+      keyErrors: new Map(),
+      keyMetaValues: new Map([[
+        SEED_META[name].key,
+        JSON.stringify({ fetchedAt, recordCount: 1 }),
+      ]]),
+      keyMetaErrors: new Map(),
+      activationStates: new Map(
+        Object.keys(ACTIVATION_MARKERS).map((markerName) => [markerName, false]),
+      ),
+      rolloutPendingUntilMs: new Map(),
+      now,
+    },
+  );
+}
+
 describe('seed-bis-extended parser', () => {
+  it('makes exactly nine BIS source requests and rejects when every source variant fails', async () => {
+    const originalFetch = globalThis.fetch;
+    const originalWarn = console.warn;
+    const requests = [];
+    globalThis.fetch = async (url) => {
+      requests.push(String(url));
+      return new Response('unavailable', { status: 503 });
+    };
+    console.warn = () => {};
+    try {
+      await assert.rejects(fetchAll(), /All BIS extended fetches returned empty/);
+      assert.equal(requests.length, 9);
+      assert.ok(requests.every((url) => url.startsWith('https://stats.bis.org/api/v1/data/')));
+      for (const dataflow of ['WS_DSR', 'WS_SPP', 'WS_CPP']) {
+        assert.equal(requests.filter((url) => url.includes(`/${dataflow}/`)).length, 3, dataflow);
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.warn = originalWarn;
+    }
+  });
+
   it('exports the canonical Redis keys', () => {
     assert.equal(KEYS.dsr, 'economic:bis:dsr:v1');
     assert.equal(KEYS.spp, 'economic:bis:property-residential:v1');
@@ -326,6 +384,25 @@ describe('seed-bis-extended parser', () => {
     });
   });
 
+  it('publishes fresh property payload and metadata after a retained failure recovers', async () => {
+    const pipelineOk = ({ body }) => Array.isArray(body) && Array.isArray(body[0])
+      ? { ok: true, status: 200, json: async () => body.map(() => ({ result: 1 })) }
+      : redisOk();
+
+    await withRedisCapture(pipelineOk, async (calls) => {
+      await publishDatasetIndependently(KEYS.spp, null, META_KEYS.spp);
+      await publishDatasetIndependently(KEYS.spp, {
+        entries: [{ countryCode: 'US', indexValue: 109.1 }],
+        fetchedAt: 'recovered',
+      }, META_KEYS.spp);
+
+      const sets = calls
+        .filter(({ body }) => body?.[0] === 'SET')
+        .map(({ body }) => body[1]);
+      assert.deepEqual(sets, [KEYS.spp, META_KEYS.spp]);
+    });
+  });
+
   it('runner retention manifest reaches both BIS property payload/meta pairs on total source failure', async () => {
     const bis = await import('../scripts/seed-bis-extended.mjs');
     assert.equal(typeof bis.runBisExtendedSeed, 'function');
@@ -450,6 +527,18 @@ describe('seed-bis-extended parser', () => {
     ];
     const out = selectBestSeriesByCountry(rows, { countryColumns: ['REF_AREA'], prefs: { PP_VALUATION: 'R' } });
     assert.equal(out.size, 0);
+  });
+
+  it('classifies retained BIS DSR and property payloads as STALE_SEED after 2160 minutes', () => {
+    const now = Date.parse('2031-04-12T09:30:00Z');
+    for (const name of ['bisDsr', 'bisPropertyResidential', 'bisPropertyCommercial']) {
+      const entry = classifyRetainedBis(name, {
+        now,
+        fetchedAt: now - (2160 + 1) * 60_000,
+      });
+      assert.equal(entry.status, 'STALE_SEED', name);
+      assert.equal(entry.maxStaleMin, 2160, name);
+    }
   });
 });
 

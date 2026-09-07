@@ -23,7 +23,15 @@
  *   - health maxStaleMin = 24h = 2× interval (see api/health.js)
  */
 
-import { loadEnvFile, CHROME_UA, runSeed, writeExtraKey, extendExistingTtl, writeSeedMeta } from './_seed-utils.mjs';
+import {
+  loadEnvFile,
+  CHROME_UA,
+  runSeed,
+  writeExtraKey,
+  extendExistingTtl,
+  writeSeedMeta,
+  resolveSeedMetaTtl,
+} from './_seed-utils.mjs';
 import { tokensToContentMeta, DAY_MIN } from './_content-age-helpers.mjs';
 
 // Content-age budget — the canonical key holds the quarterly BIS WS_DSR
@@ -105,6 +113,18 @@ export const META_KEYS = {
 
 // Quarterly data, seeded on 12h cron. 3-day TTL absorbs 2 missed cycles.
 const TTL = 3 * 24 * 3600;
+const META_TTL = resolveSeedMetaTtl(undefined, TTL);
+const AGGREGATE_META_KEY = 'seed-meta:economic:bis-extended';
+
+const BIS_PRESERVE_KEY_TTLS = [
+  { key: AGGREGATE_META_KEY, ttlSeconds: META_TTL },
+  { key: KEYS.dsr, ttlSeconds: TTL },
+  { key: META_KEYS.dsr, ttlSeconds: META_TTL },
+  { key: KEYS.spp, ttlSeconds: TTL },
+  { key: META_KEYS.spp, ttlSeconds: META_TTL },
+  { key: KEYS.cpp, ttlSeconds: TTL },
+  { key: META_KEYS.cpp, ttlSeconds: META_TTL },
+];
 
 // ── HTTP / CSV helpers ─────────────────────────────────────────────────────
 
@@ -428,23 +448,34 @@ export function planDatasetAction(payload) {
   return 'extend';
 }
 
+async function preserveDatasetLastGood(key, metaKey) {
+  await Promise.all([
+    extendExistingTtl([key], TTL),
+    metaKey ? extendExistingTtl([metaKey], META_TTL) : true,
+  ]);
+}
+
 export async function publishDatasetIndependently(key, payload, metaKey) {
   const action = planDatasetAction(payload);
   if (action === 'write') {
     try {
       await writeExtraKey(key, payload, TTL);
-      // Per-dataset seed-meta is written ONLY on a successful fresh write.
-      // On the extend-TTL branch we deliberately do NOT refresh seed-meta —
-      // that is what lets api/health.js flag a stale per-dataset outage.
       if (metaKey) {
-        await writeSeedMeta(key, payload.entries.length, metaKey).catch(() => {});
+        // Metadata is written only after the payload succeeds. If the write
+        // is rejected or throws, keep the old metadata body and fetchedAt;
+        // this preserves the health warning without fabricating success.
+        const wroteMeta = await writeSeedMeta(key, payload.entries.length, metaKey).catch(() => false);
+        if (!wroteMeta) {
+          console.warn(`  ${key}: metadata write failed; extending existing payload and metadata TTL`);
+          await preserveDatasetLastGood(key, metaKey).catch(() => {});
+        }
       }
     } catch (err) {
-      console.warn(`  ${key}: write failed (${err.message}); extending existing TTL`);
-      await extendExistingTtl([key], TTL).catch(() => {});
+      console.warn(`  ${key}: write failed (${err.message}); extending existing payload and metadata TTL`);
+      await preserveDatasetLastGood(key, metaKey).catch(() => {});
     }
   } else {
-    await extendExistingTtl([key], TTL).catch(() => {});
+    await preserveDatasetLastGood(key, metaKey).catch(() => {});
   }
 }
 
@@ -476,8 +507,11 @@ export function bisDsrContentMeta(data) {
   return tokensToContentMeta(entries.map((e) => e?.period));
 }
 
-if (process.argv[1]?.endsWith('seed-bis-extended.mjs')) {
-  runSeed('economic', 'bis-extended', KEYS.dsr, fetchAll, {
+export async function runBisExtendedSeed({
+  fetchAllImpl = fetchAll,
+  runSeedImpl = runSeed,
+} = {}) {
+  return runSeedImpl('economic', 'bis-extended', KEYS.dsr, fetchAllImpl, {
     validateFn: validate,
     ttlSeconds: TTL,
     sourceVersion: 'bis-sdmx-csv-extended',
@@ -488,7 +522,12 @@ if (process.argv[1]?.endsWith('seed-bis-extended.mjs')) {
     maxStaleMin: 1440,
     contentMeta: bisDsrContentMeta,
     maxContentAgeMin: BIS_DSR_MAX_CONTENT_AGE_MIN,
-  }).catch((err) => {
+    preserveKeyTtls: BIS_PRESERVE_KEY_TTLS,
+  });
+}
+
+if (process.argv[1]?.endsWith('seed-bis-extended.mjs')) {
+  runBisExtendedSeed().catch((err) => {
     const _cause = err.cause ? ` (cause: ${err.cause.message || err.cause.code || err.cause})` : '';
     console.error('FATAL:', (err.message || err) + _cause);
     process.exit(1);
