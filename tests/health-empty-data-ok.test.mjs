@@ -22,19 +22,14 @@ const STRICT_PROJECTIONS = [...MISSING_DATA_IS_FAILURE_KEYS];
 // These sources intentionally refresh only metadata on quiet cycles, so a missing
 // payload with fresh metadata remains healthy rather than generating a false alarm.
 const QUIET_META_ONLY_KEYS = [
+  'ddosAttacks',
+  'trafficAnomalies',
   'weatherAlerts',
   'newsThreatSummary',
 ];
 
 const AUDITED_PRESENT_PAYLOAD_KEYS = [
   'cableHealth',
-  // The two CF Radar companions left the quiet-metadata cohort in #7845:
-  // seed-internet-outages publishes an explicit payload for every confirmed
-  // result (empty ones included) and retains last-good without touching the
-  // clock when a source fails, so fresh metadata with no payload is a failed
-  // publish. Same contract as `outages`, which the same seeder already met.
-  'ddosAttacks',
-  'trafficAnomalies',
   'notamClosures',
   // canadaRoads does NOT refresh metadata only on quiet cycles: the seeder
   // publishes an explicit {records: []} envelope on every successful tick

@@ -5,7 +5,8 @@ import {
   CHROME_UA,
   runSeed,
   extendExistingTtl,
-  writeExtraKeyWithMetaAtomically,
+  writeExtraKeyWithMeta,
+  SEED_META_MIN_TTL_SECONDS,
 } from './_seed-utils.mjs';
 
 loadEnvFile(import.meta.url);
@@ -196,20 +197,28 @@ async function fetchDdosData(token) {
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
 
+  // Reports `degraded` rather than just returning [] so the caller can stamp the
+  // shortfall on seed-meta. An unconfirmed empty slice riding inside a CONFIRMED
+  // payload is the exact conflation this issue is about: without the marker, a
+  // permanently 4xx target endpoint would blank the DDoS map's target countries
+  // forever while recordCount (protocol+vector) never moves and health stays OK.
   const fetchOptionalTargetLocations = async () => {
     try {
       const resp = await fetch(`${CF_RADAR_BASE}/radar/attacks/layer3/top/locations/target?dateRange=7d`, { headers, signal: AbortSignal.timeout(15_000) });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const result = requireRadarResult(await resp.json(), 'DDoS target locations');
-      return requireRadarArray(result, 'top_0', 'DDoS target locations')
-        .filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+      return {
+        items: requireRadarArray(result, 'top_0', 'DDoS target locations')
+          .filter((item) => item && typeof item === 'object' && !Array.isArray(item)),
+        degraded: false,
+      };
     } catch (err) {
       console.warn(`  CF Radar DDoS target locations unavailable (optional slice): ${err?.message || err}`);
-      return [];
+      return { items: [], degraded: true };
     }
   };
 
-  const [protocolResp, vectorResp, targetItems] = await Promise.all([
+  const [protocolResp, vectorResp, targetSlice] = await Promise.all([
     fetch(`${CF_RADAR_BASE}/radar/attacks/layer3/summary/protocol?dateRange=7d`, { headers, signal: AbortSignal.timeout(15_000) }),
     fetch(`${CF_RADAR_BASE}/radar/attacks/layer3/summary/vector?dateRange=7d`, { headers, signal: AbortSignal.timeout(15_000) }),
     fetchOptionalTargetLocations(),
@@ -229,7 +238,7 @@ async function fetchDdosData(token) {
       .sort((a, b) => b.percentage - a.percentage);
   }
 
-  const topTargetLocations = targetItems.map((item) => {
+  const topTargetLocations = targetSlice.items.map((item) => {
     const code = item.clientCountryAlpha2 || '';
     const coords = COUNTRY_COORDS[code] || null;
     return {
@@ -248,6 +257,7 @@ async function fetchDdosData(token) {
     dateRangeStart: meta?.dateRange?.[0]?.startTime || '',
     dateRangeEnd: meta?.dateRange?.[0]?.endTime || '',
     topTargetLocations,
+    _targetLocationsDegraded: targetSlice.degraded,
   };
 }
 
@@ -289,6 +299,10 @@ async function fetchTrafficAnomalies(token) {
 
 // The two Radar companion products. Each owns its consumer key, its TTL and its
 // own success clock; neither is derived from the canonical outage annotations.
+//
+// `toPayload` strips producer diagnostics (leading underscore) so the published
+// value stays exactly the shape the RPC reads; `metaExtra` carries them onto
+// seed-meta instead, where health and an operator can see them.
 const COMPANIONS = [
   {
     label: 'DDoS',
@@ -296,6 +310,8 @@ const COMPANIONS = [
     ttlSeconds: DDOS_TTL,
     fetch: fetchDdosData,
     recordCount: (data) => data.protocol.length + data.vector.length,
+    toPayload: ({ _targetLocationsDegraded, ...payload }) => payload,
+    metaExtra: (data) => (data._targetLocationsDegraded ? { targetLocationsDegraded: true } : undefined),
   },
   {
     label: 'traffic anomalies',
@@ -306,15 +322,38 @@ const COMPANIONS = [
   },
 ];
 
+/** The seed-meta key writeExtraKeyWithMeta derives for a companion. */
+function companionMetaKey(companion) {
+  return `seed-meta:${companion.key.replace(/:v\d+$/, '')}`;
+}
+
 /**
  * Fetch and publish one companion, or retain its last-good data.
  *
- * A confirmed result — including a confirmed EMPTY one — publishes payload and
- * seed-meta in a single transaction, so no reader can ever see a fresh success
- * clock next to an older or different payload. A failed fetch or a failed write
- * publishes nothing, leaves the success clock where it was, and extends the
- * consumer key's own TTL through the shared retention path so last-good keeps
- * being served while /api/health ages the untouched clock into STALE_SEED.
+ * A confirmed result — including a confirmed EMPTY one — publishes the payload
+ * and only then advances the success clock, through the shared
+ * `writeExtraKeyWithMeta` path (which carries its own Upstash retry, so a
+ * transient blip does not cost a confirmed result a whole cron interval; the
+ * retry is around the WRITE, so no Radar request is replayed).
+ *
+ * The ordering is the guarantee, deliberately NOT a MULTI/EXEC transaction:
+ * Redis EXEC has no rollback, so a per-command runtime error (an over-size
+ * payload, OOM at the maxmemory boundary) can land the small meta write while
+ * the large payload write fails — a fresh success clock over the PREVIOUS
+ * payload, which is exactly the bug this issue is about. Writing data first
+ * makes the only reachable torn state the harmless one: a new payload whose
+ * clock did not advance, which reads as STALE_SEED and self-heals next tick.
+ *
+ * A failed fetch or a failed payload write publishes nothing, leaves the success
+ * clock where it was, and retains last-good so readers keep being served.
+ *
+ * Retention extends the consumer key at its own TTL AND the seed-meta key at the
+ * shared 7-day meta floor (never rewriting `fetchedAt`). Extending the payload
+ * alone would make it immortal under a sustained outage while the meta expired
+ * out from under it — and a present payload with no meta reads as plain OK in
+ * classifyKey, so a week-long failure would decay from STALE_SEED back to green
+ * with a frozen payload behind it. EXPIRE at the meta floor never shortens a
+ * meta key, since that floor is already the longest TTL it is ever written with.
  *
  * Never rejects: a companion's outcome is its own, and must not decide the
  * annotations leg's.
@@ -323,21 +362,41 @@ async function runCompanion(companion, token) {
   try {
     const data = await companion.fetch(token);
     const recordCount = companion.recordCount(data);
-    await writeExtraKeyWithMetaAtomically({
-      key: companion.key,
-      data,
-      ttlSeconds: companion.ttlSeconds,
+    const clockAdvanced = await writeExtraKeyWithMeta(
+      companion.key,
+      companion.toPayload ? companion.toPayload(data) : data,
+      companion.ttlSeconds,
       recordCount,
-    });
+      undefined,  // metaKey — the derived seed-meta:<key> is correct
+      undefined,  // metaTtlSeconds — resolves to the 7-day floor
+      undefined,  // coverage — not a coverage-bearing source
+      companion.metaExtra?.(data),
+    );
+    if (!clockAdvanced) {
+      // Payload landed, clock did not. Safe direction: health reports
+      // STALE_SEED over data that is actually fresh, and the next tick repairs.
+      console.warn(`  CF Radar ${companion.label}: payload published but seed-meta write failed — clock not advanced`);
+      return { published: true, clockAdvanced: false };
+    }
     console.log(`  CF Radar ${companion.label}: published ${recordCount} record(s)`);
-    return { published: true };
+    return { published: true, clockAdvanced: true };
   } catch (err) {
     console.warn(`  CF Radar ${companion.label} update failed: ${err?.message || err}`);
-    const retained = await extendExistingTtl([companion.key], companion.ttlSeconds);
+    // Two calls, not one pipeline: EXPIRE sets a TTL absolutely, so the payload
+    // and its meta must each be extended at their own value.
+    const [dataRetained, metaRetained] = await Promise.all([
+      extendExistingTtl([companion.key], companion.ttlSeconds),
+      extendExistingTtl([companionMetaKey(companion)], SEED_META_MIN_TTL_SECONDS),
+    ]);
+    const retained = dataRetained && metaRetained;
+    // Deliberately does not claim WHICH payload survives: writeExtraKeyWithMeta
+    // writes data before meta, so a throw from the meta half leaves a freshly
+    // published payload behind an un-advanced clock. Either way the key is
+    // retained and the success clock did not move, which is what this says.
     console.warn(
       retained
-        ? `  CF Radar ${companion.label}: last-good ${companion.key} retained at ${companion.ttlSeconds}s`
-        : `  CF Radar ${companion.label}: last-good ${companion.key} could not be retained — /api/health is the alarm`,
+        ? `  CF Radar ${companion.label}: ${companion.key} retained at ${companion.ttlSeconds}s, success clock untouched`
+        : `  CF Radar ${companion.label}: ${companion.key} could not be retained — /api/health is the alarm`,
     );
     return { published: false, retained };
   }
@@ -395,11 +454,12 @@ runSeed('infra', 'outages', CANONICAL_KEY, fetchAll, {
   // extra-key phase, so runSeed does not know to retain them when the
   // annotations leg fails, times out or is SIGTERMed. Each is declared at its
   // OWN TTL — the canonical 3h would quietly triple the anomalies key's 1h
-  // contract. Their seed-meta keys are deliberately absent: those carry the
-  // 7-day floor and an EXPIRE at a data TTL would shorten them.
+  // contract, and the meta keys carry the 7-day floor, so an EXPIRE at a data
+  // TTL would shorten them. Meta is listed so a retained payload can never
+  // outlive the clock that reports on it (see runCompanion's retention note).
   preserveKeyTtls: [
-    { key: DDOS_KEY, ttlSeconds: DDOS_TTL },
-    { key: TRAFFIC_ANOMALIES_KEY, ttlSeconds: ANOMALIES_TTL },
+    ...COMPANIONS.map((companion) => ({ key: companion.key, ttlSeconds: companion.ttlSeconds })),
+    ...COMPANIONS.map((companion) => ({ key: companionMetaKey(companion), ttlSeconds: SEED_META_MIN_TTL_SECONDS })),
   ],
   // CF Radar curated outage annotations are sparse (~1-2/wk, clustered, with
   // multi-day gaps). Zero mappable outages is the NORMAL state, not a fetch

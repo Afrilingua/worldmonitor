@@ -24,6 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
 import { __testing__ as health } from '../api/health.js';
+import { SEED_META_MIN_TTL_SECONDS } from '../scripts/_seed-utils.mjs';
 
 const OUTAGES_KEY = 'infra:outages:v1';
 const DDOS_KEY = 'cf:radar:ddos:v1';
@@ -47,6 +48,7 @@ async function seedFixture(entries, plan, now, redisOrigin) {
   const store = new Map(entries);
   const radarCalls = [];
   const redisCommands = [];
+  let rejectedWrites = 0;
 
   const apply = (command) => {
     redisCommands.push(command);
@@ -69,6 +71,12 @@ async function seedFixture(entries, plan, now, redisOrigin) {
     if (spec === 'errors-not-array') return Response.json({ ...body, errors: { code: 7000 } });
     if (spec === 'no-result') return Response.json({ success: true });
     if (spec === 'not-configured') return Response.json({ configured: false, success: true, result: {} });
+    // Envelope is a valid success, but the REQUIRED result field is absent or
+    // the wrong type — the field-level guards, not the envelope guard.
+    if (spec === 'field-missing') return Response.json({ success: true, result: { meta: { dateRange: [] } } });
+    if (spec === 'field-wrong-type') {
+      return Response.json({ success: true, result: { annotations: {}, summary_0: [], trafficAnomalies: 'nope', top_0: {}, meta: { dateRange: [] } } });
+    }
     throw new Error(`unknown response spec ${spec}`);
   };
 
@@ -122,19 +130,21 @@ async function seedFixture(entries, plan, now, redisOrigin) {
         return Response.json({ result: store.get(key) ?? null });
       }
       const body = JSON.parse(init.body);
+      // Upstash reports a command-level failure with HTTP 200 and a per-command
+      // `error`. Redis does NOT roll back siblings in that case, so the reject
+      // is applied per command: every other command in the batch still executes.
+      // Scoped to SET so it models a failing PUBLISH, not an unreachable key:
+      // the retention EXPIRE on the same key must still be observable.
+      const rejects = (command) => (
+        command[0] === 'SET' && plan.redisRejectKey === command[1]
+        && (plan.redisRejectAttempts == null || ++rejectedWrites <= plan.redisRejectAttempts)
+      );
       if (url.pathname === '/pipeline' || url.pathname === '/multi-exec') {
-        const rejectKey = plan.redisRejectKey;
-        if (rejectKey && body.some((command) => command[1] === rejectKey)) {
-          // Upstash reports command-level failure with HTTP 200.
-          return Response.json(body.map((command) => (
-            command[1] === rejectKey ? { error: 'READONLY injected failure' } : { result: 'OK' }
-          )));
-        }
-        return Response.json(body.map((command) => ({ result: apply(command) })));
+        return Response.json(body.map((command) => (
+          rejects(command) ? { error: 'READONLY injected failure' } : { result: apply(command) }
+        )));
       }
-      if (plan.redisRejectKey && body[1] === plan.redisRejectKey) {
-        return Response.json({ error: 'READONLY injected failure' });
-      }
+      if (rejects(body)) return Response.json({ error: 'READONLY injected failure' });
       return Response.json({ result: apply(body) });
     }
 
@@ -162,6 +172,9 @@ const DEFAULT_PLAN = {
   traffic: 'ok',
   payload: 'empty',
   redisRejectKey: null,
+  // null = reject that key's writes forever; a number = reject only the first N,
+  // which is how a transient Upstash blip is modelled.
+  redisRejectAttempts: null,
 };
 
 function runSeeder({ entries = [], plan = {}, now = NOW } = {}) {
@@ -392,6 +405,122 @@ test('a cache write failure leaves the payload and its success clock untouched',
     'a rejected write cannot report a fresh success for the older payload',
   );
   assert.notEqual(run.store.get(DDOS_KEY), before.get(DDOS_KEY), 'the sibling companion still publishes');
+  assert.deepEqual(
+    expireCommandsFor(run.redisCommands, TRAFFIC_KEY).map((command) => command[2]), [ANOMALIES_TTL],
+    'the unpublished key is retained at its own TTL',
+  );
+});
+
+test('a transient cache write failure is retried instead of costing a whole cron interval', () => {
+  const entries = lastGoodEntries();
+  const run = runSeeder({
+    entries,
+    plan: { payload: 'full', redisRejectKey: TRAFFIC_KEY, redisRejectAttempts: 1 },
+  });
+
+  // Assert the identity, not the count: the last-good fixture also has one
+  // record, so a count check would pass on an unpublished retention.
+  assert.equal(
+    JSON.parse(run.store.get(TRAFFIC_KEY)).anomalies[0].uuid, 'anom-1',
+    'the second attempt publishes; one Upstash blip must not skip the cycle',
+  );
+  assert.equal(JSON.parse(run.store.get(TRAFFIC_META_KEY)).fetchedAt, NOW);
+  assert.equal(
+    radarPaths(run.radarCalls).filter((path) => path === 'traffic_anomalies').length, 1,
+    'the write retry must not replay the provider request',
+  );
+});
+
+test('the success clock is never advanced ahead of the payload it reports on', () => {
+  // Redis EXEC does not roll back, so a torn pair is reachable in principle.
+  // Rejecting the seed-meta write proves the ordering leaves only the harmless
+  // direction: a fresh payload whose clock lagged, never a fresh clock over an
+  // older payload.
+  const entries = lastGoodEntries();
+  const before = new Map(entries);
+  const run = runSeeder({ entries, plan: { payload: 'full', redisRejectKey: TRAFFIC_META_KEY } });
+
+  assert.equal(JSON.parse(run.store.get(TRAFFIC_KEY)).anomalies[0].uuid, 'anom-1', 'the payload still publishes');
+  assert.equal(
+    run.store.get(TRAFFIC_META_KEY), before.get(TRAFFIC_META_KEY),
+    'the clock stays where it was rather than claiming a success for the old payload',
+  );
+});
+
+test('a required result field that is absent or the wrong type is a failure, not zero records', () => {
+  for (const spec of ['field-missing', 'field-wrong-type']) {
+    const entries = lastGoodEntries();
+    const before = new Map(entries);
+    const run = runSeeder({ entries, plan: { protocol: spec, traffic: spec } });
+
+    for (const key of [DDOS_KEY, TRAFFIC_KEY, DDOS_META_KEY, TRAFFIC_META_KEY]) {
+      assert.equal(run.store.get(key), before.get(key), `${spec}: ${key} must keep its last-good value`);
+    }
+  }
+});
+
+test('the annotations leg rejects an invalid envelope instead of publishing zero outages', () => {
+  for (const spec of ['success-false', 'errors-present', 'no-result', 'field-missing']) {
+    const entries = lastGoodEntries();
+    const before = new Map(entries);
+    const run = runSeeder({ entries, plan: { annotations: spec } });
+
+    assert.equal(run.exitCode, GRACEFUL_FETCH_FAILURE_EXIT_CODE, `${spec}: ${run.output}`);
+    assert.equal(
+      run.store.get(OUTAGES_KEY), before.get(OUTAGES_KEY),
+      `${spec}: an invalid annotations envelope must not publish an empty outage list`,
+    );
+    assert.equal(run.store.get('seed-meta:infra:outages'), before.get('seed-meta:infra:outages'), spec);
+  }
+});
+
+test('retention keeps the alarm alive: a failed companion extends its clock key too', () => {
+  const entries = lastGoodEntries();
+  const run = runSeeder({ entries, plan: { traffic: 'http-503' } });
+
+  // Extending the payload alone would make it immortal under a sustained outage
+  // while the 7-day meta expired out from under it — and a present payload with
+  // no meta classifies as plain OK, decaying a week-long failure back to green.
+  assert.deepEqual(
+    expireCommandsFor(run.redisCommands, TRAFFIC_META_KEY).map((command) => command[2]),
+    [SEED_META_MIN_TTL_SECONDS],
+    'the seed-meta key is extended at its own 7-day floor, never at the data TTL',
+  );
+  assert.equal(
+    JSON.parse(run.store.get(TRAFFIC_META_KEY)).fetchedAt, NOW - 30 * 60_000,
+    'extending the clock key must not rewrite the clock',
+  );
+});
+
+test('an optional slice that could not be confirmed is recorded on the success metadata', () => {
+  const degraded = runSeeder({ entries: lastGoodEntries(), plan: { target: 'http-503', payload: 'full' } });
+  assert.equal(
+    JSON.parse(degraded.store.get(DDOS_META_KEY)).targetLocationsDegraded, true,
+    'a silently-empty optional slice must be visible somewhere other than a log line',
+  );
+
+  const healthy = runSeeder({ entries: lastGoodEntries(), plan: { payload: 'full' } });
+  assert.equal(
+    JSON.parse(healthy.store.get(DDOS_META_KEY)).targetLocationsDegraded, undefined,
+    'a confirmed slice adds no marker',
+  );
+  assert.equal(
+    JSON.parse(healthy.store.get(DDOS_KEY))._targetLocationsDegraded, undefined,
+    'the diagnostic stays on seed-meta and never reaches the published payload',
+  );
+});
+
+test('runSeed retains both companion keys at their own TTLs when the fetch phase fails', () => {
+  const run = runSeeder({
+    entries: lastGoodEntries(),
+    plan: { annotations: 'http-503', protocol: 'http-503', vector: 'http-503', traffic: 'http-503', target: 'http-503' },
+  });
+
+  const ttlsFor = (key) => new Set(expireCommandsFor(run.redisCommands, key).map((command) => command[2]));
+  assert.deepEqual(ttlsFor(DDOS_KEY), new Set([DDOS_TTL]), 'the DDoS key is never extended at the canonical TTL');
+  assert.deepEqual(ttlsFor(TRAFFIC_KEY), new Set([ANOMALIES_TTL]), 'the anomalies key keeps its own 1h contract');
+  assert.deepEqual(ttlsFor(DDOS_META_KEY), new Set([SEED_META_MIN_TTL_SECONDS]));
+  assert.deepEqual(ttlsFor(TRAFFIC_META_KEY), new Set([SEED_META_MIN_TTL_SECONDS]));
 });
 
 test('a total Radar failure retains every companion payload and clock', () => {
@@ -414,7 +543,7 @@ test('a total Radar failure retains every companion payload and clock', () => {
 
 test('healthy to empty to source error to recovery never resurrects an old event', async () => {
   const healthy = runSeeder({ entries: lastGoodEntries(), plan: { payload: 'full' } });
-  assert.equal(JSON.parse(healthy.store.get(TRAFFIC_KEY)).totalCount, 1, healthy.output);
+  assert.equal(JSON.parse(healthy.store.get(TRAFFIC_KEY)).anomalies[0].uuid, 'anom-1', healthy.output);
 
   const emptied = runSeeder({ entries: [...healthy.store], now: NOW + 60_000 });
   assert.deepEqual(JSON.parse(emptied.store.get(TRAFFIC_KEY)), { anomalies: [], totalCount: 0 });

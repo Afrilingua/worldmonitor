@@ -1967,9 +1967,9 @@ const EMPTY_DATA_OK_KEYS = new Set([
 ]);
 
 // These compact projections must leave a payload on every successful publish.
-// This is deliberately narrower than EMPTY_DATA_OK_KEYS: weather refreshes only
-// its seed metadata during quiet periods, so an absent payload is valid for that
-// source. Every entry here must also be in
+// This is deliberately narrower than EMPTY_DATA_OK_KEYS: DDoS, traffic, and
+// weather refresh only their seed metadata during quiet periods, so an absent
+// payload is valid for those sources. Every entry here must also be in
 // EMPTY_DATA_OK_KEYS so a pre-first-publish absence remains STALE_SEED rather
 // than a false-critical EMPTY; tests/health-empty-data-ok.test.mjs enforces it.
 const MISSING_DATA_IS_FAILURE_KEYS = new Set([
@@ -1977,12 +1977,6 @@ const MISSING_DATA_IS_FAILURE_KEYS = new Set([
   // successful cycle, including valid zero-record cycles. Fresh metadata
   // therefore cannot excuse a vanished data key.
   'cableHealth',
-  // #7845: seed-internet-outages now publishes an explicit payload for both CF
-  // Radar companions on every confirmed result, empty ones included, and never
-  // advances their success clock without one. Fresh metadata beside a vanished
-  // payload is therefore a failed publish, not a quiet period.
-  'ddosAttacks',
-  'trafficAnomalies',
   'notamClosures',
   'thermalEscalationBootstrap',
   'ucdpEventsBootstrap',
@@ -2045,8 +2039,11 @@ const ZERO_RECORD_DATA_OK_KEYS = new Set([
   // recordCount=0 (hasData=true). NARROW set, not EMPTY_DATA_OK_KEYS: the
   // seeder always publishes the array, so a MISSING canonical key is a real
   // publish failure → still EMPTY (crit). Siblings ddosAttacks/trafficAnomalies
-  // publish under the same contract since #7845 and are likewise strict about a
-  // missing payload — see MISSING_DATA_IS_FAILURE_KEYS.
+  // adopted the same producer contract in #7845 (an explicit payload on every
+  // confirmed result), but stay in the BROAD set until a natural production run
+  // proves it: promoting them the moment the producer merges would read the old
+  // seeder's legitimate meta-only state as a failed publish and page EMPTY/crit
+  // through the deploy window. Tightening them is tracked separately.
   'outages',
   // Official disclosure categories are sparse. The canonical snapshot always
   // exists after a successful query, but a quiet 90-day window can validly
