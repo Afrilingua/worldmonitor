@@ -506,9 +506,9 @@ export function bisDsrContentMeta(data) {
 
 export async function runBisExtendedSeed({
   fetchAllImpl = fetchAll,
-  runSeedImpl = runSeed,
+  runSeedImpl,
 } = {}) {
-  return runSeedImpl('economic', 'bis-extended', KEYS.dsr, fetchAllImpl, {
+  const options = {
     validateFn: validate,
     ttlSeconds: TTL,
     sourceVersion: 'bis-sdmx-csv-extended',
@@ -520,7 +520,12 @@ export async function runBisExtendedSeed({
     contentMeta: bisDsrContentMeta,
     maxContentAgeMin: BIS_DSR_MAX_CONTENT_AGE_MIN,
     preserveKeyTtls: BIS_PRESERVE_KEY_TTLS,
-  });
+  };
+
+  if (runSeedImpl) {
+    return runSeedImpl('economic', 'bis-extended', KEYS.dsr, fetchAllImpl, options);
+  }
+  return runSeed('economic', 'bis-extended', KEYS.dsr, fetchAllImpl, options);
 }
 
 if (process.argv[1]?.endsWith('seed-bis-extended.mjs')) {
