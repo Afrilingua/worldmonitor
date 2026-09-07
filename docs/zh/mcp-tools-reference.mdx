@@ -836,8 +836,8 @@ curl -s https://worldmonitor.app/mcp \
 | 名称 | 类型 | 必填 | 说明 |
 |------|------|---------:|-------------|
 | `country_code` | string | **是** | ISO 3166-1 alpha-2 国家代码，如 "IL"、"UA"、"IQ" |
-| `window_hours` | integer | 否 | 回溯窗口小时数，1-168。默认 168（7 天），与界面一致。上游报道查询固定为 7 天，因此更大的取值会被拒绝，而不是静默返回同一批事件。 |
-| `limit` | integer | 否 | 返回的时间线事件上限，保留最新的若干条。1-500，默认 200。 |
+| `window_hours` | integer | 否 | 回溯窗口小时数，0-168。传 0 或省略即为默认的 168（7 天），与界面一致。上游报道查询固定为 7 天，因此更大的取值会被拒绝，而不是静默返回同一批事件。 |
+| `limit` | integer | 否 | 返回的时间线事件上限，保留最新的若干条。0-500；传 0 或省略即为默认的 200。 |
 
 - **API 端点：** `GET /api/intelligence/v1/get-country-coverage`
 - **访问权限：** `subscription` — 需要 Pro 订阅，与 `get_country_brief`、`get_country_risk` 一致。RPC 工具：不支持 `summary` 参数（请用 `jmespath` 裁剪响应）。

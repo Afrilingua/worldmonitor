@@ -26,9 +26,11 @@ import {
   buildEventQueryTerms,
   countryEventFeed,
   countryHeadlineFeed,
+  fetchCountryCoverageFeeds,
   splitGoogleNewsTitle,
   type CoverageFetch,
 } from '../server/worldmonitor/intelligence/v1/_country-coverage-feeds.ts';
+import * as feedDigest from '../server/worldmonitor/news/v1/list-feed-digest.ts';
 import { isCountryHeadline } from '../shared/country-headline-match.ts';
 import { classifyByKeyword } from '../shared/threat-keyword-classifier.ts';
 import type { CountryTimelineIncident } from '../shared/country-timeline-events.ts';
@@ -1103,5 +1105,131 @@ describe('GetCountryCoverage — end to end over the real collector', () => {
     assert.ok(structured.length > 0, 'timed-out producers must still be reported');
     assert.ok(structured.every(s => s.state === 'failed'));
     assert.ok(structured[0]?.detail.includes('did not settle'));
+  });
+});
+
+
+describe('fetchCountryCoverageFeeds — the real coverage pipeline', () => {
+  // Everything above injects `fetchCoverage`, so the function that actually
+  // wires the fetch, the cutoff, the country gate, the classifier, the lane map
+  // and the clustering together never ran under test. It holds the
+  // cluster-before-filter ordering the panel depends on, so it needs its own.
+  const TERMS = ['israel', 'israeli', 'gaza'];
+
+  function item(overrides: Record<string, unknown> = {}) {
+    return {
+      source: 'Country events: Israel',
+      originPublisher: '',
+      originPublisherTrusted: false,
+      title: 'Protests erupt across Israel - Reuters',
+      link: 'https://example.org/a',
+      publishedAt: NOW_MS - 2 * HOUR,
+      isAlert: false,
+      level: 'medium',
+      category: 'protest',
+      confidence: 0.7,
+      classSource: 'keyword',
+      importanceScore: 0,
+      credibilityScore: 0,
+      corroborationCount: 1,
+      entityCorroborationCount: 0,
+      lang: 'en',
+      description: '',
+      isOpinion: false,
+      isFeelGood: false,
+      isEphemeralLiveCoverage: false,
+      tickers: [],
+      ...overrides,
+    };
+  }
+
+  function parseOf(items: ReturnType<typeof item>[]) {
+    return {
+      items,
+      parsedTotal: items.length,
+      droppedUndated: 0,
+      attempt: { source: 'direct' as const, failure: null, negativeCache: false },
+    };
+  }
+
+  /** Stub the shared transport; returns the two feeds in call order. */
+  async function runFeeds(
+    headlineItems: ReturnType<typeof item>[],
+    eventItems: ReturnType<typeof item>[],
+    cutoffMs = NOW_MS - 7 * DAY,
+  ): Promise<CoverageFetch> {
+    const seen: string[] = [];
+    const fetchFeed = (async (feed: { name: string }) => {
+      seen.push(feed.name);
+      return feed.name.startsWith('Country coverage')
+        ? parseOf(headlineItems)
+        : parseOf(eventItems);
+    }) as unknown as typeof feedDigest.fetchAndParseRss;
+    const result = await fetchCountryCoverageFeeds(
+      'Israel', 'IL', TERMS, cutoffMs, new AbortController().signal, fetchFeed,
+    );
+    assert.equal(seen.length, 2, 'both country feeds must be fetched');
+    return result;
+  }
+
+  it('drops items older than the cutoff', async () => {
+    const result = await runFeeds([], [
+      item({ title: 'Protests erupt across Israel - Reuters', publishedAt: NOW_MS - 2 * HOUR }),
+      item({ title: 'Older protests in Israel - AP', publishedAt: NOW_MS - 30 * DAY }),
+    ]);
+    assert.deepEqual(result.incidents.map(i => i.label), ['Protests erupt across Israel']);
+  });
+
+  it('strips the publisher suffix and keeps only country-relevant headlines', async () => {
+    const result = await runFeeds([
+      item({ title: 'Israel announces new measures - Reuters' }),
+      // Iran is mentioned first, so this headline belongs to Iran, not Israel.
+      item({ title: 'Iran responds to Israel over the strike - AP' }),
+    ], []);
+    assert.deepEqual(result.headlines.map(h => h.title), ['Israel announces new measures']);
+    assert.equal(result.headlines[0]?.source, 'Reuters');
+  });
+
+  it('drops an article whose category maps to no timeline lane', async () => {
+    // 'election' classifies as diplomatic, which has no lane in TIMELINE_LANES.
+    const result = await runFeeds([], [
+      item({ title: 'Israel election result confirmed - Reuters' }),
+    ]);
+    assert.equal(result.incidents.length, 0);
+  });
+
+  it('CLUSTERS BEFORE FILTERING, so a cluster named only by a later reprint is dropped', async () => {
+    // The regression guard for the ordering fix. Two outlets carry one incident;
+    // only the LATER headline names the country. The cluster is represented by
+    // its earliest member, which does not mention Israel, so the panel drops the
+    // whole cluster. Filtering first would have kept the later headline as its
+    // own incident and invented an event the UI never shows.
+    const base = NOW_MS - 4 * HOUR;
+    const result = await runFeeds([], [
+      item({ title: 'Thousands protest rising fuel prices outside government headquarters - Reuters', publishedAt: base }),
+      item({ title: 'Thousands protest rising fuel prices outside government headquarters in Israel - AP', publishedAt: base + 20 * 60_000 }),
+    ]);
+    assert.equal(result.incidents.length, 0, 'the cluster representative does not name the country');
+  });
+
+  it('keeps a cluster whose earliest member does name the country', async () => {
+    const base = NOW_MS - 4 * HOUR;
+    const result = await runFeeds([], [
+      item({ title: 'Thousands protest fuel prices in Israel - Reuters', publishedAt: base }),
+      item({ title: 'Thousands protest fuel prices in Israel - AP', publishedAt: base + 20 * 60_000 }),
+    ]);
+    assert.equal(result.incidents.length, 1, 'one incident, not two reprints');
+    assert.equal(result.incidents[0]?.timestamp, base, 'the cluster keeps the earliest timestamp');
+    assert.equal(result.incidents[0]?.lane, 'protest');
+  });
+
+  it('classifies the RAW title but labels with the NORMALIZED one', async () => {
+    // rss.ts classifies before normalization and country-coverage.ts labels
+    // after it, so a publisher name must not leak into the label.
+    const result = await runFeeds([], [
+      item({ title: 'Airstrike reported in Israel - The Jerusalem Post' }),
+    ]);
+    assert.equal(result.incidents[0]?.label, 'Airstrike reported in Israel');
+    assert.equal(result.incidents[0]?.lane, 'conflict');
   });
 });

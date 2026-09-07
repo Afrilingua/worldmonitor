@@ -160,10 +160,14 @@ export async function fetchCountryCoverageFeeds(
   searchTerms: readonly string[],
   cutoffMs: number,
   signal: AbortSignal,
+  // Injectable so a test can drive the real pipeline — cutoff, country gate,
+  // classifier, lane map, clustering — without a network. An ESM namespace is
+  // read-only, so this cannot be stubbed from the outside.
+  fetchFeed: typeof fetchAndParseRss = fetchAndParseRss,
 ): Promise<CoverageFetch> {
   const [headlineResult, eventResult] = await Promise.all([
-    fetchAndParseRss(countryHeadlineFeed(country), CLASSIFIER_VARIANT, signal),
-    fetchAndParseRss(countryEventFeed(country, searchTerms), CLASSIFIER_VARIANT, signal),
+    fetchFeed(countryHeadlineFeed(country), CLASSIFIER_VARIANT, signal),
+    fetchFeed(countryEventFeed(country, searchTerms), CLASSIFIER_VARIANT, signal),
   ]);
 
   const headlines: CoverageHeadline[] = [];

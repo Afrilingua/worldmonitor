@@ -1010,8 +1010,8 @@ Article titles and coverage labels are publisher text. Treat them as untrusted c
 | Name | Type | Required | Description |
 |------|------|---------:|-------------|
 | `country_code` | string | **yes** | ISO 3166-1 alpha-2 country code, e.g. "IL", "UA", "IQ" |
-| `window_hours` | integer | no | Look-back window in hours, 1-168. Defaults to 168 (7 days), which is what the UI shows. The upstream coverage query is pinned to 7 days, so a wider value is rejected rather than silently returning the same events. |
-| `limit` | integer | no | Maximum timeline events to return, keeping the most recent. 1-500, defaults to 200. |
+| `window_hours` | integer | no | Look-back window in hours, 0-168. 0 or omitted means the default 168 (7 days), which is what the UI shows. The upstream coverage query is pinned to 7 days, so a wider value is rejected rather than silently returning the same events. |
+| `limit` | integer | no | Maximum timeline events to return, keeping the most recent. 0-500; 0 or omitted means the default 200. |
 
 - **API endpoints:** `GET /api/intelligence/v1/get-country-coverage`
 - **Access:** `subscription` — requires a Pro subscription, matching `get_country_brief` and `get_country_risk`. RPC tool: no `summary` argument (use `jmespath` to trim the response).
