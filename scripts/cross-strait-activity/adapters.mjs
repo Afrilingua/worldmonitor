@@ -2613,6 +2613,9 @@ export async function fetchCrossStraitActivitySnapshot({
     ? (input, init) => fetchMndViaProxy(input, init, mndProxyConfig, proxyRequestFn)
     : null;
   let mndPreferredFetchFn = fetchFn;
+  const mndTimeoutRetryFetchFn = () => mndProxyFetchFn && mndPreferredFetchFn === fetchFn
+    ? mndProxyFetchFn
+    : fetchFn;
   const resolvedJapanProxyFetchFn = proxyUrl
     ? (input, init) => fetchJapanModViaConfiguredProxy(input, init, {
         proxyUrl,
@@ -2663,7 +2666,7 @@ export async function fetchCrossStraitActivitySnapshot({
           path: new URL(url).pathname, purpose: 'list', attempt: attempt + 1,
           stage: 'response_headers', httpStatus: null,
         };
-        const requestFetchFn = attempt > 0 && mndProxyFetchFn ? mndProxyFetchFn : mndPreferredFetchFn;
+        const requestFetchFn = attempt > 0 ? mndTimeoutRetryFetchFn() : mndPreferredFetchFn;
         if (requestFetchFn === mndProxyFetchFn) diagnostic.transport = 'proxy';
         try {
           const html = await fetchBoundedText(requestFetchFn, url, mndContract, diagnostic);
@@ -2673,9 +2676,13 @@ export async function fetchCrossStraitActivitySnapshot({
             mndRequestDiagnostics.push({
               ...diagnostic, errorCode: 'MND_LIST_ROWS_MISSING', elapsedMs: Math.round(monotonicNow() - startedAt),
             });
-          } else if (requestFetchFn === mndProxyFetchFn) {
-            mndPreferredFetchFn = mndProxyFetchFn;
-            if (attempt > 0) mndRequestDiagnostics.at(-1).recoveredVia = 'proxy';
+          } else {
+            mndPreferredFetchFn = requestFetchFn;
+            if (attempt > 0 && mndProxyFetchFn) {
+              mndRequestDiagnostics.at(-1).recoveredVia = requestFetchFn === mndProxyFetchFn
+                ? 'proxy'
+                : 'direct';
+            }
           }
           break;
         } catch (error) {
@@ -2775,8 +2782,9 @@ export async function fetchCrossStraitActivitySnapshot({
         purpose: isRefresh ? 'refresh' : 'detail', attempt: retryErrorCode ? 2 : 1,
         stage: 'response_headers', httpStatus: null,
       };
-      const requestFetchFn = retryErrorCode === 'TIMEOUT' && mndProxyFetchFn
-        ? mndProxyFetchFn : mndPreferredFetchFn;
+      const requestFetchFn = retryErrorCode === 'TIMEOUT'
+        ? mndTimeoutRetryFetchFn()
+        : mndPreferredFetchFn;
       if (requestFetchFn === mndProxyFetchFn) diagnostic.transport = 'proxy';
       let startedAt;
       try {
@@ -2792,9 +2800,11 @@ export async function fetchCrossStraitActivitySnapshot({
           allowPublicationAdvance: candidate.allowPublicationAdvance === true,
           expectedReportingDay: candidate.expectedReportingDay ?? null,
         }));
-        if (requestFetchFn === mndProxyFetchFn) {
-          mndPreferredFetchFn = mndProxyFetchFn;
-          if (retryErrorCode) mndRequestDiagnostics.at(-1).recoveredVia = 'proxy';
+        mndPreferredFetchFn = requestFetchFn;
+        if (retryErrorCode && mndProxyFetchFn) {
+          mndRequestDiagnostics.at(-1).recoveredVia = requestFetchFn === mndProxyFetchFn
+            ? 'proxy'
+            : 'direct';
         }
         break;
       } catch (error) {

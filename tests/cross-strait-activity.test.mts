@@ -3039,6 +3039,83 @@ describe('quantified cross-Strait activity (#5575)', () => {
     });
   }
 
+  it('uses direct retry when a preferred proxy later times out on an MND list page', async () => {
+    const transports: string[] = [];
+    const snapshot = await fetchCrossStraitActivitySnapshot({
+      now: Date.parse(retrievedAt), proxyUrl: '', mndProxyUrl: 'https://proxy.test',
+      sleepFn: async () => {},
+      fetchFn: async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes('mod.go.jp')) return new Response(usableJapanEnglishIndex);
+        transports.push(`direct:${new URL(url).pathname}`);
+        if (url === CROSS_STRAIT_SOURCE_CONTRACTS.taiwanMnd.listUrl) {
+          throw new Error('request timeout');
+        }
+        if (url.endsWith('/plaactlist/2')) return new Response(mndListWithCount(1, 90_100));
+        return new Response(fixture('mnd-detail.html'));
+      },
+      proxyRequestFn: async (url: string) => {
+        transports.push(`proxy:${new URL(url).pathname}`);
+        if (url.endsWith('/plaactlist/2')) throw new Error('proxy timeout');
+        return {
+          status: 200,
+          buffer: Buffer.from(url.includes('plaactlist')
+            ? mndListWithCount(MND_MAX_DETAIL_REQUESTS_PER_RUN - 1)
+            : fixture('mnd-detail.html')),
+        };
+      },
+    });
+    const mnd = snapshot.sources.find(source => source.id === 'taiwan-mnd');
+
+    assert.deepEqual(transports.slice(0, 5), [
+      'direct:/en/news/plaactlist',
+      'proxy:/en/news/plaactlist',
+      'proxy:/en/news/plaactlist/2',
+      'direct:/en/news/plaactlist/2',
+      'direct:/en/News/PLAAct/90000',
+    ]);
+    assert.equal(mnd.transportStatus, 'fresh');
+    assert.equal(mnd.requestDiagnostics[1].recoveredVia, 'direct');
+  });
+
+  it('uses direct retry when a preferred proxy later times out on an MND detail', async () => {
+    const transports: string[] = [];
+    const secondDetailUrl = 'https://www.mnd.gov.tw/en/News/PLAAct/90001';
+    const snapshot = await fetchCrossStraitActivitySnapshot({
+      now: Date.parse(retrievedAt), proxyUrl: '', mndProxyUrl: 'https://proxy.test',
+      sleepFn: async () => {},
+      fetchFn: async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes('mod.go.jp')) return new Response(usableJapanEnglishIndex);
+        transports.push(`direct:${new URL(url).pathname}`);
+        if (url.includes('plaactlist')) throw new Error('request timeout');
+        return new Response(fixture('mnd-detail.html'));
+      },
+      proxyRequestFn: async (url: string) => {
+        transports.push(`proxy:${new URL(url).pathname}`);
+        if (url === secondDetailUrl) throw new Error('proxy timeout');
+        return {
+          status: 200,
+          buffer: Buffer.from(url.includes('plaactlist')
+            ? mndListWithCount(MND_MAX_DETAIL_REQUESTS_PER_RUN)
+            : fixture('mnd-detail.html')),
+        };
+      },
+    });
+    const mnd = snapshot.sources.find(source => source.id === 'taiwan-mnd');
+
+    assert.deepEqual(transports.slice(0, 6), [
+      'direct:/en/news/plaactlist',
+      'proxy:/en/news/plaactlist',
+      'proxy:/en/News/PLAAct/90000',
+      'proxy:/en/News/PLAAct/90001',
+      'direct:/en/News/PLAAct/90001',
+      'direct:/en/News/PLAAct/90002',
+    ]);
+    assert.equal(mnd.transportStatus, 'fresh');
+    assert.equal(mnd.requestDiagnostics[1].recoveredVia, 'direct');
+  });
+
   for (const mndProxyUrl of ['', 'not-a-proxy', 'proxy.test:99999:user:pass']) {
     it(`keeps bounded direct MND retries with proxy configuration ${JSON.stringify(mndProxyUrl)}`, async () => {
       let directCalls = 0;
@@ -3155,10 +3232,12 @@ describe('quantified cross-Strait activity (#5575)', () => {
     assert.ok(mnd.requestDiagnostics.every(row => row.recoveredVia === undefined));
   });
 
-  for (const [failure, code] of [
+  for (const [failure, code, status] of [
     ['timeout', 'TIMEOUT'], ['metadata', 'MND_PUBLICATION_METADATA_MISSING'],
-    ['redirect', 'HTTP_302'], ['oversized', 'RESPONSE_TOO_LARGE'],
-    ['invalid', 'MND_PROXY_RESPONSE_INVALID'],
+    ['redirect', 'HTTP_302', 302], ['oversized', 'RESPONSE_TOO_LARGE'],
+    ['invalid', 'MND_PROXY_RESPONSE_INVALID'], ['invalid-status', 'MND_PROXY_RESPONSE_INVALID', 700],
+    ['no-content-204', 'MND_PUBLICATION_METADATA_MISSING', 204],
+    ['no-content-205', 'MND_PUBLICATION_METADATA_MISSING', 205],
   ] as const) {
     it(`rejects MND proxy ${failure} without selecting the invalid route or adding a third attempt`, async () => {
       const direct: string[] = [];
@@ -3184,7 +3263,7 @@ describe('quantified cross-Strait activity (#5575)', () => {
           else if (failure === 'metadata') buffer = Buffer.from(mndDetailWithoutPublicationMetadata());
           else if (failure === 'oversized') buffer = Buffer.alloc(CROSS_STRAIT_SOURCE_CONTRACTS.taiwanMnd.maxResponseBytes + 1);
           return {
-            status: failure === 'redirect' ? 302 : 200,
+            status: status ?? 200,
             location: 'https://attacker.test/SECRET',
             buffer,
           };
