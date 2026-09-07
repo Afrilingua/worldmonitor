@@ -30,7 +30,13 @@ export const PREMIUM_RPC_PATHS = new Set<string>([
   // costs two live outbound feed fetches plus five upstream reads, so it is
   // gated like get-country-intel-brief rather than like the cheap Redis read
   // get-country-risk. This is what makes the Pro decision real on the REST
-  // path; MCP's own `subscription` class only covers MCP callers.
+  // path; the MCP `subscription` class only covers MCP callers.
+  //
+  // Keep every comment in this block free of single quotes. readPremiumRpcPaths
+  // (scripts/lib/openapi-codegen.mjs) recovers these paths with a bare
+  // quoted-string regex over the whole block, so one apostrophe in a comment
+  // pairs with the next opening quote and silently eats a path out of the
+  // published security contract.
   '/api/intelligence/v1/get-country-coverage',
   '/api/intelligence/v1/list-market-implications',
   '/api/intelligence/v1/get-regional-snapshot',

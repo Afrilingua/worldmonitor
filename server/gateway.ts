@@ -328,6 +328,13 @@ const RPC_CACHE_TIER: Record<string, CacheTier> = {
   '/api/market/v1/list-etf-flows': 'slow',
   '/api/research/v1/list-hackernews-items': 'slow',
   '/api/intelligence/v1/get-country-risk': 'slow',
+  // Country coverage caches its own expensive reads in Redis (1h healthy /
+  // 5min empty per feed), so this tier only collapses repeat identical
+  // queries — country, window and limit are all query params and the response
+  // does not vary by caller. Deliberately `medium` rather than the sibling
+  // `slow`: this response can carry degraded=true, and an hour of edge cache
+  // would pin a transient upstream failure long after it healed.
+  '/api/intelligence/v1/get-country-coverage': 'medium',
   '/api/intelligence/v1/get-risk-scores': 'slow',
   '/api/intelligence/v1/get-pizzint-status': 'slow',
   '/api/intelligence/v1/classify-event': 'static',
