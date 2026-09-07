@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { stripComments } from '../scripts/lib/source-scan.mjs';
+import { readFileSync, readdirSync, lstatSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { collectTsFiles, lexSource, stripComments } from '../scripts/lib/source-scan.mjs';
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Why this test exists (#7833)
@@ -66,5 +72,46 @@ describe('stripComments', () => {
     // A trailing backslash before the quote would otherwise swallow it and
     // leak the string state into the code that follows.
     assert.ok(survives(["const b = '\\\\';", 'this.content.append(row);'].join('\n')));
+  });
+
+  it('reads a regex literal as a regex, not as quoted string content', () => {
+    // Live in src/main.ts:454 — `!/^'[^']*'$/.test(token)`. An odd number of
+    // apostrophes inside a regex de-synced the lexer for the entire rest of
+    // the file, which is how 13 src/ files were being mis-scanned.
+    const src = [
+      "const ok = tokens.some(t => !/^'[^']*'$/.test(t));",
+      'this.content.append(row);',
+    ].join('\n');
+    assert.ok(survives(src));
+    assert.equal(lexSource(src).ok, true);
+  });
+
+  it('does not mistake division for a regex', () => {
+    // The other half of the ambiguity: after a value, `/` divides. Reading it
+    // as a regex would swallow code up to the next slash.
+    const src = ['const ratio = width / height;', 'this.content.append(row);'].join('\n');
+    assert.ok(survives(src));
+    assert.equal(lexSource(src).ok, true);
+  });
+
+  it('reports an untrustworthy lex instead of silently blanking', () => {
+    // The backstop for whatever the regex heuristic still gets wrong: a
+    // terminal state other than `code` means the scan cannot be trusted, and
+    // the gates fail on it rather than reporting a clean run over unread code.
+    assert.equal(lexSource("const s = 'unterminated;").ok, false);
+    assert.equal(lexSource('const t = `unterminated;').ok, false);
+    assert.equal(lexSource('const u = `a ${ b ;').ok, false);
+    assert.equal(lexSource('const v = 1; // fine\n/* also fine */').ok, true);
+  });
+
+  it('lexes every scanned source file cleanly', () => {
+    // The assertion that would have caught this class at the source: if any
+    // real file fails to lex, both gates are scanning less than they claim.
+    const files = collectTsFiles(join(REPO_ROOT, 'src'), { readdirSync, lstatSync, join });
+    const bad = files
+      .map((abs) => [abs, lexSource(readFileSync(abs, 'utf8'))] as const)
+      .filter(([, r]) => !r.ok)
+      .map(([abs, r]) => `${abs} (ended in ${r.terminalMode})`);
+    assert.deepEqual(bad, []);
   });
 });

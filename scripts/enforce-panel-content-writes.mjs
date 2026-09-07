@@ -33,7 +33,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isMainModule } from './lib/main-module.mjs';
-import { collectTsFiles, stripComments } from './lib/source-scan.mjs';
+import { collectTsFiles, lexSource } from './lib/source-scan.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -240,8 +240,17 @@ export function adviceFor(label) {
 export function scanRepo(root = REPO_ROOT) {
   const componentsDir = path.join(root, 'src/components');
   const allFiles = collectTsFiles(componentsDir, { readdirSync, lstatSync, join: path.join });
+  // Track files the lexer could not read confidently. A mis-lex does not throw
+  // — it silently blanks real code, and the guard then reports a clean scan of
+  // a file it never saw. Surfacing it is the difference between a gate that is
+  // wrong and a gate that is wrong AND quiet (#7833 review).
+  const unlexable = [];
   const codeByFile = new Map(
-    allFiles.map((abs) => [abs, stripComments(readFileSync(abs, 'utf8'))]),
+    allFiles.map((abs) => {
+      const { code, ok, terminalMode } = lexSource(readFileSync(abs, 'utf8'));
+      if (!ok) unlexable.push(`${path.relative(root, abs)} (ended in ${terminalMode})`);
+      return [abs, code];
+    }),
   );
 
   const baseOf = new Map();
@@ -270,6 +279,7 @@ export function scanRepo(root = REPO_ROOT) {
   const observedFiles = new Set(observed.map((pair) => pair.split(' :: ')[0]));
 
   return {
+    unlexable,
     subclassFiles,
     observed,
     observedFiles,
@@ -285,6 +295,13 @@ export function scanRepo(root = REPO_ROOT) {
 function main() {
   const result = scanRepo();
   const problems = [];
+
+  if (result.unlexable.length > 0) {
+    problems.push(
+      'These files could not be lexed confidently, so this guard scanned less of them than it reports. Fix the scanner in scripts/lib/source-scan.mjs rather than lowering this check:',
+      ...result.unlexable.map((entry) => `  - ${entry}`),
+    );
+  }
 
   if (result.subclassFiles.length < MIN_PANEL_SUBCLASS_FILES) {
     problems.push(

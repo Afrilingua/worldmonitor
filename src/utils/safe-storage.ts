@@ -121,6 +121,36 @@ export function safeStorageRemoveChecked(key: string): boolean {
 }
 
 /**
+ * Every key/value pair in storage, or `ok: false` when reading them failed.
+ *
+ * For the caller that must not report success over a partial read. A handle can
+ * exist while enumeration or an individual `getItem` throws, so
+ * `isStorageAvailable()` is not enough on its own: settings export checked
+ * availability, then built its payload from the degrading accessors, and
+ * produced an empty file the UI still announced as a successful backup — the
+ * exact outcome that check was added to prevent (#7833 review).
+ *
+ * The whole enumeration runs inside one `try`, so a throw part-way through
+ * reports failure rather than silently truncating.
+ */
+export function safeStorageSnapshot(): { ok: boolean; entries: Array<[string, string]> } {
+  const store = storageHandle();
+  if (store === null) return { ok: false, entries: [] };
+  try {
+    const entries: Array<[string, string]> = [];
+    for (let i = 0; i < store.length; i++) {
+      const key = store.key(i);
+      if (key === null) continue;
+      const value = store.getItem(key);
+      if (value !== null) entries.push([key, value]);
+    }
+    return { ok: true, entries };
+  } catch {
+    return { ok: false, entries: [] };
+  }
+}
+
+/**
  * Every key currently in storage, or `[]` when storage is unusable.
  *
  * Snapshotting up front is deliberate: `localStorage.key(i)` is index-based
