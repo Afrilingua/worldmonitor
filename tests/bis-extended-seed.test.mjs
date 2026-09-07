@@ -22,6 +22,7 @@ import {
   publishDatasetIndependently,
   dsrAfterPublish,
   fetchAll,
+  runBisExtendedSeed,
   KEYS,
   META_KEYS,
 } from '../scripts/seed-bis-extended.mjs';
@@ -351,9 +352,18 @@ describe('seed-bis-extended parser', () => {
       ]);
     });
 
+    const retainedValues = new Map([
+      [KEYS.spp, JSON.stringify({ entries: [{ countryCode: 'US', indexValue: 101.2 }], fetchedAt: 'old-payload' })],
+      [META_KEYS.spp, JSON.stringify({ fetchedAt: 1, recordCount: 1 })],
+    ]);
     await withRedisCapture(({ body }) => {
+      if (Array.isArray(body) && Array.isArray(body[0])) {
+        if (body.some(([command]) => command === 'SET')) return httpFailure;
+        return pipelineOk({ body });
+      }
       if (body?.[0] === 'SET' && body?.[1] === META_KEYS.spp) return httpFailure;
-      return pipelineOk({ body });
+      if (body?.[0] === 'SET') retainedValues.set(body[1], body[2]);
+      return redisOk();
     }, async (calls) => {
       await publishDatasetIndependently(KEYS.spp, {
         entries: [{ countryCode: 'US', indexValue: 108.5 }],
@@ -362,6 +372,68 @@ describe('seed-bis-extended parser', () => {
       assertExpireCohort(calls, [
         [KEYS.spp, BIS_TTL_SECONDS],
         [META_KEYS.spp, BIS_META_TTL_SECONDS],
+      ]);
+      assert.deepEqual(JSON.parse(retainedValues.get(KEYS.spp)), {
+        entries: [{ countryCode: 'US', indexValue: 101.2 }],
+        fetchedAt: 'old-payload',
+      });
+      assert.deepEqual(JSON.parse(retainedValues.get(META_KEYS.spp)), {
+        fetchedAt: 1,
+        recordCount: 1,
+      });
+    });
+  });
+
+  it('preserves the BIS last-good manifest when canonical DSR publication fails', async () => {
+    let invocation;
+    await runBisExtendedSeed({
+      runSeedImpl: async (...args) => {
+        invocation = args;
+      },
+    });
+    const options = invocation[4];
+    const failedTransaction = {
+      ok: false,
+      status: 503,
+      headers: { get: () => null },
+      json: async () => ({ result: 'ERR' }),
+      text: async () => 'unavailable',
+    };
+    const pipelineOk = ({ body }) => ({
+      ok: true,
+      status: 200,
+      json: async () => body.map(() => ({ result: 1 })),
+    });
+
+    await withRedisCapture(({ body }) => {
+      if (Array.isArray(body) && Array.isArray(body[0])) {
+        if (body.some(([command]) => command === 'SET')) return failedTransaction;
+        return pipelineOk({ body });
+      }
+      if (body?.[0] === 'SET' && body?.[1] === KEYS.dsr) return failedTransaction;
+      return redisOk();
+    }, async (calls) => {
+      await assert.rejects(
+        runSeed(
+          'economic',
+          'bis-extended',
+          KEYS.dsr,
+          async () => ({
+            dsr: { entries: [{ countryCode: 'US', dsrPct: 10.4, period: '2024-Q4' }] },
+            spp: null,
+            cpp: null,
+          }),
+          options,
+        ),
+        /503|publication|transaction/i,
+      );
+      assertExpireCohort(calls, [
+        [KEYS.dsr, BIS_TTL_SECONDS],
+        [META_KEYS.dsr, BIS_META_TTL_SECONDS],
+        [KEYS.spp, BIS_TTL_SECONDS],
+        [META_KEYS.spp, BIS_META_TTL_SECONDS],
+        [KEYS.cpp, BIS_TTL_SECONDS],
+        [META_KEYS.cpp, BIS_META_TTL_SECONDS],
       ]);
     });
   });

@@ -295,6 +295,58 @@ describe('FRED publication gates', () => {
     }
   });
 
+  it('leaves the complete last-good cohort unchanged when a late side publication fails', async () => {
+    const captured = await captureFredSeedOptions();
+    const clock = { now: 1_700_000_000_000 };
+    const entries = primeFredConsumerCohort(clock);
+    const before = new Map([...entries].map(([key, entry]) => [key, clone(entry.value)]));
+    const failedMetaKey = companionMetaKey(`${FRED_KEY_PREFIX}:${FRED_SEED_SERIES[1]}:0`);
+
+    globalThis.fetch = async (url, init = {}) => {
+      const body = init.body ? JSON.parse(init.body) : null;
+      if (String(url).endsWith('/multi-exec')) {
+        return Response.json(body.map((command) => (
+          command[1] === failedMetaKey
+            ? { error: 'ERR simulated late metadata failure' }
+            : { result: 'OK' }
+        )));
+      }
+      if (String(url).endsWith('/pipeline')) {
+        return Response.json(body.map(([, key, ttlSeconds]) => {
+          const entry = entries.get(key);
+          if (!entry) return { result: 0 };
+          entry.expiresAt = clock.now + Number(ttlSeconds) * 1000;
+          return { result: 1 };
+        }));
+      }
+      if (body?.[0] === 'SET') {
+        if (body[1] === failedMetaKey) return new Response('unavailable', { status: 503 });
+        if (entries.has(body[1])) {
+          entries.set(body[1], {
+            value: JSON.parse(body[2]),
+            expiresAt: clock.now + Number(body[4] ?? FRED_TTL) * 1000,
+          });
+        }
+      }
+      return Response.json({ result: 'OK' });
+    };
+
+    await assert.rejects(
+      runSeed(
+        captured.domain,
+        captured.resource,
+        captured.canonicalKey,
+        async () => makeFredBatch(MIN_SERIES_COUNT),
+        captured.options,
+      ),
+      /seed-meta|metadata|command result/i,
+    );
+
+    for (const [key, value] of before) {
+      assert.deepEqual(entries.get(key)?.value, value, `${key} must remain on the prior cohort`);
+    }
+  });
+
   it('publishes every consumer key and activation after a retained source failure recovers', async () => {
     const captured = await captureFredSeedOptions();
     const clock = { now: 1_700_000_000_000 };
