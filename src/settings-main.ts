@@ -2,7 +2,7 @@ import './styles/main.css';
 import './styles/settings-window.css';
 import { SettingsManager } from '@/services/settings-manager';
 import { exportSettings, importSettings, type ImportResult } from '@/utils/settings-persistence';
-import { safeStorageRemove, safeStorageSet } from '@/utils/safe-storage';
+import { safeStorageGet, safeStorageRemove, safeStorageSet } from '@/utils/safe-storage';
 import {
   SETTINGS_CATEGORIES,
   HUMAN_LABELS,
@@ -676,9 +676,9 @@ function initDiagnostics(): void {
   const trafficCount = document.getElementById('trafficCount');
 
   if (fetchDebugToggle) {
-    fetchDebugToggle.checked = localStorage.getItem('wm-debug-log') === '1';
+    fetchDebugToggle.checked = safeStorageGet('wm-debug-log') === '1';
     fetchDebugToggle.addEventListener('change', () => {
-      localStorage.setItem('wm-debug-log', fetchDebugToggle.checked ? '1' : '0');
+      safeStorageSet('wm-debug-log', fetchDebugToggle.checked ? '1' : '0');
     });
   }
 

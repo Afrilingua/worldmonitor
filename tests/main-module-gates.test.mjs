@@ -42,6 +42,20 @@ const GATES = [
     expected: /Panel content-write guard failed/,
   },
   {
+    file: 'scripts/enforce-safe-local-storage.mjs',
+    setup(root) {
+      mkdirSync(join(root, 'src/services'), { recursive: true });
+      writeFileSync(
+        join(root, 'src/services/failing-store.ts'),
+        "export const stored = localStorage.getItem('wm-key');\n",
+      );
+    },
+    // Deliberately the unlisted-deref line rather than the headline. The
+    // fixture tree is one file, so the population floor also trips — matching
+    // the headline alone would pass even if the deref patterns had gone stale.
+    expected: /These dereference localStorage directly/,
+  },
+  {
     file: 'scripts/check-local-secret-dumps.mjs',
     setup(root) {
       writeFileSync(join(root, '.env.vercel-backup'), 'do-not-use\n');
