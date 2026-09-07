@@ -21,6 +21,7 @@ import {
 import type { ServerFeed } from '../../news/v1/_feeds';
 import { classifyByKeyword } from '../../../../shared/threat-keyword-classifier';
 import type { EventCategory, ThreatLevel } from '../../../../shared/threat-keyword-classifier';
+import { clusterCountryTimelineIncidents } from '../../../../shared/country-timeline-events';
 import type {
   CountryTimelineIncident,
   CountryTimelineLane,
@@ -181,16 +182,26 @@ export async function fetchCountryCoverageFeeds(
   }
   headlines.sort((a, b) => b.publishedAtMs - a.publishedAtMs);
 
-  const incidents: CountryTimelineIncident[] = [];
+  const parsed: CountryTimelineIncident[] = [];
   for (const item of eventResult.items) {
     if (item.publishedAt < cutoffMs) continue;
     const incident = toIncident(item);
-    // The panel keeps only incidents whose LABEL mentions the country, using
-    // the same search terms it fed the query.
-    if (incident && firstMentionPosition(incident.label, searchTerms) !== Infinity) {
-      incidents.push(incident);
-    }
+    if (incident) parsed.push(incident);
   }
+
+  // ORDER IS LOAD-BEARING: cluster FIRST, then drop clusters whose label does
+  // not mention the country. The panel runs it in exactly this order —
+  // fetchCountryCoverage clusters (country-coverage.ts) and country-intel.ts
+  // filters the clustered result with hasCountryTerm afterwards.
+  //
+  // Filtering first would change the answer, not just the order. A cluster is
+  // represented by its EARLIEST member, so when two outlets carry one incident
+  // and only the later headline names the country, filtering first keeps that
+  // later headline as its own incident while the panel drops the whole cluster
+  // (its representative never mentions the country). Same snapshot, different
+  // timeline.
+  const incidents = clusterCountryTimelineIncidents(parsed)
+    .filter(incident => firstMentionPosition(incident.label, searchTerms) !== Infinity);
 
   return { headlines, incidents, headlineResult, eventResult };
 }

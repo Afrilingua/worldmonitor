@@ -96,7 +96,11 @@ function toStatus(result: StructuredSourceResult, now: number): CountryCoverageS
  */
 function coverageStatus(
   source: string,
-  result: { parsedTotal: number; attempt?: { failure: string | null } } | null,
+  result: {
+    parsedTotal: number;
+    droppedUndated?: number;
+    attempt?: { failure: string | null };
+  } | null,
   contributed: number,
   failure: string | null,
 ): CountryCoverageSourceStatus {
@@ -117,12 +121,26 @@ function coverageStatus(
   if (contributed > 0) {
     return { source, state: 'ok', detail: '', fetchedAt: '', ageSeconds: 0, contributed };
   }
+  // Every item parsed but every one was dropped for an unusable date. That is a
+  // broken feed, not a quiet country — the digest logs the same condition as
+  // FEED_HEALTH_WARNING all-undated — so it must not report as `empty`.
+  const droppedUndated = result?.droppedUndated ?? 0;
+  if (result && result.parsedTotal > 0 && droppedUndated >= result.parsedTotal) {
+    return {
+      source,
+      state: 'failed',
+      detail: `The feed responded but all ${droppedUndated} of its items carried an unusable publication date and were dropped. This is not evidence of a quiet period.`,
+      fetchedAt: '',
+      ageSeconds: 0,
+      contributed: 0,
+    };
+  }
   return {
     source,
-    state: 'empty',
+    state: result && result.parsedTotal === 0 ? 'unknown' : 'empty',
     detail: result && result.parsedTotal === 0
-      ? 'The feed responded but contained no recognizable items.'
-      : 'The feed responded; nothing in it matched this country inside the window.',
+      ? 'The feed responded but contained no recognizable items, which an upstream block page also looks like. Treat this as unconfirmed rather than quiet.'
+      : 'The feed responded with items; none of them matched this country inside the window.',
     fetchedAt: '',
     ageSeconds: 0,
     contributed: 0,
@@ -274,7 +292,10 @@ export async function getCountryCoverage(
     headlines,
     events,
     sources,
-    degraded: sources.some(s => s.state === 'stale' || s.state === 'failed' || s.state === 'unavailable'),
+    // `unknown` degrades too. It means a producer returned nothing and this
+    // surface could not confirm its upstream was reachable — precisely the case
+    // an agent would otherwise read as a quiet week.
+    degraded: sources.some(s => s.state !== 'ok' && s.state !== 'empty'),
     containment: CONTAINMENT,
   };
 }

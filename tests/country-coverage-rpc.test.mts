@@ -536,6 +536,33 @@ describe('GetCountryCoverage — country naming', () => {
 describe('collectStructuredIncidents — producer status', () => {
   const ISRAEL = { lat: 31.78, lon: 35.22 };
 
+  function flight(callsign: string) {
+    return {
+      id: callsign,
+      callsign,
+      hexCode: '',
+      registration: '',
+      aircraftType: 'MILITARY_AIRCRAFT_TYPE_TRANSPORT',
+      aircraftModel: 'C-17',
+      operator: 'MILITARY_OPERATOR_UNSPECIFIED',
+      operatorCountry: 'US',
+      location: { latitude: ISRAEL.lat, longitude: ISRAEL.lon },
+      altitude: 0,
+      heading: 0,
+      speed: 0,
+      verticalRate: 0,
+      onGround: false,
+      squawk: '',
+      origin: '',
+      destination: '',
+      lastSeenAt: NOW_MS - HOUR,
+      firstSeenAt: NOW_MS - 2 * HOUR,
+      confidence: 'MILITARY_CONFIDENCE_HIGH',
+      isInteresting: true,
+      note: '',
+    };
+  }
+
   function structuredDeps(overrides: Partial<StructuredDependencies> = {}): StructuredDependencies {
     return {
       listUnrestEvents: async () => ({ events: [], clusters: [], pagination: undefined }),
@@ -545,7 +572,7 @@ describe('collectStructuredIncidents — producer status', () => {
       // IRAN_EVENTS_ENABLED is off.
       listIranEvents: async () => ({ events: [], scrapedAt: '0' }),
       listMilitaryFlights: async () => ({ flights: [], clusters: [], pagination: undefined }),
-      seedFetchedAt: async () => NOW_MS - HOUR,
+      readSeed: async () => ({ status: 'hit' as const, fetchedAtMs: NOW_MS - HOUR }),
       ...overrides,
     } as StructuredDependencies;
   }
@@ -579,10 +606,39 @@ describe('collectStructuredIncidents — producer status', () => {
     ]);
   });
 
-  it('an empty producer is "empty" and says why', async () => {
+  it('an empty producer whose cache WAS readable is "empty" and says why', async () => {
     const protests = find(await collect(), 'structured:protests');
     assert.equal(protests.state, 'empty');
     assert.ok(protests.detail.length > 0);
+  });
+
+  it('a producer with no health signal reports "unknown", never "empty"', async () => {
+    // ACLED has no single seeded snapshot key, and list-acled-events returns an
+    // empty array for both a real outage and a genuinely quiet week. Claiming
+    // `empty` there would assert a health this surface cannot observe.
+    const conflicts = find(await collect(), 'structured:conflicts');
+    assert.equal(conflicts.state, 'unknown');
+    assert.ok(conflicts.detail.includes('cannot confirm'));
+  });
+
+  it('a DEAD upstream reports failed, not empty, even though the handler swallows its error', async () => {
+    // The regression this guards: list-unrest-events catches its own failure and
+    // returns { events: [] }, so the producer looks quiet unless the seed read
+    // is consulted. Redis erroring must surface as failed.
+    const errored = find(
+      await collect({ readSeed: async () => ({ status: 'error' as const, fetchedAtMs: 0 }) }),
+      'structured:protests',
+    );
+    assert.equal(errored.state, 'failed');
+    assert.ok(errored.detail.includes('not evidence of a quiet period'));
+
+    // A seed key that is simply absent means the seeder is not publishing.
+    const missing = find(
+      await collect({ readSeed: async () => ({ status: 'miss' as const, fetchedAtMs: 0 }) }),
+      'structured:protests',
+    );
+    assert.equal(missing.state, 'failed');
+    assert.ok(missing.detail.includes('not evidence of a quiet period'));
   });
 
   it('a throwing producer is "failed" and carries the cause, without taking the others down', async () => {
@@ -599,7 +655,7 @@ describe('collectStructuredIncidents — producer status', () => {
 
   it('a snapshot past its freshness budget is "stale" but still contributes', async () => {
     const results = await collect({
-      seedFetchedAt: async () => NOW_MS - 40 * HOUR,
+      readSeed: async () => ({ status: 'hit' as const, fetchedAtMs: NOW_MS - 40 * HOUR }),
       listUnrestEvents: async () => ({
         events: [{
           id: 'u1',
@@ -657,7 +713,10 @@ describe('collectStructuredIncidents — producer status', () => {
         pagination: undefined,
       }),
     } as Partial<StructuredDependencies>);
-    assert.equal(find(results, 'structured:protests').incidents[0]?.label, 'civil unrest in Haifa');
+    // The browser's mapEventType funnels CIVIL_UNREST *and* UNSPECIFIED to the
+    // literal 'civil_unrest' (underscore), so the panel never renders
+    // "civil unrest" or "unspecified".
+    assert.equal(find(results, 'structured:protests').incidents[0]?.label, 'civil_unrest in Haifa');
   });
 
   it('drops a structured record that fell out of the window', async () => {
@@ -767,6 +826,56 @@ describe('collectStructuredIncidents — producer status', () => {
     assert.equal(flights.incidents[0]?.lane, 'military');
     // A live snapshot reports no gather time, so it must not invent one.
     assert.equal(flights.fetchedAtMs, 0);
+  });
+
+  it('follows the flights cursor instead of keeping only the first page', async () => {
+    // The browser reassembles the region by following next_cursor
+    // (military-flights.ts fetchViaProto). Reading one page would silently drop
+    // military-lane incidents for exactly the busiest countries.
+    const pages = new Map([
+      ['', { next: 'p2', callsign: 'RCH001' }],
+      ['p2', { next: 'p3', callsign: 'RCH002' }],
+      ['p3', { next: '', callsign: 'RCH003' }],
+    ]);
+    const results = await collect({
+      listMilitaryFlights: async (_ctx: unknown, req: { cursor: string }) => {
+        const page = pages.get(req.cursor);
+        assert.ok(page, `unexpected cursor ${JSON.stringify(req.cursor)}`);
+        return {
+          flights: [flight(page!.callsign)],
+          clusters: [],
+          pagination: { nextCursor: page!.next, totalCount: 3 },
+        };
+      },
+    } as Partial<StructuredDependencies>);
+    assert.deepEqual(
+      find(results, 'structured:military-flights').incidents.map(i => i.label),
+      ['RCH001 (C-17)', 'RCH002 (C-17)', 'RCH003 (C-17)'],
+    );
+  });
+
+  it('stops rather than spinning when the flights cursor does not advance', async () => {
+    let calls = 0;
+    const results = await collect({
+      listMilitaryFlights: async () => {
+        calls++;
+        return {
+          flights: [flight('RCH999')],
+          clusters: [],
+          // A cursor that never changes would loop forever without the guard.
+          pagination: { nextCursor: 'stuck', totalCount: 1 },
+        };
+      },
+    } as Partial<StructuredDependencies>);
+    assert.ok(calls <= 10, `cursor walk must be bounded, made ${calls} calls`);
+    assert.ok(find(results, 'structured:military-flights').incidents.length >= 1);
+  });
+
+  it('says plainly that flight severity is un-enriched', async () => {
+    // The browser raises isInteresting via Wingbits enrichment this surface does
+    // not run, so severity here can under-rate. That must be stated, not hidden.
+    const flights = find(await collect(), 'structured:military-flights');
+    assert.ok(flights.detail.toLowerCase().includes('un-enriched'));
   });
 
   it('marks military flights unavailable for a country with no bounding box', async () => {

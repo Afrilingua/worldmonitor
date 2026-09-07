@@ -30,9 +30,16 @@ import { listEarthquakes } from '../../seismology/v1/list-earthquakes';
 import { listAcledEvents } from '../../conflict/v1/list-acled-events';
 import { listIranEvents } from '../../conflict/v1/list-iran-events';
 import { listMilitaryFlights } from '../../military/v1/list-military-flights';
+import type { MilitaryFlight } from '../../../../src/generated/server/worldmonitor/military/v1/service_server';
 import type { ServerContext } from '../../../../src/generated/server/worldmonitor/intelligence/v1/service_server';
 
-export type CoverageSourceState = 'ok' | 'empty' | 'stale' | 'failed' | 'unavailable';
+export type CoverageSourceState =
+  | 'ok'
+  | 'empty'
+  | 'unknown'
+  | 'stale'
+  | 'failed'
+  | 'unavailable';
 
 export interface StructuredSourceResult {
   source: string;
@@ -43,21 +50,43 @@ export interface StructuredSourceResult {
   incidents: CountryTimelineIncident[];
 }
 
-/** Seed keys whose envelope carries the `_seed.fetchedAt` stamp we age against. */
-const UNREST_SEED_KEY = 'unrest:events:v1';
-const EARTHQUAKE_SEED_KEY = 'seismology:earthquakes:v1';
-const ACLED_SEED_KEY = 'conflict:acled-events:v1';
+/**
+ * Railway-seeded keys whose envelope carries the `_seed.fetchedAt` stamp.
+ *
+ * These are also this module's only REACHABILITY signal. The upstream handlers
+ * (list-unrest-events, list-earthquakes, list-acled-events) each catch their
+ * own failures and return an empty array, so a dead Redis reaches this file as
+ * a successful call returning nothing — a `try/catch` here can never see it.
+ * Reading the seed key directly is what separates "the seeder published an
+ * empty week" from "the seeder is down".
+ *
+ * ACLED deliberately has no entry: list-acled-events writes per-query keys
+ * (`conflict:acled:v1:<country>:<start>:<end>`, a time-varying composite via
+ * cachedFetchJson) rather than one seeded snapshot, so there is no key to read
+ * and no `_seed` envelope to age against. That is why its producer reports
+ * `unknown` rather than `empty` when it returns nothing.
+ */
+const SEED_KEYS: Record<string, string> = {
+  'structured:protests': 'unrest:events:v1',
+  'structured:earthquakes': 'seismology:earthquakes:v1',
+};
 
 /**
  * Per-producer freshness budget. Exceeding it downgrades the producer to
  * "stale" — it still contributes, exactly as the panel still renders whatever
  * its cache holds, but the caller is told.
+ *
+ * Only producers with a readable gather time can appear here; a budget on a
+ * producer whose age is always unknown would be dead code that reads as a
+ * guarantee.
  */
 const STALE_AFTER_MS: Record<string, number> = {
   'structured:protests': 24 * 60 * 60 * 1000,
   'structured:earthquakes': 6 * 60 * 60 * 1000,
-  'structured:conflicts': 48 * 60 * 60 * 1000,
 };
+
+/** Bound on the flights pagination walk, so a misbehaving cursor cannot spin. */
+const MAX_FLIGHT_PAGES = 10;
 
 export interface CountryBox {
   south: number;
@@ -83,25 +112,70 @@ export function inBox(
   return lat! >= box.south && lat! <= box.north && lon! >= box.west && lon! <= box.east;
 }
 
-/** Read a seed key's envelope stamp without disturbing the handler's own read. */
-async function seedFetchedAt(key: string): Promise<number> {
+export interface SeedRead {
+  /** 'hit' the key exists, 'miss' it does not, 'error' the read itself failed. */
+  status: 'hit' | 'miss' | 'error';
+  /** Unix ms from the seed envelope, or 0 when the key carries no stamp. */
+  fetchedAtMs: number;
+}
+
+/**
+ * Read a seed key's envelope without disturbing the handler's own read. The
+ * STATUS matters as much as the stamp: it is the only way this surface can tell
+ * a genuinely quiet producer from an unreachable one.
+ */
+async function readSeed(key: string): Promise<SeedRead> {
   try {
     const read = await readCachedEnvelopeJson(key, true);
-    if (read.status !== 'hit') return 0;
+    if (read.status === 'error') return { status: 'error', fetchedAtMs: 0 };
+    if (read.status !== 'hit') return { status: 'miss', fetchedAtMs: 0 };
     const envelope = read.value as { _seed?: { fetchedAt?: unknown } } | null;
     const fetchedAt = envelope?._seed?.fetchedAt;
-    return typeof fetchedAt === 'number' && Number.isFinite(fetchedAt) ? fetchedAt : 0;
+    return {
+      status: 'hit',
+      fetchedAtMs: typeof fetchedAt === 'number' && Number.isFinite(fetchedAt) ? fetchedAt : 0,
+    };
   } catch {
-    return 0;
+    return { status: 'error', fetchedAtMs: 0 };
   }
 }
 
+/**
+ * @param healthConfirmed whether this producer proved its upstream was
+ *   reachable on THIS call. False means a zero-row result is reported as
+ *   `unknown` rather than `empty`, because the producer cannot tell a genuinely
+ *   quiet period apart from a dead one.
+ */
 function settle(
   source: string,
   incidents: CountryTimelineIncident[],
-  fetchedAtMs: number,
+  seed: SeedRead,
   now: number,
+  healthConfirmed: boolean,
 ): StructuredSourceResult {
+  const fetchedAtMs = seed.fetchedAtMs;
+  // Reachability beats content. The upstream handler swallowed its own error and
+  // handed us an empty array; the seed read is what reveals that, so it decides
+  // the state before anything is said about how many events matched.
+  if (seed.status === 'error') {
+    return {
+      source,
+      state: 'failed',
+      detail: 'The backing cache could not be read, so this producer contributed nothing. This is not evidence of a quiet period.',
+      fetchedAtMs: 0,
+      incidents: [],
+    };
+  }
+  if (seed.status === 'miss') {
+    return {
+      source,
+      state: 'failed',
+      detail: 'The backing cache key is absent, so the producer behind it is not publishing. This is not evidence of a quiet period.',
+      fetchedAtMs: 0,
+      incidents: [],
+    };
+  }
+
   const budget = STALE_AFTER_MS[source];
   if (budget && fetchedAtMs > 0 && now - fetchedAtMs > budget) {
     const hours = Math.round((now - fetchedAtMs) / 3_600_000);
@@ -116,14 +190,24 @@ function settle(
   if (incidents.length > 0) {
     return { source, state: 'ok', detail: '', fetchedAtMs, incidents };
   }
-  // An empty producer says so in words too. "Read `sources` before concluding
-  // anything from an empty events list" is only actionable if every non-ok
-  // state carries its reason, and `empty` is the one a caller is most likely
-  // to misread as healthy silence.
+  // `empty` is a CLAIM that the producer was healthy and simply had nothing.
+  // Only make it when the seed read proved the backing cache was there. For a
+  // producer with no readable health signal, say `unknown` instead — that is
+  // the state a caller is most likely to misread as a quiet week, so it must
+  // not be dressed up as one.
+  if (!healthConfirmed) {
+    return {
+      source,
+      state: 'unknown',
+      detail: 'The producer returned no rows and this surface cannot confirm its upstream was reachable, because the upstream handler reports a failure and a genuinely empty result identically.',
+      fetchedAtMs,
+      incidents,
+    };
+  }
   return {
     source,
     state: 'empty',
-    detail: 'The producer responded; nothing in it matched this country inside the window.',
+    detail: 'The producer responded and its backing cache was readable; nothing in it matched this country inside the window.',
     fetchedAtMs,
     incidents,
   };
@@ -148,9 +232,21 @@ function unrestSeverity(severity: string): CountryTimelineSeverity {
   return 'low';
 }
 
-/** `UNREST_EVENT_TYPE_CIVIL_UNREST` reads as `civil unrest` in a label. */
+/**
+ * Mirrors mapEventType in src/services/unrest/index.ts, which the panel's label
+ * is built from. Note the default: CIVIL_UNREST *and* UNSPECIFIED both become
+ * the literal `civil_unrest`, underscore included — deriving the word from the
+ * enum instead would render "civil unrest" and "unspecified", neither of which
+ * the panel ever shows.
+ */
 function unrestEventLabel(eventType: string): string {
-  return eventType.replace(/^UNREST_EVENT_TYPE_/, '').toLowerCase().replace(/_/g, ' ');
+  switch (eventType) {
+    case 'UNREST_EVENT_TYPE_PROTEST': return 'protest';
+    case 'UNREST_EVENT_TYPE_RIOT': return 'riot';
+    case 'UNREST_EVENT_TYPE_STRIKE': return 'strike';
+    case 'UNREST_EVENT_TYPE_DEMONSTRATION': return 'demonstration';
+    default: return 'civil_unrest';
+  }
 }
 
 /** Mirrors mapProtoEventType in src/services/conflict/index.ts. */
@@ -169,7 +265,7 @@ export interface StructuredDependencies {
   listAcledEvents: typeof listAcledEvents;
   listIranEvents: typeof listIranEvents;
   listMilitaryFlights: typeof listMilitaryFlights;
-  seedFetchedAt: (key: string) => Promise<number>;
+  readSeed: (key: string) => Promise<SeedRead>;
 }
 
 export const defaultStructuredDependencies: StructuredDependencies = {
@@ -178,7 +274,7 @@ export const defaultStructuredDependencies: StructuredDependencies = {
   listAcledEvents,
   listIranEvents,
   listMilitaryFlights,
-  seedFetchedAt,
+  readSeed,
 };
 
 export interface StructuredRequest {
@@ -194,7 +290,7 @@ async function collectProtests(req: StructuredRequest, box: CountryBox | null): 
   const source = 'structured:protests';
   const deps = req.deps ?? defaultStructuredDependencies;
   try {
-    const [response, fetchedAtMs] = await Promise.all([
+    const [response, seed] = await Promise.all([
       // country: '' — the seed's own filter is a name substring match, which
       // would miss an event geolocated inside the country but labelled with a
       // neighbouring one. Filter here instead, the way the panel does.
@@ -210,7 +306,7 @@ async function collectProtests(req: StructuredRequest, box: CountryBox | null): 
         swLat: 0,
         swLon: 0,
       }),
-      deps.seedFetchedAt(UNREST_SEED_KEY),
+      deps.readSeed(SEED_KEYS[source]!),
     ]);
     const countryLower = req.countryName.toLowerCase();
     const incidents: CountryTimelineIncident[] = [];
@@ -227,7 +323,7 @@ async function collectProtests(req: StructuredRequest, box: CountryBox | null): 
         severity: unrestSeverity(event.severity),
       });
     }
-    return settle(source, incidents, fetchedAtMs, req.now);
+    return settle(source, incidents, seed, req.now, true);
   } catch (error) {
     return failed(source, errorDetail(error));
   }
@@ -237,9 +333,9 @@ async function collectEarthquakes(req: StructuredRequest, box: CountryBox | null
   const source = 'structured:earthquakes';
   const deps = req.deps ?? defaultStructuredDependencies;
   try {
-    const [response, fetchedAtMs] = await Promise.all([
+    const [response, seed] = await Promise.all([
       deps.listEarthquakes(req.ctx, { start: 0, end: 0, pageSize: 0, cursor: '', minMagnitude: 0 }),
-      deps.seedFetchedAt(EARTHQUAKE_SEED_KEY),
+      deps.readSeed(SEED_KEYS[source]!),
     ]);
     const countryLower = req.countryName.toLowerCase();
     const incidents: CountryTimelineIncident[] = [];
@@ -257,7 +353,7 @@ async function collectEarthquakes(req: StructuredRequest, box: CountryBox | null
           : quake.magnitude >= 5 ? 'high' : quake.magnitude >= 4 ? 'medium' : 'low',
       });
     }
-    return settle(source, incidents, fetchedAtMs, req.now);
+    return settle(source, incidents, seed, req.now, true);
   } catch (error) {
     return failed(source, errorDetail(error));
   }
@@ -267,10 +363,12 @@ async function collectConflicts(req: StructuredRequest): Promise<StructuredSourc
   const source = 'structured:conflicts';
   const deps = req.deps ?? defaultStructuredDependencies;
   try {
-    const [response, fetchedAtMs] = await Promise.all([
-      deps.listAcledEvents(req.ctx, { country: '', start: 0, end: 0, pageSize: 0, cursor: '' }),
-      deps.seedFetchedAt(ACLED_SEED_KEY),
-    ]);
+    // No seed read: ACLED has no single seeded snapshot key (see SEED_KEYS),
+    // so this producer reports `unknown` rather than `empty` on zero rows.
+    const response = await deps.listAcledEvents(
+      req.ctx,
+      { country: '', start: 0, end: 0, pageSize: 0, cursor: '' },
+    );
     const incidents: CountryTimelineIncident[] = [];
     for (const event of response.events) {
       // The panel groups ACLED rows with the CII name->code map. This surface
@@ -287,7 +385,7 @@ async function collectConflicts(req: StructuredRequest): Promise<StructuredSourc
         severity: event.fatalities > 0 ? 'critical' : 'high',
       });
     }
-    return settle(source, incidents, fetchedAtMs, req.now);
+    return settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, false);
   } catch (error) {
     return failed(source, errorDetail(error));
   }
@@ -303,18 +401,31 @@ async function collectMilitaryFlights(
     return unavailable(source, `No bounding box for ${req.code}; military flights are matched geographically only.`);
   }
   try {
-    const response = await deps.listMilitaryFlights(req.ctx, {
-      pageSize: 0,
-      cursor: '',
-      neLat: box.north,
-      neLon: box.east,
-      swLat: box.south,
-      swLon: box.west,
-      operator: 'MILITARY_OPERATOR_UNSPECIFIED',
-      aircraftType: 'MILITARY_AIRCRAFT_TYPE_UNSPECIFIED',
-    });
+    // The server bounds every flights response to a page, and the browser
+    // follows next_cursor to reassemble the region (military-flights.ts
+    // fetchViaProto). Reading only page one would drop military-lane incidents
+    // for exactly the busy countries where the lane matters most.
+    const flights: MilitaryFlight[] = [];
+    let cursor = '';
+    for (let page = 0; page < MAX_FLIGHT_PAGES; page++) {
+      const response = await deps.listMilitaryFlights(req.ctx, {
+        pageSize: 0,
+        cursor,
+        neLat: box.north,
+        neLon: box.east,
+        swLat: box.south,
+        swLon: box.west,
+        operator: 'MILITARY_OPERATOR_UNSPECIFIED',
+        aircraftType: 'MILITARY_AIRCRAFT_TYPE_UNSPECIFIED',
+      });
+      flights.push(...response.flights);
+      const next = response.pagination?.nextCursor ?? '';
+      // A cursor that does not advance would spin forever; stop instead.
+      if (!next || next === cursor) break;
+      cursor = next;
+    }
     const incidents: CountryTimelineIncident[] = [];
-    for (const flight of response.flights) {
+    for (const flight of flights) {
       if (!Number.isFinite(flight.lastSeenAt) || flight.lastSeenAt < req.cutoffMs) continue;
       incidents.push({
         timestamp: flight.lastSeenAt,
@@ -326,7 +437,20 @@ async function collectMilitaryFlights(
     // The flights RPC serves a live snapshot and reports no gather time, so
     // there is no fetchedAt to claim. Reporting the newest position instead
     // would read as "gathered then", which is a different fact.
-    return settle(source, incidents, 0, req.now);
+    const settled = settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, false);
+    // One bounded, one-directional divergence from the panel, stated rather
+    // than hidden: the browser enriches flights with Wingbits aircraft details
+    // after the RPC (military-flights.ts fetchFlightsWithWingbits), and a
+    // confirmed military branch flips isInteresting false -> true, lifting
+    // severity low -> high. That branch is derived from browser-only config, so
+    // this surface reads the unenriched value. Severity here can therefore be
+    // LOWER than the panel's for the same aircraft, never higher.
+    return {
+      ...settled,
+      detail: settled.detail
+        ? `${settled.detail} Severity is un-enriched: the panel may rate the same flight higher.`
+        : 'Severity is un-enriched: the panel applies Wingbits aircraft details that can raise a flight from low to high, so this lane can under-rate but never over-rate.',
+    };
   } catch (error) {
     return failed(source, errorDetail(error));
   }
@@ -346,6 +470,11 @@ async function collectStrikes(req: StructuredRequest, box: CountryBox | null): P
     if (response.scrapedAt === '0') {
       return unavailable(source, 'Middle East strike tracking is retired (IRAN_EVENTS_ENABLED off).');
     }
+    // Unlike ACLED and the flights lane, this handler reports a real gather
+    // time when it is enabled, so a zero-row result here is a confirmed quiet
+    // period rather than an unverifiable one.
+    const scrapedAtMs = Number(response.scrapedAt);
+    const fetchedAtMs = Number.isFinite(scrapedAtMs) && scrapedAtMs > 0 ? scrapedAtMs : 0;
     const seen = new Set<string>();
     const incidents: CountryTimelineIncident[] = [];
     for (const event of response.events) {
@@ -365,7 +494,7 @@ async function collectStrikes(req: StructuredRequest, box: CountryBox | null): P
           : 'high',
       });
     }
-    return settle(source, incidents, 0, req.now);
+    return settle(source, incidents, { status: 'hit', fetchedAtMs }, req.now, true);
   } catch (error) {
     return failed(source, errorDetail(error));
   }

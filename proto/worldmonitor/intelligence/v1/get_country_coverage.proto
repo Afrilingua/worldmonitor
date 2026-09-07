@@ -78,9 +78,17 @@ message CountryCoverageSourceStatus {
   // Stable producer id, e.g. "coverage:headlines", "structured:protests".
   string source = 1;
   // "ok"           — fetched, within the window.
-  // "empty"        — fetched successfully, nothing in the window.
+  // "empty"        — fetched, its backing cache was confirmed readable, and
+  //                  nothing in it matched. The only state that asserts the
+  //                  producer was genuinely quiet.
+  // "unknown"      — returned nothing, and this surface could not confirm the
+  //                  upstream was reachable. Several upstream handlers report a
+  //                  failure and an empty result identically, so this is what
+  //                  an unconfirmed silence is called. Never read it as quiet.
   // "stale"        — served, but older than this producer's freshness budget.
-  // "failed"       — the read errored or timed out; contributed nothing.
+  //                  Still contributes.
+  // "failed"       — the read errored, its backing key was absent, or the feed
+  //                  returned only unusable items; contributed nothing.
   // "unavailable"  — not reachable on this surface at all.
   string state = 2;
   // Human-readable cause. Present for "stale", "failed" and "unavailable".
@@ -110,9 +118,10 @@ message GetCountryCoverageResponse {
   // Per-producer status. Always populated for every producer, including the
   // ones that contributed nothing.
   repeated CountryCoverageSourceStatus sources = 7;
-  // True when any producer is "stale", "failed" or "unavailable". An agent
-  // must not read an empty `events` list as "nothing happened" while this is
-  // true.
+  // True when any producer is in any state other than "ok" or "empty" — that
+  // is, whenever at least one producer's silence is unexplained or its data is
+  // past its freshness budget. An agent must not read an empty `events` list as
+  // "nothing happened" while this is true.
   bool degraded = 8;
   // How a structured event was tested for being inside this country:
   // "bbox" on this surface. The browser panel tests the loaded country polygon
