@@ -393,7 +393,13 @@ async function fetchNhc(fetchFn = globalThis.fetch) {
     }
 
     const p = currentPt.properties;
-    const advDate = p.advdate ? new Date(p.advdate).getTime() : Number.NaN;
+    const timeFirstAdvDate = typeof p.advdate === 'string'
+      ? p.advdate.match(/^(\d{1,2})(\d{2}) (AM|PM) ([A-Z]{3,4}) ((?:Sun|Mon|Tue|Wed|Thu|Fri|Sat) (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{2} \d{4})$/)
+      : null;
+    const normalizedAdvDate = timeFirstAdvDate
+      ? `${timeFirstAdvDate[5]} ${timeFirstAdvDate[1]}:${timeFirstAdvDate[2]} ${timeFirstAdvDate[3]} ${timeFirstAdvDate[4]}`
+      : p.advdate;
+    const advDate = p.advdate ? new Date(normalizedAdvDate).getTime() : Number.NaN;
     if (typeof p.stormname !== 'string' || p.stormname.trim().length === 0
       || !Number.isInteger(p.stormnum) || p.stormnum < 1 || p.stormnum > 99
       || !['string', 'number'].includes(typeof p.advisnum) || String(p.advisnum).trim().length === 0
