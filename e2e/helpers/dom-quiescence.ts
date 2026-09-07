@@ -2,12 +2,12 @@
  * Best-effort DOM quiescence wait for the cold-load metric probe (#7837).
  *
  * The cold-load budget is asserted at SVG map first paint, which samples the
- * pre-hydration shell. Over 21 local cold loads that sample read 5,625-6,821
- * post-GC renderer nodes, against 13,985-14,167 once the same page settled —
- * and the CI failure that opened #7837 measured 15,506 on a settled page
- * against the same 15,000 ceiling. So the settled page is sampled too and
- * RECORDED, never asserted, so CI publishes how much of that ceiling the
- * hydrated dashboard actually uses instead of leaving it unknown.
+ * pre-hydration shell, and the CI failure that opened #7837 measured 15,506 on
+ * a settled page against the same 15,000 ceiling. So the settled page is
+ * sampled too and RECORDED, never asserted, so CI publishes how much of that
+ * ceiling the hydrated dashboard actually uses instead of leaving it unknown.
+ * On CI run 34148378315 that is 10,726-10,748 post-GC renderer nodes against
+ * 8,946-9,838 at first paint.
  *
  * Recorded-not-asserted is why a timeout returns `quiesced: false` rather than
  * throwing: a diagnostic that reddens a required gate whenever a loaded runner
@@ -18,8 +18,9 @@
  * still mid-cascade, and the 2 s settle this replaces is exactly what let the
  * pre-#7848 measurement span 7.0k-24.7k renderer nodes on one source tree.
  * Waiting for the real signal is also what makes the settled sample the STEADIER
- * of the two: across those same 21 loads its range was 182 counts, against
- * 1,196 for the first-paint sample it sits beside.
+ * of the two: across 21 local loads its range was 182 counts, against 1,196
+ * for the first-paint sample it sits beside (22 and 892 on CI run
+ * 34148378315, over the 2 of 3 loads that produced a settled sample).
  *
  * Three things the quiet check deliberately compares, because two of them are
  * invisible to the third:
@@ -43,8 +44,8 @@ export const DOM_QUIESCENCE_SAMPLE_MS = 200;
 export const DOM_QUIESCENCE_STABLE_SAMPLES = 3;
 /**
  * Outer budget. With the caller gating on `wmInitialDataReady` first, the wait
- * itself returned in 1.2-2.0 s, putting the settled sample 4.4-7.9 s after
- * `goto`; the slack covers a loaded CI runner. This bounds the POLL LOOP only —
+ * returned in 1.2-2.0 s locally and 3.2-9.0 s on CI run 34148378315 — the
+ * margin this 15 s covers is real, not theoretical. This bounds the POLL LOOP only —
  * a wedged renderer hangs inside an `elementCount` round-trip that no deadline
  * here can interrupt, so the caller additionally races the whole diagnostic
  * against its own budget.

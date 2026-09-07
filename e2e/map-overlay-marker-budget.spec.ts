@@ -273,20 +273,30 @@ async function readDashboardMetrics(page: Page): Promise<DashboardMetricSample> 
  * Ceiling on the whole recorded diagnostic, per cold load. Sized above the 15 s
  * quiescence budget so the wait's own timeout reports first on a merely slow
  * page, leaving this to catch only a genuinely wedged one.
+ *
+ * 20 s was set from local timings and CI disproved it on the first run
+ * (34148378315): the diagnostic cost 8.5 s and 9.9 s on two loads and blew
+ * 20 s on the third, whose wait had already SUCCEEDED in 8,978 ms — the CDP
+ * metric read took the remaining 11 s. CI round-trips at 4 workers are simply
+ * slow, which this spec's own drag comment already records. 45 s is ~2x the
+ * worst observed, still far below any hang.
  */
-const SETTLED_SAMPLE_BUDGET_MS = 20000;
+const SETTLED_SAMPLE_BUDGET_MS = 45000;
 
 /**
  * The settled-page counterpart to the asserted first-paint sample (#7837).
  *
  * The asserted sample is taken at SVG map first paint, which is the readiness
  * signal #7848 chose for determinism — and which measures the pre-hydration
- * shell. Over 21 local cold loads it read 5,625-6,821 post-GC renderer nodes,
- * against 13,985-14,167 once the same page settled. The CI failure that opened
- * #7837 measured 15,506 on a settled page against this spec's 15,000 ceiling,
- * so how much of that ceiling the hydrated dashboard actually uses is the
- * number nobody can see today — the overlay markers this budget exists for all
- * live past the sample point that guards it.
+ * shell, so how much of the 15,000 ceiling the hydrated page actually uses was
+ * invisible. The CI failure that opened #7837 measured 15,506 on a settled
+ * page against that same ceiling.
+ *
+ * Measure on CI, not locally: the two environments disagree, and CI is the one
+ * the gate runs in. Run 34148378315 read 8,946-9,838 post-GC renderer nodes at
+ * first paint against 10,726-10,748 settled (~72% of the ceiling), while 21
+ * local loads read 5,625-6,821 against 13,985-14,167. Local data volume is not
+ * CI's, so quote CI numbers when reasoning about headroom.
  *
  * `initialDataReady` is load-bearing when reading the result, not decoration.
  * The one load of those 21 that missed the hydration flag settled at 17.7 s
@@ -522,14 +532,14 @@ async function dragMapAcross(page: Page): Promise<{ stepsUnsettled: number }> {
 
 test.describe('SVG map overlay marker budget (#7112)', () => {
   test('keeps the full dashboard DOM and listener counts bounded across cold loads', async ({ browser }, testInfo) => {
-    // 240 s -> 300 s for the settled sample (#7837). Each of the 3 loads may now
-    // spend up to SETTLED_SAMPLE_BUDGET_MS (20 s) on the recorded diagnostic, so
-    // the ceiling rises by the 60 s that budget can cost. Not slack for a slow
-    // page: the per-load ceilings (30 s goto, 30 s handlers, 30 s map render)
-    // are unchanged, and observed runtime is ~20 s for the whole test. This
-    // keeps an optional diagnostic from being what tips a slow-but-passing run
-    // into a timeout — the bounded budget is what makes the addition safe.
-    test.setTimeout(300000);
+    // 240 s -> 360 s for the settled sample (#7837). Each of the 3 loads may now
+    // spend up to SETTLED_SAMPLE_BUDGET_MS (45 s) on the recorded diagnostic.
+    // Not slack for a slow page: the per-load ceilings (30 s goto, 30 s
+    // handlers, 30 s map render) are unchanged, and the whole test took ~63 s
+    // on CI run 34148378315 (~20 s locally). This keeps an optional diagnostic
+    // from being what tips a slow-but-passing run into a timeout — the bounded
+    // budget is what makes the addition safe.
+    test.setTimeout(360000);
     const samples: ColdDashboardSample[] = [];
 
     try {
