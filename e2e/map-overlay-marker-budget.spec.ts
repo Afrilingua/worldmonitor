@@ -829,18 +829,35 @@ test.describe('SVG map overlay marker budget (#7112)', () => {
         (window as HarnessWindow).__mobileMapIntegrationHarness!.seedOverlayMarkerStress(perFeed),
       STRESS_PER_FEED,
     );
+    // The seeded feeds truncate layer by layer, so a poll that returns the moment
+    // ONE layer is trimmed hands back a snapshot the renderer is still growing
+    // past. Reading the budget state in one call and the disclosure in the next
+    // then compares two different instants, and the assertion below pins the
+    // first against the second: measured 2 failures in 4 whole-spec runs at 4
+    // workers (#7837), every one of them a state snapshot of `300/2000` against a
+    // summary that already read `798/6000`.
+    //
+    // Sampling both inside the SAME page evaluation closes the gap they drifted
+    // across, and polling that pair waits for the seed to finish propagating
+    // without pinning how many layers it ends up trimming.
     await expect
       .poll(
         async () =>
-          page.evaluate(() =>
-            Object.keys(
-              (window as HarnessWindow).__mobileMapIntegrationHarness!.getOverlayBudgetState()
-                .truncated,
-            ).length,
-          ),
+          page.evaluate(() => {
+            const budget = (
+              window as HarnessWindow
+            ).__mobileMapIntegrationHarness!.getOverlayBudgetState();
+            const counts = Object.values(budget.truncated);
+            const actual = document.querySelector('.map-truncation-summary')?.textContent ?? null;
+            if (counts.length === 0) return `no layer trimmed yet (summary: ${actual})`;
+            const shownNow = counts.reduce((sum, entry) => sum + entry.shown, 0);
+            const totalNow = counts.reduce((sum, entry) => sum + entry.total, 0);
+            const expected = `${shownNow}/${totalNow} markers`;
+            return expected === actual ? 'disclosed' : `state ${expected} != summary ${actual}`;
+          }),
         { timeout: 15000 },
       )
-      .toBeGreaterThan(0);
+      .toBe('disclosed');
 
     const state = await page.evaluate(() =>
       (window as HarnessWindow).__mobileMapIntegrationHarness!.getOverlayBudgetState(),
@@ -856,12 +873,13 @@ test.describe('SVG map overlay marker budget (#7112)', () => {
 
     // Honest private state is necessary but not sufficient: the person looking at
     // the embed must be able to SEE that the map is partial. With no toggle rail
-    // to badge, the compact summary is the only disclosure surface there is.
+    // to badge, the compact summary is the only disclosure surface there is. That
+    // the summary carries the state's own numbers is asserted by the poll above,
+    // which is the only place the two can be compared without a gap between them.
     const summary = page.locator('.map-truncation-summary');
     await expect(summary).toHaveCount(1);
     const shown = Object.values(state.truncated).reduce((sum, counts) => sum + counts.shown, 0);
     const total = Object.values(state.truncated).reduce((sum, counts) => sum + counts.total, 0);
-    await expect(summary).toHaveText(`${shown}/${total} markers`);
     expect(shown).toBeLessThan(total);
     await expect(summary).toBeVisible();
 
