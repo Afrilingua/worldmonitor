@@ -6,7 +6,7 @@ loadEnvFile(import.meta.url);
 
 const BASE = 'https://www.submarinecablemap.com/api/v3';
 const CANONICAL_KEY = 'infrastructure:submarine-cables:v1';
-const CACHE_TTL = 7 * 24 * 3600; // 7 days — cable infra changes slowly
+export const CACHE_TTL = 7 * 24 * 3600; // 7 days — cable infra changes slowly
 
 // Strategic cable list — TeleGeography slugs organized by region.
 // Find slugs at: https://www.submarinecablemap.com/api/v3/cable/all.json
