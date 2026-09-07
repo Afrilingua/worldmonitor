@@ -202,8 +202,14 @@ code is yours to fix; this one covers the case where it is not:
   — the collapse inside an accessor you own
 - [Never render a confident empty state from a loader that cannot distinguish a miss from a failure](never-render-a-confident-empty-state-from-a-loader-that-cannot-distinguish-miss-from-failure.md)
   — the collapse at the render boundary
-- **This doc** — the collapse inside a dependency you do **not** own, where your
-  own `try`/`catch` is unreachable and reachability must be sourced from beneath it
+- **This doc** — the collapse inside a dependency you do **not** own
+
+The distinction is not academic: the sibling docs' remedy is to change the
+accessor so it stops degrading — return `{ ok, value }` instead of a bare null.
+That fix is *unavailable* here. You cannot change the dependency's signature, and
+it will keep answering a fault and an empty result identically no matter how
+carefully you call it. So the remedy inverts: instead of widening what the layer
+returns, you go underneath it for a signal it never had the chance to flatten.
 
 Also:
 
