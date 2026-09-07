@@ -87,19 +87,20 @@ function toEpochMs(value) {
  * the envelope cannot be read as a confirmed success.
  */
 function requireRadarResult(data, source) {
-  if (
-    !data
-    || typeof data !== 'object'
-    || Array.isArray(data)
-    || data.configured === false
-    || data.success !== true
-    || (data.errors != null && (!Array.isArray(data.errors) || data.errors.length > 0))
-    || !data.result
-    || typeof data.result !== 'object'
-    || Array.isArray(data.result)
-  ) {
-    throw new Error(`Cloudflare Radar ${source}: response is not a valid success envelope`);
-  }
+  // Name the specific reason: "not configured" is an account/token-scope problem
+  // an operator must fix, "success=false" is usually a transient upstream fault
+  // to wait out. One shared message would make a Railway log line say which
+  // endpoint failed but not which of those two it was.
+  const reason = (() => {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return 'body is not a JSON object';
+    if (data.configured === false) return 'not configured for this token';
+    if (data.success !== true) return `success=${JSON.stringify(data.success)}`;
+    if (data.errors != null && !Array.isArray(data.errors)) return 'errors field is not an array';
+    if (Array.isArray(data.errors) && data.errors.length > 0) return `errors=${JSON.stringify(data.errors).slice(0, 200)}`;
+    if (!data.result || typeof data.result !== 'object' || Array.isArray(data.result)) return 'result is missing or not an object';
+    return null;
+  })();
+  if (reason) throw new Error(`Cloudflare Radar ${source}: invalid success envelope (${reason})`);
   return data.result;
 }
 
