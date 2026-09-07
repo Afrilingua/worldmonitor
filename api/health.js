@@ -623,10 +623,15 @@ const SEED_META = {
   wildfires:        {
     key: 'seed-meta:wildfire:fires',
     maxStaleMin: 360,
-    sourceFailure: {
-      warnAfterConsecutive: 2,
-      failureCodePattern: /^FIRMS_PARTIAL_COVERAGE$/,
-    },
+    sourceFailure: [
+      { warnAfterConsecutive: 2, failureCodePattern: /^FIRMS_PARTIAL_COVERAGE$/ },
+      {
+        warnAfterConsecutive: 2, maxPendingMin: 15,
+        successAtField: 'lastSourceSuccessAt',
+        sources: ['cwfis', 'firms', 'bc'],
+        failureCodePattern: /^CWFIS_SOURCE_FAILED$/,
+      },
+    ],
   }, // FIRMS NRT resets at midnight UTC; new-day data takes 3-6h to accumulate
   wildfiresBootstrap: { key: 'seed-meta:wildfire:fires-bootstrap', maxStaleMin: 360 }, // Compact CDN payload is a distinct publish target; monitor it so canonical fallback cannot hide transform/write failures.
   outages:          { key: 'seed-meta:infra:outages',           maxStaleMin: 30 },
@@ -2244,6 +2249,7 @@ function parseFiniteRecordCount(raw) {
 }
 
 function projectSourceFailure(meta, policy, now, maxStaleMin) {
+  if (Array.isArray(policy)) policy = policy.find(candidate => candidate.failureCodePattern.test(meta?.errorCode));
   if (!policy || meta?.sourceState !== 'degraded') return null;
   let retainedUntil = Infinity;
   if (policy.sources) {
