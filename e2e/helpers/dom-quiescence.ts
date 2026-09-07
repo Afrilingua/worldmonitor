@@ -2,8 +2,8 @@
  * Best-effort DOM quiescence wait for the cold-load metric probe (#7837).
  *
  * The cold-load budget is asserted at SVG map first paint, which samples the
- * pre-hydration shell. Over 12 local cold loads that sample read 5,625-6,611
- * post-GC renderer nodes, against 13,851-13,918 once the same page settled —
+ * pre-hydration shell. Over 21 local cold loads that sample read 5,625-6,821
+ * post-GC renderer nodes, against 13,985-14,167 once the same page settled —
  * and the CI failure that opened #7837 measured 15,506 on a settled page
  * against the same 15,000 ceiling. So the settled page is sampled too and
  * RECORDED, never asserted, so CI publishes how much of that ceiling the
@@ -18,16 +18,36 @@
  * still mid-cascade, and the 2 s settle this replaces is exactly what let the
  * pre-#7848 measurement span 7.0k-24.7k renderer nodes on one source tree.
  * Waiting for the real signal is also what makes the settled sample the STEADIER
- * of the two: across those same 12 loads its range was 67 counts, against 986
- * for the first-paint sample it sits beside.
+ * of the two: across those same 21 loads its range was 182 counts, against
+ * 1,196 for the first-paint sample it sits beside.
+ *
+ * Three things the quiet check deliberately compares, because two of them are
+ * invisible to the third:
+ *
+ *   - `elementCount` — the page still growing.
+ *   - `inflight` — a request open ACROSS a sample boundary.
+ *   - `requestsStarted` — a monotonic total, because a request that both starts
+ *     and finishes BETWEEN two 200 ms polls leaves `inflight` at 0 at every
+ *     poll and is otherwise undetectable. `waitForHydrationRequestQuiescence`
+ *     compares cumulative per-key counters for exactly this reason; comparing
+ *     only the instantaneous gauge would be a strictly weaker signal than the
+ *     helper this one mirrors.
+ *
+ * Known limit, deliberately not chased: `elementCount` misses text-node and
+ * equal-sized subtree churn. The request counters cover the case that matters
+ * here (still hydrating), and the caller gates on `wmInitialDataReady` before
+ * this wait even begins.
  */
 
 export const DOM_QUIESCENCE_SAMPLE_MS = 200;
 export const DOM_QUIESCENCE_STABLE_SAMPLES = 3;
 /**
- * Outer budget. Locally the wait itself returned in 3.8-5.3 s, putting the
- * settled sample 4.5-6.3 s after `goto`; the slack covers a loaded CI runner
- * without letting one stuck load eat the whole test's 240 s budget.
+ * Outer budget. With the caller gating on `wmInitialDataReady` first, the wait
+ * itself returned in 1.2-2.0 s, putting the settled sample 4.4-7.9 s after
+ * `goto`; the slack covers a loaded CI runner. This bounds the POLL LOOP only —
+ * a wedged renderer hangs inside an `elementCount` round-trip that no deadline
+ * here can interrupt, so the caller additionally races the whole diagnostic
+ * against its own budget.
  */
 export const DEFAULT_DOM_QUIESCENCE_TIMEOUT_MS = 15_000;
 
@@ -38,6 +58,8 @@ export type DomQuiescenceProbe = {
   elementCount: () => Promise<number>;
   /** Requests started but not yet finished or failed. */
   inflight: () => number;
+  /** Monotonic count of requests started since the load began. */
+  requestsStarted: () => number;
   /** Injectable clock; defaults to `Date.now`. */
   now?: () => number;
 };
@@ -48,8 +70,11 @@ export type DomQuiescenceResult = {
   waitedMs: number;
   /** Consecutive quiet samples observed at the point the wait returned. */
   stableSamples: number;
+  /** Polls performed, including the pre-loop baseline read. */
+  polls: number;
   elements: number;
   inflight: number;
+  requestsStarted: number;
 };
 
 export async function waitForDomQuiescence(
@@ -60,31 +85,42 @@ export async function waitForDomQuiescence(
   const timeoutMs = options.timeout ?? DEFAULT_DOM_QUIESCENCE_TIMEOUT_MS;
   const startedAt = now();
   const deadline = startedAt + timeoutMs;
-  let previous = await probe.elementCount();
+  let previousElements = await probe.elementCount();
+  let previousRequests = probe.requestsStarted();
   // Last values actually observed, so the timeout path reports the sample it
   // gave up on rather than the baseline it was comparing against.
-  let latest = previous;
+  let latestElements = previousElements;
   let latestInflight = probe.inflight();
+  let latestRequests = previousRequests;
   let stableSamples = 0;
+  let polls = 1;
 
   while (now() < deadline) {
     await probe.waitForTimeout(DOM_QUIESCENCE_SAMPLE_MS);
-    latest = await probe.elementCount();
+    latestElements = await probe.elementCount();
     latestInflight = probe.inflight();
-    if (latestInflight === 0 && latest === previous) {
+    latestRequests = probe.requestsStarted();
+    polls += 1;
+    const quiet = latestInflight === 0
+      && latestElements === previousElements
+      && latestRequests === previousRequests;
+    if (quiet) {
       stableSamples += 1;
       if (stableSamples >= DOM_QUIESCENCE_STABLE_SAMPLES) {
         return {
           quiesced: true,
           waitedMs: now() - startedAt,
           stableSamples,
-          elements: latest,
+          polls,
+          elements: latestElements,
           inflight: latestInflight,
+          requestsStarted: latestRequests,
         };
       }
     } else {
       stableSamples = 0;
-      previous = latest;
+      previousElements = latestElements;
+      previousRequests = latestRequests;
     }
   }
 
@@ -92,7 +128,9 @@ export async function waitForDomQuiescence(
     quiesced: false,
     waitedMs: now() - startedAt,
     stableSamples,
-    elements: latest,
+    polls,
+    elements: latestElements,
     inflight: latestInflight,
+    requestsStarted: latestRequests,
   };
 }

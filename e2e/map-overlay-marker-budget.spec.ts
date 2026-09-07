@@ -112,12 +112,21 @@ type ColdDashboardSample = {
   firstPaint: DashboardMetricSample;
   /**
    * The settled page, RECORDED only (#7837). `{ error }` when the sample could
-   * not be taken at all; `quiescence.wait.quiesced === false` when the outer
-   * budget expired first and the numbers are mid-hydration, not settled.
+   * not be taken (carrying `wait` when the failure landed after a completed
+   * wait); `quiescence.wait.quiesced === false` when the wait expired first and
+   * the numbers are mid-hydration, not settled.
    */
   quiescence:
-    | (DashboardMetricSample & { atMs: number; wait: DomQuiescenceResult })
-    | { error: string };
+    | (DashboardMetricSample & {
+      /** Milliseconds from `goto` to this sample. */
+      elapsedSinceGotoMs: number;
+      /** Whether the dashboard's own hydration flag was seen before sampling. */
+      initialDataReady: boolean;
+      /** Element-count change across the metric read; 0 means none. */
+      elementDriftDuringRead: number;
+      wait: DomQuiescenceResult;
+    })
+    | { error: string; wait?: DomQuiescenceResult };
 };
 
 /** Great-circle separation in degrees. Mirrors what proximityRank orders by. */
@@ -187,8 +196,18 @@ type ColdDashboardLoad = {
    * Requests started but not yet finished or failed, counted from before
    * `goto`. installLocalOnlyNetwork() aborts every off-origin request, and an
    * abort settles as `requestfailed`, so the counter balances on both paths.
+   *
+   * It can nonetheless stick above zero — a service worker is registered
+   * (src/main.ts) and playwright.config.ts does not set
+   * `serviceWorkers: 'block'`, so a SW-mediated fetch need not emit a paired
+   * terminal event. That degrades the settled sample to `quiesced: false`
+   * rather than corrupting it, and the recorded `wait.inflight` names the
+   * counter as the thing that never settled. Only the recorded sample is
+   * affected; the asserted first-paint budget never consults this.
    */
   inflight: () => number;
+  /** Monotonic total of requests started, for the between-polls case. */
+  requestsStarted: () => number;
 };
 
 async function loadColdDashboard(page: Page): Promise<ColdDashboardLoad> {
@@ -200,14 +219,20 @@ async function loadColdDashboard(page: Page): Promise<ColdDashboardLoad> {
   });
   await installLocalOnlyNetwork(page);
   let inflight = 0;
-  page.on('request', () => { inflight += 1; });
+  let requestsStarted = 0;
+  page.on('request', () => { inflight += 1; requestsStarted += 1; });
   page.on('requestfinished', () => { inflight -= 1; });
   page.on('requestfailed', () => { inflight -= 1; });
   const startedAt = Date.now();
   await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => document.documentElement.dataset.wmEventHandlersReady === 'true');
   await waitForSvgMapRender(page);
-  return { mapRenderReadyMs: Date.now() - startedAt, startedAt, inflight: () => inflight };
+  return {
+    mapRenderReadyMs: Date.now() - startedAt,
+    startedAt,
+    inflight: () => inflight,
+    requestsStarted: () => requestsStarted,
+  };
 }
 
 async function readDashboardMetrics(page: Page): Promise<DashboardMetricSample> {
@@ -245,36 +270,103 @@ async function readDashboardMetrics(page: Page): Promise<DashboardMetricSample> 
 }
 
 /**
+ * Ceiling on the whole recorded diagnostic, per cold load. Sized above the 15 s
+ * quiescence budget so the wait's own timeout reports first on a merely slow
+ * page, leaving this to catch only a genuinely wedged one.
+ */
+const SETTLED_SAMPLE_BUDGET_MS = 20000;
+
+/**
  * The settled-page counterpart to the asserted first-paint sample (#7837).
  *
  * The asserted sample is taken at SVG map first paint, which is the readiness
  * signal #7848 chose for determinism — and which measures the pre-hydration
- * shell. Over 12 local cold loads it read 5,625-6,611 post-GC renderer nodes,
- * against 13,851-13,918 once the same page settled. The CI failure that opened
+ * shell. Over 21 local cold loads it read 5,625-6,821 post-GC renderer nodes,
+ * against 13,985-14,167 once the same page settled. The CI failure that opened
  * #7837 measured 15,506 on a settled page against this spec's 15,000 ceiling,
  * so how much of that ceiling the hydrated dashboard actually uses is the
  * number nobody can see today — the overlay markers this budget exists for all
  * live past the sample point that guards it.
+ *
+ * `initialDataReady` is load-bearing when reading the result, not decoration.
+ * The one load of those 21 that missed the hydration flag settled at 17.7 s
+ * with 1,354 listeners against 1,001 on every ready load — a slow load crosses
+ * the 10 s Sentry deferral window (src/bootstrap/sentry-defer.ts), and the SDK
+ * adds a click handler per node. Treat a `false` sample as not comparable
+ * rather than as headroom. CI itself is unaffected: variant-smoke injects no
+ * secrets, so there is no VITE_SENTRY_DSN, `enabled` is false, and
+ * @sentry/core's `client.init()` skips integration setup entirely.
  *
  * Recorded, never asserted. Both the wait and the read are best-effort: a
  * settled sample that could redden a required gate would trade the flake this
  * issue exists to remove for a new one. A failure is recorded as its message
  * rather than swallowed, a timeout as `wait.quiesced === false`, and either way
  * the attachment says which — an absent sample must never read as a clean one.
+ *
+ * The whole diagnostic is raced against SETTLED_SAMPLE_BUDGET_MS because
+ * nothing inside it is otherwise bounded: `waitForDomQuiescence`'s deadline
+ * governs its poll loop, but a wedged renderer hangs INSIDE a `page.evaluate`
+ * or a CDP `Performance.getMetrics` — a promise that never settles, which no
+ * try/catch can rescue. Unbounded, this optional sample could eat the test's
+ * budget and report a timeout in place of a genuine budget violation. The
+ * losing promise keeps its own catch so the rejection it takes when the context
+ * closes never surfaces as an unhandled rejection.
  */
 async function recordSettledDashboardMetrics(
   page: Page,
   load: ColdDashboardLoad,
 ): Promise<ColdDashboardSample['quiescence']> {
-  try {
-    const wait = await waitForDomQuiescence({
+  let wait: DomQuiescenceResult | undefined;
+  const sample = (async (): Promise<ColdDashboardSample['quiescence']> => {
+    // The dashboard's own hydration signal, set after the initial data fan-out
+    // (src/App.ts, under VITE_E2E) and already the readiness gate in
+    // a11y-axe-scan.spec.ts. Polling for quiet is a proxy for "hydrated"; this
+    // is the real thing, so gate on it first and let quiescence cover only the
+    // tail. Best-effort: a page that never sets it still gets sampled, and the
+    // recorded `initialDataReady` says which happened.
+    const initialDataReady = await page
+      .waitForFunction(() => document.documentElement.dataset.wmInitialDataReady === 'true',
+        null, { timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    wait = await waitForDomQuiescence({
       waitForTimeout: (ms) => page.waitForTimeout(ms),
       elementCount: () => page.evaluate(() => document.querySelectorAll('*').length),
       inflight: load.inflight,
+      requestsStarted: load.requestsStarted,
     });
-    return { ...await readDashboardMetrics(page), atMs: Date.now() - load.startedAt, wait };
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
+    const metrics = await readDashboardMetrics(page);
+    // The wait's element count is read before the two CDP round-trips and the
+    // forced GC that produce `metrics`. If the page moved in that window the
+    // recorded counts are not the ones quiescence was declared on, so publish
+    // the drift rather than let a `quiesced: true` sample imply there was none.
+    const elementsAfterRead = await page.evaluate(() => document.querySelectorAll('*').length);
+    return {
+      ...metrics,
+      elapsedSinceGotoMs: Date.now() - load.startedAt,
+      initialDataReady,
+      elementDriftDuringRead: elementsAfterRead - wait.elements,
+      wait,
+    };
+  })().catch((err): ColdDashboardSample['quiescence'] => ({
+    // Keep `wait` when the failure landed after it: a read that threw on a page
+    // that DID settle is a different fact from a page that never settled, and
+    // collapsing both to a bare message loses the one the artifact is for.
+    error: err instanceof Error ? err.message : String(err),
+    ...(wait ? { wait } : {}),
+  }));
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const budget = new Promise<ColdDashboardSample['quiescence']>((resolve) => {
+    timer = setTimeout(
+      () => resolve({ error: `settled sample exceeded ${SETTLED_SAMPLE_BUDGET_MS}ms`, ...(wait ? { wait } : {}) }),
+      SETTLED_SAMPLE_BUDGET_MS,
+    );
+  });
+  try {
+    return await Promise.race([sample, budget]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -296,23 +388,29 @@ function assertDashboardMetricBudgets(samples: readonly DashboardMetrics[]): voi
  *
  * Called only from the test's `finally`, where a throw would REPLACE the budget
  * assertion that put us there — a failed write must not turn a real renderer
- * regression into an unrelated fs error. So it reports and returns; the warning
- * is the signal that the evidence path itself needs fixing.
+ * regression into an unrelated fs error. So it reports and returns, printing
+ * the payload rather than announcing its loss: this whole change exists because
+ * the metrics were silently missing from CI, and a fallback that only says so
+ * would be a smaller copy of the same defect.
  */
 async function attachColdDashboardMetrics(testInfo: TestInfo, samples: readonly ColdDashboardSample[]): Promise<void> {
+  const payload = `${JSON.stringify({
+    // Which sample the budgets above are asserted against, and which is only
+    // recorded. Keep these keys in step with the samples they describe.
+    asserted: { readiness: 'svg-map-first-paint', measurement: 'post-gc' },
+    recorded: { readiness: 'dom-quiescence', measurement: 'post-gc' },
+    budgets: DASHBOARD_METRIC_BUDGETS,
+    samples,
+  }, null, 2)}\n`;
   try {
     const path = testInfo.outputPath('cold-dashboard-metrics.json');
-    await writeFile(path, `${JSON.stringify({
-      // Which sample the budgets above are asserted against, and which is only
-      // recorded. Keep these keys in step with the samples they describe.
-      asserted: { readiness: 'svg-map-first-paint', measurement: 'post-gc' },
-      recorded: { readiness: 'dom-quiescence', measurement: 'post-gc' },
-      budgets: DASHBOARD_METRIC_BUDGETS,
-      samples,
-    }, null, 2)}\n`, 'utf8');
+    await writeFile(path, payload, 'utf8');
     await testInfo.attach('cold-dashboard-metrics.json', { path, contentType: 'application/json' });
   } catch (err) {
-    console.warn(`[map-budget] cold-load metrics were not persisted: ${err instanceof Error ? err.message : String(err)}`);
+    // Print the payload, do not merely announce its loss. This whole change
+    // exists because the metrics were silently absent from CI; a bare warning
+    // on the fallback path would be a smaller version of the same defect.
+    console.error(`[map-budget] cold-load metrics were not persisted (${err instanceof Error ? err.message : String(err)}); inlining them instead:\n${payload}`);
   }
 }
 
@@ -409,7 +507,14 @@ async function dragMapAcross(page: Page): Promise<{ stepsUnsettled: number }> {
 
 test.describe('SVG map overlay marker budget (#7112)', () => {
   test('keeps the full dashboard DOM and listener counts bounded across cold loads', async ({ browser }, testInfo) => {
-    test.setTimeout(240000);
+    // 240 s -> 300 s for the settled sample (#7837). Each of the 3 loads may now
+    // spend up to SETTLED_SAMPLE_BUDGET_MS (20 s) on the recorded diagnostic, so
+    // the ceiling rises by the 60 s that budget can cost. Not slack for a slow
+    // page: the per-load ceilings (30 s goto, 30 s handlers, 30 s map render)
+    // are unchanged, and observed runtime is ~20 s for the whole test. This
+    // keeps an optional diagnostic from being what tips a slow-but-passing run
+    // into a timeout — the bounded budget is what makes the addition safe.
+    test.setTimeout(300000);
     const samples: ColdDashboardSample[] = [];
 
     try {
@@ -424,12 +529,24 @@ test.describe('SVG map overlay marker budget (#7112)', () => {
         try {
           const load = await loadColdDashboard(page);
           const firstPaint = await readDashboardMetrics(page);
-          samples.push({
+          // Record the ASSERTED sample before the optional one is attempted.
+          // Building the object around `await recordSettled...` would discard
+          // this load's first-paint numbers if the diagnostic hung — losing the
+          // gate's own evidence to a failure in the thing that only observes it.
+          const sample: ColdDashboardSample = {
             coldLoad: attempt + 1,
             mapRenderReadyMs: load.mapRenderReadyMs,
             firstPaint,
-            quiescence: await recordSettledDashboardMetrics(page, load),
-          });
+            quiescence: { error: 'settled sample not attempted' },
+          };
+          samples.push(sample);
+          sample.quiescence = await recordSettledDashboardMetrics(page, load);
+          if ('error' in sample.quiescence || !sample.quiescence.wait.quiesced) {
+            // The artifact records this either way, but nobody is required to
+            // open it. One log line means a permanently non-settling probe
+            // (a stuck request counter, say) is visible in the job output.
+            console.warn(`[map-budget] cold load ${sample.coldLoad} did not produce a settled sample: ${JSON.stringify(sample.quiescence)}`);
+          }
         } finally {
           await context.close();
         }
