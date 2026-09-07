@@ -33,131 +33,157 @@
 // inside the cloud-prefs setItem patch is an identity comparison that cannot
 // throw on a null, and `vi.stubGlobal('localStorage', null)` is a string.
 //
+// Matching is done on the TypeScript AST. It began as regex, and review found
+// a fresh bypass in three consecutive rounds — whitespace around the
+// identifier's accessor, then around the RECEIVER's accessor, then
+// `localStorage!.getItem(k)` (valid TS; `biome.json` leaves noNonNullAssertion
+// off). Each round the patterns were widened and the class declared closed;
+// each time the next round found another token. Enumerating TypeScript's
+// receiver syntax by hand is the whack-a-mole, and the parser already does it
+// exactly — so the parser does it. Switching also found three REAL
+// dereferences the regex never saw, all `(localStorage as unknown as {…})`
+// casts in `followed-only-chip.ts`.
+//
 // Note what a green run does and does not mean. It means "no NEW dereference
 // outside `safe-storage.ts`, and the recorded legacy population still matches
-// the tree". It does NOT mean storage access is safe everywhere. Known gaps,
-// all of which need an AST pass rather than a wider regex to close:
+// the tree". It does NOT mean storage access is safe everywhere. Known gaps:
 //
 //   - a local alias (`const ls = globalThis.localStorage; ls.getItem(k)`) or a
-//     destructure (`const { getItem } = localStorage`);
+//     destructure (`const { getItem } = localStorage`). These need the type
+//     CHECKER, not the parser — an AST alone cannot resolve what `ls` is — so
+//     they are the one class this gate structurally cannot close;
 //   - a `sessionStorage` deref, which has the identical null shape;
 //   - a count-NEUTRAL swap inside an already-inventoried file: deleting one
 //     dereference and adding another keeps N the same and passes green.
 //
-// Widen the patterns when a new idiom appears rather than reading silence as
-// proof. The review that shipped this gate found three separate bypasses in its
-// own first draft, which is the honest calibration for how much a green run
-// buys you.
+// Add a shape to DEREF_PROBES when a new one appears rather than reading
+// silence as proof.
 
 import { readFileSync, readdirSync, lstatSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import ts from 'typescript';
+
 import { isMainModule } from './lib/main-module.mjs';
-import { collectTsFiles, stripComments } from './lib/source-scan.mjs';
+import { collectTsFiles } from './lib/source-scan.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 
 /**
- * Ways to reach through `localStorage` to something that can throw on a null.
+ * Every syntactic shape that reaches THROUGH `localStorage` to something that
+ * can throw when the store is null or its property getter throws.
  *
- * `probe` is the fixture the self-test matches each pattern against, so a
- * pattern that silently stops matching fails loudly instead of going quiet.
+ * These are matched on the TypeScript AST, not on source text. Three rounds of
+ * review found three separate token classes a regex missed — whitespace around
+ * the identifier's accessor, whitespace around the RECEIVER's accessor, and
+ * the non-null assertion in `localStorage!.getItem(k)` (which `biome.json`
+ * permits, since `noNonNullAssertion` is off). Each round I patched the token
+ * and claimed the class was closed; each time the next round found another.
+ * Hand-enumerating TypeScript's receiver syntax is the whack-a-mole, and the
+ * parser already does it exactly.
  *
- * `localStorage?.foo()` is listed even though optional chaining survives the
- * NULL shape: it does nothing for the THROWING shape (a sandboxed iframe or
- * blocked cookies make the property access itself throw), so on its own it is
- * still a hand-rolled half-guard. Inside `safe-storage.ts` it is paired with a
- * try/catch, which is why that file — and only that file — is exempt.
+ * The AST also removes this gate's dependence on comment stripping — a comment
+ * simply is not a node — which retires the blindness class that made the old
+ * regex scanner miss 1826 lines of `panel-layout.ts`.
+ *
+ * `probes` are the fixtures the self-test matches, so a matcher that silently
+ * stops recognizing a shape fails loudly instead of going quiet. Optional
+ * chaining (`localStorage?.getItem`) is deliberately still counted: it survives
+ * the NULL shape but does nothing for the THROWING one, so on its own it is a
+ * half-guard. `safe-storage.ts` pairs it with a try/catch, which is why that
+ * file — and only that file — is exempt.
+ *
+ * NOT closed by this, and not closable without type resolution: a local alias
+ * (`const ls = localStorage; ls.getItem(k)`) or a destructure. Those need the
+ * checker, not the parser. They stay named in the header as known gaps.
  */
-// Whitespace is permitted between the identifier, the accessor and the member
-// throughout: `localStorage .getItem(k)` and a formatter-wrapped
-//
-//     localStorage
-//       .getItem(k)
-//
-// are ordinary code a bare `localStorage\.` pattern misses entirely, and
-// `stripComments` turns `localStorage /* c */.getItem(k)` into exactly the
-// spaced form. `[^\S\n]` rather than `\s` on the identifier side of a bare
-// dot would forbid the wrapped shape, so `\s` it is — the cost is that a
-// `localStorage` on one line and an unrelated `.foo` on the next can pair up,
-// which over-counts (a LOUD inventory mismatch) rather than under-counting.
-//
-// Whitespace is tolerated at EVERY accessor position in EVERY pattern below —
-// both sides of the receiver dot, not just the identifier's. Review found the
-// receiver side still unhandled after the identifier side was fixed, and
-// patching one position per round is the whack-a-mole this note exists to stop.
-// Note what closing it does and does not buy: a plain AST walk would cover
-// exactly this same syntactic class, because the gaps that actually survive —
-// aliasing, destructuring — need symbol/type resolution, not a parser. That is
-// why this stays a regex with the limits named in the header rather than
-// growing a TypeScript dependency for no additional coverage.
-export const RAW_STORAGE_PATTERNS = [
-  {
-    label: 'localStorage.<member>',
-    re: /(?<![.?])\blocalStorage\s*\.\s*\w/,
-    probe: 'localStorage.getItem(key);',
-    extraProbes: [
-      'localStorage .getItem(key);',
-      'localStorage\n  .getItem(key);',
-    ],
-  },
-  {
-    label: 'localStorage?.<member>',
-    re: /\blocalStorage\s*\?\.\s*\w/,
-    probe: 'localStorage?.getItem(key);',
-  },
-  {
-    label: 'localStorage[<expr>]',
-    re: /\blocalStorage\s*(?:\?\.)?\s*\[/,
-    probe: 'localStorage[key] = value;',
-  },
-  {
-    // `(localStorage).getItem(k)` reads as deliberate obfuscation more than as
-    // an accident, but it is valid code that crashes identically, and the
-    // parenthesised receiver defeats every identifier-anchored pattern above.
-    label: '(localStorage).<member>',
-    re: /\(\s*localStorage\s*\)\s*\??\.\s*\w/,
-    probe: '(localStorage).getItem(key);',
-  },
-  {
-    // Every global that names the same Storage object. The receiver prefix is
-    // load-bearing for two reasons: `(?<![.?])` above deliberately refuses to
-    // match a dotted `X.localStorage`, so WITHOUT this alternation
-    // `globalThis.localStorage.getItem(k)` matched nothing at all — and the
-    // repo already ships the safe `globalThis.localStorage?.getItem(k)` at
-    // ChatAnalystPanel.ts:133, so the crashing variant was one deleted
-    // character away with CI green.
-    //
-    // The optional chain is `\??\.`, not `(?:\?\.)?\.` — the latter demanded
-    // `window?..localStorage` (two dots) and could never match anything.
-    label: '<global>.localStorage',
-    re: /\b(?:window|globalThis|self|top|parent)\s*\??\.\s*localStorage\b/,
-    probe: 'const ls = window.localStorage;',
-    extraProbes: [
-      'globalThis.localStorage.getItem(key);',
-      'self.localStorage.setItem(key, value);',
-      'window?.localStorage.getItem(key);',
-      'window .localStorage.getItem(key);',
-      'window\n  .localStorage.getItem(key);',
-    ],
-  },
-  {
-    // A computed receiver defeats every identifier-anchored pattern above.
-    label: "<global>['localStorage']",
-    re: /\b(?:window|globalThis|self|top|parent)\s*(?:\?\.)?\s*\[\s*['"`]localStorage['"`]\s*\]/,
-    probe: "window['localStorage'].getItem(key);",
-  },
-  {
-    // `Storage.prototype.setItem.call(localStorage, …)` throws exactly the same
-    // TypeError on a null receiver, and reads as deliberate enough that a
-    // reviewer waves it through.
-    label: 'Storage.prototype.<member>.call(…)',
-    re: /\bStorage\s*\.\s*prototype\s*\.\s*\w+\s*\.\s*call\s*\(/,
-    probe: 'Storage.prototype.setItem.call(localStorage, key, value);',
-  },
-];
+export const DEREF_LABELS = {
+  direct: 'localStorage.<member>',
+  global: '<global>.localStorage',
+  prototype: 'Storage.prototype.<member>.call(…)',
+};
+
+/** Globals that name the same Storage object. */
+const STORAGE_GLOBALS = new Set(['window', 'globalThis', 'self', 'top', 'parent']);
+
+/**
+ * Fixtures per label. Every entry must be matched by the AST walk below; the
+ * self-test asserts that, which is what keeps the matcher honest.
+ */
+export const DEREF_PROBES = {
+  [DEREF_LABELS.direct]: [
+    'localStorage.getItem(key);',
+    'localStorage .getItem(key);',
+    'localStorage\n  .getItem(key);',
+    'localStorage /* c */.getItem(key);',
+    'localStorage?.getItem(key);',
+    'localStorage!.getItem(key);',
+    '(localStorage).getItem(key);',
+    '(localStorage!).getItem(key);',
+    '(localStorage as Storage).getItem(key);',
+    'localStorage[key] = value;',
+    'localStorage!["k"];',
+  ],
+  [DEREF_LABELS.global]: [
+    'const ls = window.localStorage;',
+    'globalThis.localStorage.getItem(key);',
+    'self.localStorage.setItem(key, value);',
+    'window?.localStorage.getItem(key);',
+    'window .localStorage.getItem(key);',
+    'window!.localStorage.getItem(key);',
+    "window['localStorage'].getItem(key);",
+  ],
+  [DEREF_LABELS.prototype]: [
+    'Storage.prototype.setItem.call(localStorage, key, value);',
+    'Storage . prototype . setItem . call(localStorage, key, value);',
+  ],
+};
+
+/** Strip the receiver wrappers TypeScript allows around an expression. */
+function unwrapReceiver(node) {
+  let current = node;
+  for (;;) {
+    if (
+      ts.isParenthesizedExpression(current)
+      || ts.isNonNullExpression(current)
+      || ts.isAsExpression(current)
+      || (ts.isSatisfiesExpression?.(current) ?? false)
+      || (ts.isTypeAssertionExpression?.(current) ?? false)
+    ) {
+      current = current.expression;
+      continue;
+    }
+    return current;
+  }
+}
+
+/** Does this node read `.localStorage` / `['localStorage']` off a global? */
+function isGlobalStorageAccess(node) {
+  const base = unwrapReceiver(node.expression);
+  if (!ts.isIdentifier(base) || !STORAGE_GLOBALS.has(base.text)) return false;
+  if (ts.isPropertyAccessExpression(node)) return node.name.text === 'localStorage';
+  return (
+    ts.isElementAccessExpression(node)
+    && !!node.argumentExpression
+    && ts.isStringLiteralLike(node.argumentExpression)
+    && node.argumentExpression.text === 'localStorage'
+  );
+}
+
+/** `Storage.prototype.<member>.call(` — the same TypeError on a null receiver. */
+function isStoragePrototypeCall(node) {
+  if (!ts.isCallExpression(node)) return false;
+  const callee = unwrapReceiver(node.expression);
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'call') return false;
+  const member = unwrapReceiver(callee.expression);
+  if (!ts.isPropertyAccessExpression(member)) return false;
+  const proto = unwrapReceiver(member.expression);
+  if (!ts.isPropertyAccessExpression(proto) || proto.name.text !== 'prototype') return false;
+  const base = unwrapReceiver(proto.expression);
+  return ts.isIdentifier(base) && base.text === 'Storage';
+}
 
 /**
  * The canonical helper. Exempt BY NAME, not by the incidental fact that it
@@ -194,8 +220,9 @@ export const GUARD_EXEMPT_FILES = new Set(['src/utils/safe-storage.ts']);
  *   - a pair that shrank or vanished MUST be updated here, so the inventory
  *     can never quietly outlive the drift it records.
  *
- * Counts are measured on COMMENT-STRIPPED source, so documenting the rule in a
- * comment neither inflates an entry nor keeps a migrated one alive.
+ * Counts come from the AST, so a comment mentioning an idiom is simply not a
+ * node — documenting the rule neither inflates an entry nor keeps a migrated
+ * one alive.
  *
  * An entry here is NOT automatically a bug. Three populations are mixed in,
  * and the CLI cannot tell them apart — read the call site before "fixing" one:
@@ -227,7 +254,6 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
   'src/bootstrap/sw-update.ts :: localStorage.<member> x1',
   'src/components/AviationCommandBar.ts :: localStorage.<member> x1',
   'src/components/ChatAnalystPanel.ts :: <global>.localStorage x2',
-  'src/components/ChatAnalystPanel.ts :: localStorage?.<member> x2',
   'src/components/ConsumerPricesPanel.ts :: localStorage.<member> x2',
   'src/components/GlobeMap.ts :: localStorage.<member> x2',
   'src/components/InsightsPanel.ts :: localStorage.<member> x1',
@@ -241,7 +267,7 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
   'src/config/basemap.ts :: localStorage.<member> x2',
   'src/config/beta.ts :: localStorage.<member> x1',
   'src/config/variant.ts :: localStorage.<member> x1',
-  'src/main.ts :: localStorage.<member> x4',
+  'src/main.ts :: localStorage.<member> x2',
   'src/mcp-grant-main.ts :: localStorage.<member> x1',
   'src/services/ai-flow-settings.ts :: localStorage.<member> x4',
   'src/services/analytics.ts :: <global>.localStorage x3',
@@ -270,7 +296,7 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
   'src/services/trending-keywords.ts :: localStorage.<member> x2',
   'src/services/webcams/pinned-store.ts :: localStorage.<member> x2',
   'src/services/widget-store.ts :: localStorage.<member> x4',
-  'src/utils/followed-only-chip.ts :: localStorage.<member> x4',
+  'src/utils/followed-only-chip.ts :: localStorage.<member> x7',
   'src/utils/index.ts :: localStorage.<member> x2',
   'src/utils/panel-storage.ts :: localStorage.<member> x3',
   'src/utils/settings-persistence.ts :: localStorage.<member> x1',
@@ -285,12 +311,43 @@ export const LEGACY_RAW_LOCAL_STORAGE = [
  */
 export const MIN_SCANNED_FILES = 700;
 
-/** `<idiom> xN` for every raw-storage idiom present in `code`, with counts. */
-export function rawStorageUsesIn(code) {
-  return RAW_STORAGE_PATTERNS.flatMap(({ label, re }) => {
-    const n = (code.match(new RegExp(re.source, 'g')) ?? []).length;
-    return n === 0 ? [] : [`${label} x${n}`];
-  });
+/**
+ * `<idiom> xN` for every raw-storage dereference in `source`, with counts.
+ *
+ * Counting rule, and why it does not double-count: a node is counted when EITHER
+ * it reads `localStorage` off a global (`window.localStorage`), OR it is a
+ * member access whose unwrapped receiver is the bare `localStorage` identifier.
+ * The two are mutually exclusive per node, so `window.localStorage.getItem(k)`
+ * counts once — at the inner global read — because the outer access's receiver
+ * unwraps to a property access rather than to a bare identifier.
+ *
+ * A bare `localStorage` that is never accessed through is NOT counted:
+ * `this === localStorage` is an identity comparison that cannot throw, and
+ * flagging it would push callers to "fix" working code.
+ */
+export function rawStorageUsesIn(source) {
+  const file = ts.createSourceFile('scan.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const counts = new Map();
+  const bump = (label) => counts.set(label, (counts.get(label) ?? 0) + 1);
+
+  const visit = (node) => {
+    if (isStoragePrototypeCall(node)) {
+      bump(DEREF_LABELS.prototype);
+    } else if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      if (isGlobalStorageAccess(node)) {
+        bump(DEREF_LABELS.global);
+      } else {
+        const receiver = unwrapReceiver(node.expression);
+        if (ts.isIdentifier(receiver) && receiver.text === 'localStorage') bump(DEREF_LABELS.direct);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(file, visit);
+
+  return [...counts.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([label, n]) => `${label} x${n}`);
 }
 
 /** Scan the tree and return everything the assertions and the CLI both need. */
@@ -302,7 +359,7 @@ export function scanRepo(root = REPO_ROOT) {
 
   const observed = scanned
     .flatMap((abs) =>
-      rawStorageUsesIn(stripComments(readFileSync(abs, 'utf8'))).map(
+      rawStorageUsesIn(readFileSync(abs, 'utf8')).map(
         (label) => `${path.relative(root, abs)} :: ${label}`,
       ),
     )

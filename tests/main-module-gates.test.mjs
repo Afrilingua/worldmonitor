@@ -82,6 +82,12 @@ function createSymlinkedGateFixture(gate) {
   mkdirSync(join(root, 'scripts/lib'), { recursive: true });
   copyFileSync(join(REPO_ROOT, gate.file), scriptPath);
   for (const lib of SHARED_LIB_MODULES) copyFileSync(join(REPO_ROOT, lib), join(root, lib));
+  // A gate may import a real dependency — enforce-safe-local-storage.mjs uses
+  // the TypeScript parser — and ESM resolves those from node_modules, not from
+  // NODE_PATH. Without this the fixture run dies on ERR_MODULE_NOT_FOUND, which
+  // exits non-zero and so passes the status check while producing none of the
+  // gate's output: the exact silent-no-op shape this test exists to catch.
+  symlinkSync(join(REPO_ROOT, 'node_modules'), join(root, 'node_modules'), 'dir');
   gate.setup(root);
 
   const linkedRoot = join(root, 'linked-checkout');

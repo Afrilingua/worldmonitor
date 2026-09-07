@@ -6,11 +6,11 @@ import {
   GUARD_EXEMPT_FILES,
   LEGACY_RAW_LOCAL_STORAGE,
   MIN_SCANNED_FILES,
-  RAW_STORAGE_PATTERNS,
+  DEREF_LABELS,
+  DEREF_PROBES,
   rawStorageUsesIn,
   scanRepo,
 } from '../scripts/enforce-safe-local-storage.mjs';
-import { stripComments } from '../scripts/lib/source-scan.mjs';
 
 // ---------------------------------------------------------------------------
 // Why this test exists (#7833)
@@ -44,65 +44,18 @@ describe('raw localStorage guard (#7833)', () => {
     );
   });
 
-  it('catches every receiver prefix that names the same Storage object', () => {
-    // Negative coverage, and the reason it exists: "every pattern matches its
-    // own probe" is circular — it cannot see an idiom class no probe covers.
-    // All three of these returned [] in the first draft of this gate, while the
-    // SAFE `globalThis.localStorage?.getItem(k)` was the one form it caught, so
-    // the crashing variant was one deleted character away with CI green.
-    for (const src of [
-      'globalThis.localStorage.getItem(k);',
-      'self.localStorage.setItem(k, v);',
-      'window?.localStorage.getItem(k);',
-      'window.localStorage.removeItem(k);',
-      'top.localStorage.getItem(k);',
-      'parent.localStorage.getItem(k);',
-    ]) {
-      assert.notDeepEqual(rawStorageUsesIn(src), [], `${src} is not caught by any pattern`);
-    }
-  });
-
-  it('catches lexical variants of the dereference itself', () => {
-    // A bare `localStorage\.` pattern anchors on the dot immediately following
-    // the identifier, so ordinary spacing defeated it. The wrapped form is what
-    // makes this more than adversarial — a formatter produces it for a long
-    // chain — and `stripComments` turns the inline-comment form into exactly
-    // the spaced one.
-    for (const src of [
-      'localStorage .getItem(k);',
-      'localStorage\n  .getItem(k);',
-      '(localStorage).getItem(k);',
-      '( localStorage ) ?. getItem(k);',
-      'localStorage [k] = v;',
-      // Receiver side, found still open after the identifier side was fixed.
-      'window .localStorage.getItem(k);',
-      'window /* c */.localStorage.getItem(k);',
-      'globalThis\n  .localStorage.getItem(k);',
-      "window['localStorage'].getItem(k);",
-      'Storage . prototype . setItem . call(localStorage, k, v);',
-    ]) {
-      assert.notDeepEqual(
-        rawStorageUsesIn(stripComments(src)),
-        [],
-        `${JSON.stringify(src)} is not caught by any pattern`,
-      );
-    }
-  });
-
-  it('every pattern matches its own probe', () => {
-    // Asserting something like `re.source.length > 0` would be a tautology:
-    // even `new RegExp('').source` is the 4-character string "(?:)". Matching
-    // a fixture is the only assertion that goes red on a typo'd pattern.
-    for (const { label, re, probe, extraProbes = [] } of RAW_STORAGE_PATTERNS) {
-      assert.ok(re.test(probe), `${label} no longer matches its own probe — the pattern has drifted`);
-      for (const extra of extraProbes) {
-        assert.ok(re.test(extra), `${label} no longer matches its recorded variant: ${extra}`);
+  it('matches every recorded fixture, for every idiom', () => {
+    // Not circular: DEREF_PROBES is the accumulated evidence from three review
+    // rounds — whitespace on the identifier side, whitespace on the receiver
+    // side, and the `!` / `as` receiver wrappers. Each entry returned [] from
+    // some earlier version of this gate.
+    for (const [label, probes] of Object.entries(DEREF_PROBES)) {
+      for (const src of probes) {
+        assert.ok(
+          rawStorageUsesIn(src).some((entry) => entry.startsWith(`${label} `)),
+          `${label} no longer matches ${JSON.stringify(src)}`,
+        );
       }
-      assert.deepEqual(
-        rawStorageUsesIn(probe).filter((entry) => entry.startsWith(`${label} `)),
-        [`${label} x1`],
-        `${label} did not count its own probe exactly once`,
-      );
     }
   });
 
@@ -112,50 +65,43 @@ describe('raw localStorage guard (#7833)', () => {
     // second call site, so the count is what makes the ratchet real.
     assert.deepEqual(
       rawStorageUsesIn('localStorage.getItem(a); localStorage.setItem(b, c);'),
-      ['localStorage.<member> x2'],
+      [`${DEREF_LABELS.direct} x2`],
+    );
+  });
+
+  it('counts a global-qualified dereference exactly once', () => {
+    // `window.localStorage.getItem(k)` is two nested accesses. The regex era
+    // counted it under two labels at once, inflating those files' entries.
+    assert.deepEqual(
+      rawStorageUsesIn('window.localStorage.getItem(k);'),
+      [`${DEREF_LABELS.global} x1`],
     );
   });
 
   it('treats a bare identifier as legal and a dereference as not', () => {
-    // `this === localStorage` inside the cloud-prefs setItem patch is an
-    // identity comparison; it cannot throw on a null. Flagging it would push
-    // callers to "fix" working code, and an inventory nobody trusts gets
-    // rubber-stamped.
+    // `this === localStorage` is an identity comparison; it cannot throw on a
+    // null. Flagging it would push callers to "fix" working code, and an
+    // inventory nobody trusts gets rubber-stamped.
     assert.deepEqual(rawStorageUsesIn('if (this === localStorage) return;'), []);
-    // Whitespace tolerance must not start matching unrelated identifiers.
-    assert.deepEqual(rawStorageUsesIn('const x = windowFoo.localStorageBar;'), []);
     assert.deepEqual(rawStorageUsesIn("vi.stubGlobal('localStorage', null);"), []);
+    assert.deepEqual(rawStorageUsesIn('const x = windowFoo.localStorageBar;'), []);
+    assert.deepEqual(rawStorageUsesIn('keyFn.call(localStorage, i);'), []);
+  });
+
+  it('ignores an idiom that only appears in a comment', () => {
+    // Free with an AST — a comment is not a node. The regex era needed a
+    // comment stripper for this, and that stripper is what went blind on 1826
+    // lines of panel-layout.ts.
     assert.deepEqual(
-      rawStorageUsesIn('const v = localStorage.getItem(k);'),
-      ['localStorage.<member> x1'],
+      rawStorageUsesIn([
+        '// call localStorage.getItem(k) here',
+        '/* or localStorage.setItem(k, v) */',
+        "const glob = '../locales/*.json';",
+        '// see src/components/*Panel.ts',
+        'safeStorageGet(k);',
+      ].join('\n')),
+      [],
     );
-  });
-
-  it('preserves real code that merely LOOKS like a comment boundary', () => {
-    // The bug that made this gate blind on 1826 lines of panel-layout.ts: the
-    // old two-regex stripper ran its block-comment pass over RAW source, so a
-    // `/*` inside a line comment or a string opened a bogus region that ran to
-    // the next `*/` and swallowed everything between. Asserting only that
-    // comments are REMOVED cannot catch that; this asserts code SURVIVES.
-    const tricky = [
-      "// see the panels declared in src/components/*Panel.ts for the list",
-      "const glob = '../locales/*.json';",
-      "const url = 'https://example.com/x'; localStorage.getItem('a');",
-      "localStorage.setItem('b', '1');",
-      "/* a real block comment mentioning localStorage.getItem */",
-      "localStorage.removeItem('c');",
-    ].join('\n');
-    assert.deepEqual(rawStorageUsesIn(stripComments(tricky)), ['localStorage.<member> x3']);
-  });
-
-  it('does not count a dereference that only appears in a comment', () => {
-    // Scanning raw text would both false-fail a migrated file that documents
-    // the rule, and — worse, because it is silent — keep a legacy entry
-    // "observed" after its last real call is gone, so `stale` never fires.
-    const documented = stripComments(
-      ['// call localStorage.getItem(k) here', '/* or localStorage.setItem(k, v) */', 'safeStorageGet(k);'].join('\n'),
-    );
-    assert.deepEqual(rawStorageUsesIn(documented), []);
   });
 
   it('exempts the canonical helper and nothing else', () => {
