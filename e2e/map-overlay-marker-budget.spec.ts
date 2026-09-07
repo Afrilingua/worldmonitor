@@ -394,11 +394,26 @@ function assertDashboardMetricBudgets(samples: readonly DashboardMetrics[]): voi
  * would be a smaller copy of the same defect.
  */
 async function attachColdDashboardMetrics(testInfo: TestInfo, samples: readonly ColdDashboardSample[]): Promise<void> {
+  const countSamples = (
+    predicate: (quiescence: Exclude<ColdDashboardSample['quiescence'], { error: string }>) => boolean,
+  ): number => samples.filter((sample) => !('error' in sample.quiescence) && predicate(sample.quiescence)).length;
   const payload = `${JSON.stringify({
     // Which sample the budgets above are asserted against, and which is only
     // recorded. Keep these keys in step with the samples they describe.
     asserted: { readiness: 'svg-map-first-paint', measurement: 'post-gc' },
-    recorded: { readiness: 'dom-quiescence', measurement: 'post-gc' },
+    // `readiness` here is the intent, not a claim about the rows below: a
+    // sample that timed out still carries a full metrics block, disqualified
+    // only by a nested `wait.quiesced`. So the header counts how many samples
+    // actually reached each signal — a static label would let a reader take
+    // never-settled numbers for settled ones, which is the failure this whole
+    // attachment exists to prevent.
+    recorded: {
+      readiness: 'dom-quiescence',
+      measurement: 'post-gc',
+      totalSamples: samples.length,
+      quiescedSamples: countSamples((quiescence) => quiescence.wait.quiesced),
+      hydrationReadySamples: countSamples((quiescence) => quiescence.initialDataReady),
+    },
     budgets: DASHBOARD_METRIC_BUDGETS,
     samples,
   }, null, 2)}\n`;
