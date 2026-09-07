@@ -199,6 +199,9 @@ let _cachedToken: string | null = null; // synchronous token cache for flush()
 // SETTLED ones. See resolveConflictWithMerge + mergeCloudWithLocalDirty.
 const _dirtyKeys = new Set<CloudSyncKey>();
 let _dirtyKeysUserId: string | null = null;
+// Whether the persisted dirty-key sidecar was successfully READ this session.
+// An empty in-memory set means 'nothing pending' only when this is true.
+let _dirtyKeysHydrated = false;
 
 /**
  * #4746: persistDirtyKeys used to serialize only THIS tab's in-memory set,
@@ -265,6 +268,9 @@ function persistSettledDirtyKeyRemovals(removals: string[]): void {
 
 function persistDirtyKeys(): void {
   try {
+    // Removing on an empty set is only safe when the set is trustworthy — i.e.
+    // we actually read the sidecar. Otherwise this deletes markers we never saw.
+    if (_dirtyKeys.size === 0 && !_dirtyKeysHydrated) return;
     if (_dirtyKeys.size === 0) {
       safeStorageRemove(KEY_DIRTY_KEYS);
       return;
@@ -283,7 +289,13 @@ function hydrateDirtyKeysFromStorage(userId: string): void {
   try {
     _dirtyKeys.clear();
     _dirtyKeysUserId = userId;
-    const raw = safeStorageGet(KEY_DIRTY_KEYS);
+    // Not review-reported; found auditing the rest of this class. A failed read
+    // degrades to "no persisted markers", and the empty in-memory set is then
+    // treated as authoritative — so the sign-out `persistDirtyKeys()` REMOVES
+    // the sidecar and another tab's unsynced edits lose their markers.
+    const read = safeStorageGetChecked(KEY_DIRTY_KEYS);
+    _dirtyKeysHydrated = read.ok;
+    const raw = read.value;
     for (const key of parsePersistedDirtyKeys(raw, CLOUD_SYNC_KEYS, userId)) {
       _dirtyKeys.add(key as CloudSyncKey);
     }
@@ -387,7 +399,21 @@ export function isCloudSyncEnabled(): boolean {
 // ── State helpers ─────────────────────────────────────────────────────────────
 
 export function getSyncVersion(): number {
-  return parseInt(safeStorageGet(KEY_SYNC_VERSION) ?? '0', 10) || 0;
+  return getSyncVersionChecked() ?? 0;
+}
+
+/**
+ * The durable sync version, or `null` when it could not be READ.
+ *
+ * Also not review-reported. Degrading to 0 means "never synced", which decides
+ * two things wrongly at once: `cloud.syncVersion > getSyncVersion()` becomes
+ * true so the cloud blob is applied OVER local edits, and `isFirstEverSync`
+ * becomes true so the undo toast snapshots a "previous" state that is not one.
+ */
+function getSyncVersionChecked(): number | null {
+  const read = safeStorageGetChecked(KEY_SYNC_VERSION);
+  if (!read.ok) return null;
+  return parseInt(read.value ?? '0', 10) || 0;
 }
 
 /**
@@ -459,17 +485,29 @@ function dispatchCloudPrefsSignInTerminal(
   ));
 }
 
-function clearForeignOwnershipSidecars(userId: string): void {
-  const lastSignedInAs = safeStorageGet(KEY_LAST_SIGNED_IN_AS);
-  if (lastSignedInAs === null || lastSignedInAs === userId) return;
+/**
+ * Returns false when prior-account ownership could not be DETERMINED.
+ *
+ * Absent legitimately means "no prior account, nothing to clear". A failed read
+ * degrading to null is indistinguishable from that, and skipping the cleanup on
+ * an account transition leaves account A's ownership sidecars in place for B —
+ * so tier reconciliation attributes A's gate decisions to B (#7833 review).
+ * Provenance is exactly the kind of question to fail closed on.
+ */
+function clearForeignOwnershipSidecars(userId: string): boolean {
+  const read = safeStorageGetChecked(KEY_LAST_SIGNED_IN_AS);
+  if (!read.ok) return false;
+  const lastSignedInAs = read.value;
+  if (lastSignedInAs === null || lastSignedInAs === userId) return true;
 
   // Preferences intentionally survive sign-out, but ownership sidecars are
   // account provenance. If the next account has a legacy row that omits them,
   // keeping the prior account's local values attributes A's gate decisions to
   // B. B's explicit cloud values will still be applied later in this attempt.
   for (const key of ACCOUNT_PROVENANCE_SYNC_KEYS) {
-    safeStorageRemove(key);
+    if (!safeStorageRemoveChecked(key)) return false;
   }
+  return true;
 }
 
 /**
@@ -552,10 +590,20 @@ function applyMigrationsWithSchemaVersion(
   return { ...migrated, dataChanged: migrated.data !== data };
 }
 
-function getLocalSchemaVersion(): number {
-  const raw = safeStorageGet(KEY_LOCAL_SCHEMA_VERSION);
-  if (raw === null) return 1; // No marker yet → assume oldest, run migrations
-  const v = parseInt(raw, 10);
+/**
+ * The schema the local blob has reached, or `null` when the marker could not be
+ * READ.
+ *
+ * An absent marker legitimately means "assume oldest, run migrations". A failed
+ * read looks identical after degrading to null — and reruns one-shot migrations
+ * over already-migrated data, where schema 2 re-enables a whole source category
+ * the user may have deliberately disabled since (#7833 review).
+ */
+function getLocalSchemaVersion(): number | null {
+  const read = safeStorageGetChecked(KEY_LOCAL_SCHEMA_VERSION);
+  if (!read.ok) return null;
+  if (read.value === null) return 1; // No marker yet → assume oldest, run migrations
+  const v = parseInt(read.value, 10);
   return Number.isFinite(v) && v > 0 ? v : 1;
 }
 
@@ -593,6 +641,7 @@ interface PreparedCloudBlob {
 
 function migrateLocalBlobIfNeeded(): PreparedCloudBlob | null {
   const localSchema = getLocalSchemaVersion();
+  if (localSchema === null) return null;
   const blob = buildCloudBlob();
   if (blob === null) return null;
   if (localSchema >= CURRENT_PREFS_SCHEMA_VERSION) {
@@ -601,18 +650,17 @@ function migrateLocalBlobIfNeeded(): PreparedCloudBlob | null {
   const migrated = applyMigrationsWithSchemaVersion(blob, localSchema);
   const migratedData = migrated.data as Record<string, string>;
   if (migratedData !== blob && !applyCloudBlob(migratedData)) {
-    // The migrated blob did not land. Recording the new schema version anyway
-    // would cement the unmigrated local data at the new version — the exact
-    // poisoning KEY_LOCAL_SCHEMA_VERSION exists to prevent. Post what we have
-    // at the OLD version so the next attempt migrates again.
-    return { data: blob, schemaVersion: localSchema };
+    // The migrated blob did not land, so the local state is neither the old
+    // snapshot nor the new one. Returning `blob` here — as an earlier round of
+    // this fix did — hands callers a VALID PreparedCloudBlob, which they then
+    // POST, advance the sync version for, and report as synced.
+    return null;
   }
   if (!setLocalSchemaVersion(migrated.schemaVersion)) {
-    // The marker did not persist, so the migration is not durably recorded.
-    // Posting at the NEW version would tell the cloud the data is migrated
-    // while the local marker still says otherwise, and the next load would run
-    // one-shot migrations again over already-migrated data.
-    return { data: blob, schemaVersion: localSchema };
+    // Storage took the migrated preference writes but rejected the marker, so
+    // `blob` is now a stale pre-migration snapshot. Posting it would overwrite
+    // the cloud with values the migration already replaced.
+    return null;
   }
   return { data: migratedData, schemaVersion: migrated.schemaVersion };
 }
@@ -888,8 +936,16 @@ function runSignInAttempt(attempt: SignInAttempt): Promise<void> {
       const cloud = await fetchCloudPrefs(token, variant);
       if (_authGeneration !== myGeneration) return;
 
-      if (cloud && cloud.syncVersion > getSyncVersion()) {
-        const isFirstEverSync = getSyncVersion() === 0;
+      const localVersion = getSyncVersionChecked();
+      if (localVersion === null) {
+        // Cannot tell whether cloud is ahead. Applying it on a guess overwrites
+        // local edits; treating it as first-ever sync fabricates an undo state.
+        setState('error');
+        completeSignInAttempt(attempt, 'error');
+        return;
+      }
+      if (cloud && cloud.syncVersion > localVersion) {
+        const isFirstEverSync = localVersion === 0;
         const localBlob = buildCloudBlob();
         if (localBlob === null) {
           // An unreadable local blob cannot be merged over, and the undo
@@ -1056,7 +1112,19 @@ export function onSignIn(
   // Ownership sidecars describe which changes a particular account's gate
   // produced. Preserve them for a same-account legacy cloud row, but never
   // carry them across an observed account transition.
-  clearForeignOwnershipSidecars(userId);
+  if (!clearForeignOwnershipSidecars(userId)) {
+    // Provenance is undeterminable, so proceeding could attribute the previous
+    // account's gate decisions to this one. Report a terminal error rather than
+    // reconcile on a guess.
+    setState('error');
+    dispatchCloudPrefsSignInTerminal(
+      userId,
+      myGeneration,
+      options.handoffGeneration,
+      'error',
+    );
+    return Promise.resolve();
+  }
 
   // Establish dirty-key ownership synchronously. Preference writes may happen
   // while this sign-in waits behind an older queued writer; hydrating inside

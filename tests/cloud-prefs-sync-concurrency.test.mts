@@ -406,6 +406,10 @@ async function runHarness(
   try {
     const cloudPrefs = await loadCloudPrefsModule(enabled);
     await invoke(cloudPrefs, controls);
+    // Rejections simulate a condition during the RUN, not during measurement —
+    // the result assembly below reads the same keys directly and would throw.
+    rejectedReadKeys.clear();
+    rejectedWriteKeys.clear();
     const activeToken = String(Reflect.get(globalThis, '__cloudPrefsToken'));
     const activeRow = rows.get(activeToken) ?? { data: {}, schemaVersion: 2, syncVersion: 0 };
     return {
@@ -941,5 +945,44 @@ describe('cloud prefs sign-out cleanup (#7833 review)', () => {
       0,
       'sign-out must clear the durable sync-version metadata',
     );
+  });
+});
+
+describe('cloud prefs fail closed on undeterminable state (#7833 review)', () => {
+  it('does not apply the cloud blob when the local sync version cannot be read', async () => {
+    // Degrading this read to 0 means "never synced", which makes the cloud
+    // unconditionally look ahead — so the cloud blob is applied over local
+    // edits that were never uploaded.
+    // The local value has to be captured INSIDE the harness: it restores the
+    // globals on exit, so `localStorage` is gone by the time assertions run.
+    let watchlistAfter: string | null = null;
+    const result = await runHarness(async (cloudPrefs, controls) => {
+      controls.seedRow('test-token', { 'wm-market-watchlist-v1': 'cloud-value' }, 9);
+      localStorage.setItem('wm-market-watchlist-v1', 'local-edit');
+      controls.rejectReadsOf('wm-cloud-sync-version');
+      await cloudPrefs.onSignIn('user-1', 'full');
+      watchlistAfter = localStorage.getItem('wm-market-watchlist-v1');
+    });
+
+    assert.equal(
+      watchlistAfter,
+      'local-edit',
+      'an unreadable sync version must not let cloud overwrite local edits',
+    );
+    assert.equal(result.state, 'error');
+  });
+
+  it('does not sign in when prior-account ownership cannot be determined', async () => {
+    // Skipping the sidecar cleanup on an account transition leaves account A's
+    // ownership values in place for B, so tier reconciliation attributes A's
+    // gate decisions to B.
+    const result = await runHarness(async (cloudPrefs, controls) => {
+      controls.seedRow('test-token', {}, 1);
+      controls.rejectReadsOf('wm-last-signed-in-as');
+      await cloudPrefs.onSignIn('user-b', 'full');
+    });
+
+    assert.equal(result.state, 'error', 'undeterminable provenance must fail closed');
+    assert.equal(result.postCount, 0, 'nothing may be uploaded on a provenance failure');
   });
 });
