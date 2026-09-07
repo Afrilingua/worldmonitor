@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 
-import { loadEnvFile, runSeed, withRetry, writeExtraKeyWithMeta } from './_seed-utils.mjs';
+import {
+  loadEnvFile,
+  resolveSeedMetaTtl,
+  runSeed,
+  withRetry,
+  writeExtraKeyWithMeta,
+} from './_seed-utils.mjs';
 import { getOptionalUpstashCreds, upstashCommand } from './_upstash-rest.mjs';
 import {
   FRED_KEY_PREFIX,
@@ -25,6 +31,31 @@ export const FRED_RATES_ACTIVATION_KEY = 'seed-activated:economic:fred-rates:v1'
 const MIN_SERIES_COUNT = Math.ceil(FRED_SEED_SERIES.length * 0.75);
 const SIDE_WRITE_RETRIES = 2;
 const SIDE_WRITE_RETRY_DELAY_MS = 1_000;
+
+function seedMetaKeyFor(dataKey) {
+  return `seed-meta:${dataKey.replace(/:v\d+$/, '')}`;
+}
+
+function fredPreserveKeyTtls() {
+  return [
+    {
+      key: 'seed-meta:economic:fred-rates',
+      ttlSeconds: resolveSeedMetaTtl(undefined, BATCH_TTL),
+    },
+    ...FRED_SEED_SERIES.flatMap((seriesId) => {
+      const key = `${FRED_KEY_PREFIX}:${seriesId}:0`;
+      return [
+        { key, ttlSeconds: FRED_TTL },
+        { key: seedMetaKeyFor(key), ttlSeconds: resolveSeedMetaTtl(undefined, FRED_TTL) },
+      ];
+    }),
+    { key: STRESS_INDEX_KEY, ttlSeconds: STRESS_INDEX_TTL },
+    {
+      key: seedMetaKeyFor(STRESS_INDEX_KEY),
+      ttlSeconds: resolveSeedMetaTtl(undefined, STRESS_INDEX_TTL),
+    },
+  ];
+}
 
 export async function fetchFredBatch({
   fetchFredSeriesImpl = fetchFredSeries,
@@ -138,6 +169,8 @@ export async function runFredRatesSeed(deps = {}) {
     ttlSeconds: BATCH_TTL,
     validateFn: validateFredBatch,
     publishTransform: projectFredBatch,
+    preserveKeyTtls: fredPreserveKeyTtls(),
+    emptyDataIsFailure: true,
     beforePublish: (batch) => publishFredSideKeys(batch, {
       writeExtraKeyWithMetaImpl: deps.writeExtraKeyWithMetaImpl,
       withRetryImpl: deps.withRetryImpl,
