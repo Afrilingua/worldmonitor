@@ -196,3 +196,20 @@ describe('checked-write call-site contract (#7833 review)', () => {
     expect(backing.get('b')).toBe('old');
   });
 });
+
+describe('checked writes under a THROWING storage property (#7833 review)', () => {
+  it('reports success, because an unreachable store is not a rejection', () => {
+    // The distinction the cloud-prefs callers now branch on. Reading the
+    // `localStorage` property itself throws in a sandboxed iframe or with
+    // cookies blocked; folding that into the write's own catch reported it as
+    // a REJECTED write, so every cloud-pref write looked rejected and sign-in
+    // terminated in an error state on those surfaces (the embed runs in an
+    // iframe). Only a store that was actually obtained and refused the write
+    // returns false.
+    stubThrowingStorage();
+
+    expect(safeStorageSetChecked('wm-test-key', 'v')).toBe(true);
+    expect(safeStorageRemoveChecked('wm-test-key')).toBe(true);
+    expect(isStorageAvailable()).toBe(false);
+  });
+});

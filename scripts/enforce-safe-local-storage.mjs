@@ -83,6 +83,16 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 // dot would forbid the wrapped shape, so `\s` it is — the cost is that a
 // `localStorage` on one line and an unrelated `.foo` on the next can pair up,
 // which over-counts (a LOUD inventory mismatch) rather than under-counting.
+//
+// Whitespace is tolerated at EVERY accessor position in EVERY pattern below —
+// both sides of the receiver dot, not just the identifier's. Review found the
+// receiver side still unhandled after the identifier side was fixed, and
+// patching one position per round is the whack-a-mole this note exists to stop.
+// Note what closing it does and does not buy: a plain AST walk would cover
+// exactly this same syntactic class, because the gaps that actually survive —
+// aliasing, destructuring — need symbol/type resolution, not a parser. That is
+// why this stays a regex with the limits named in the header rather than
+// growing a TypeScript dependency for no additional coverage.
 export const RAW_STORAGE_PATTERNS = [
   {
     label: 'localStorage.<member>',
@@ -123,20 +133,28 @@ export const RAW_STORAGE_PATTERNS = [
     // The optional chain is `\??\.`, not `(?:\?\.)?\.` — the latter demanded
     // `window?..localStorage` (two dots) and could never match anything.
     label: '<global>.localStorage',
-    re: /\b(?:window|globalThis|self|top|parent)\??\.localStorage\b/,
+    re: /\b(?:window|globalThis|self|top|parent)\s*\??\.\s*localStorage\b/,
     probe: 'const ls = window.localStorage;',
     extraProbes: [
       'globalThis.localStorage.getItem(key);',
       'self.localStorage.setItem(key, value);',
       'window?.localStorage.getItem(key);',
+      'window .localStorage.getItem(key);',
+      'window\n  .localStorage.getItem(key);',
     ],
+  },
+  {
+    // A computed receiver defeats every identifier-anchored pattern above.
+    label: "<global>['localStorage']",
+    re: /\b(?:window|globalThis|self|top|parent)\s*(?:\?\.)?\s*\[\s*['"`]localStorage['"`]\s*\]/,
+    probe: "window['localStorage'].getItem(key);",
   },
   {
     // `Storage.prototype.setItem.call(localStorage, …)` throws exactly the same
     // TypeError on a null receiver, and reads as deliberate enough that a
     // reviewer waves it through.
     label: 'Storage.prototype.<member>.call(…)',
-    re: /\bStorage\.prototype\.\w+\.call\(/,
+    re: /\bStorage\s*\.\s*prototype\s*\.\s*\w+\s*\.\s*call\s*\(/,
     probe: 'Storage.prototype.setItem.call(localStorage, key, value);',
   },
 ];

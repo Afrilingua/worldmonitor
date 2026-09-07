@@ -74,6 +74,12 @@ describe('raw localStorage guard (#7833)', () => {
       '(localStorage).getItem(k);',
       '( localStorage ) ?. getItem(k);',
       'localStorage [k] = v;',
+      // Receiver side, found still open after the identifier side was fixed.
+      'window .localStorage.getItem(k);',
+      'window /* c */.localStorage.getItem(k);',
+      'globalThis\n  .localStorage.getItem(k);',
+      "window['localStorage'].getItem(k);",
+      'Storage . prototype . setItem . call(localStorage, k, v);',
     ]) {
       assert.notDeepEqual(
         rawStorageUsesIn(stripComments(src)),
@@ -116,6 +122,8 @@ describe('raw localStorage guard (#7833)', () => {
     // callers to "fix" working code, and an inventory nobody trusts gets
     // rubber-stamped.
     assert.deepEqual(rawStorageUsesIn('if (this === localStorage) return;'), []);
+    // Whitespace tolerance must not start matching unrelated identifiers.
+    assert.deepEqual(rawStorageUsesIn('const x = windowFoo.localStorageBar;'), []);
     assert.deepEqual(rawStorageUsesIn("vi.stubGlobal('localStorage', null);"), []);
     assert.deepEqual(
       rawStorageUsesIn('const v = localStorage.getItem(k);'),

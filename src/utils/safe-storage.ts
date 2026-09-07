@@ -42,6 +42,27 @@ export function safeStorageRemove(key: string): void {
 }
 
 /**
+ * The storage object, or `null` when it cannot be reached at all.
+ *
+ * Retrieving the handle has to be its own guarded step, separate from the
+ * write. Both broken shapes have to end up as `null` here — the NULL property
+ * and the property whose GETTER throws — because the checked writers below owe
+ * their caller a different answer for "there is no store" (`true`, nothing
+ * durable disagrees) than for "the store rejected this write" (`false`). With
+ * the handle read inside the write's own `try`, a throwing getter fell into the
+ * write's catch and reported a rejection, so on a sandboxed iframe or with
+ * cookies blocked every cloud-pref write looked rejected and sign-in
+ * terminated in an error state on every load (#7833 review, second round).
+ */
+function storageHandle(): Storage | null {
+  try {
+    return localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Whether storage is reachable at all right now.
  *
  * For the callers that must tell "storage is empty" apart from "storage is
@@ -77,9 +98,10 @@ export function isStorageAvailable(): boolean {
  * and the large value does not.
  */
 export function safeStorageSetChecked(key: string, value: string): boolean {
+  const store = storageHandle();
+  if (store === null) return true;
   try {
-    if (!localStorage) return true;
-    localStorage.setItem(key, value);
+    store.setItem(key, value);
     return true;
   } catch {
     return false;
@@ -88,9 +110,10 @@ export function safeStorageSetChecked(key: string, value: string): boolean {
 
 /** `safeStorageRemove` with the same landed/not-landed report as above. */
 export function safeStorageRemoveChecked(key: string): boolean {
+  const store = storageHandle();
+  if (store === null) return true;
   try {
-    if (!localStorage) return true;
-    localStorage.removeItem(key);
+    store.removeItem(key);
     return true;
   } catch {
     return false;
