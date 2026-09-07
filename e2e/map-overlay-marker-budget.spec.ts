@@ -1,4 +1,8 @@
+import { writeFile } from 'node:fs/promises';
+
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
+
+import { waitForDomQuiescence, type DomQuiescenceResult } from './helpers/dom-quiescence';
 
 /**
  * #7112 — the SVG renderer's HTML overlay must stay bounded.
@@ -96,12 +100,24 @@ const MAX_DRAG_REBUILDS = 3;
 type Coord = { lat: number; lon: number };
 type DashboardMetric = keyof typeof DASHBOARD_METRIC_BUDGETS;
 type DashboardMetrics = Record<DashboardMetric, number>;
-type ColdDashboardSample = {
-  coldLoad: number;
-  mapRenderReadyMs: number;
+type DashboardMetricSample = {
   collectGarbageMs: number;
   preGc: DashboardMetrics;
   postGc: DashboardMetrics;
+};
+type ColdDashboardSample = {
+  coldLoad: number;
+  mapRenderReadyMs: number;
+  /** The ASSERTED sample. Deterministic, and the shell — see `quiescence`. */
+  firstPaint: DashboardMetricSample;
+  /**
+   * The settled page, RECORDED only (#7837). `{ error }` when the sample could
+   * not be taken at all; `quiescence.wait.quiesced === false` when the outer
+   * budget expired first and the numbers are mid-hydration, not settled.
+   */
+  quiescence:
+    | (DashboardMetricSample & { atMs: number; wait: DomQuiescenceResult })
+    | { error: string };
 };
 
 /** Great-circle separation in degrees. Mirrors what proximityRank orders by. */
@@ -163,7 +179,19 @@ async function waitForSvgMapRender(page: Page): Promise<void> {
   }));
 }
 
-async function loadColdDashboard(page: Page): Promise<{ mapRenderReadyMs: number }> {
+type ColdDashboardLoad = {
+  mapRenderReadyMs: number;
+  /** Wall clock at `goto`, so the settled sample can be timed from the same origin. */
+  startedAt: number;
+  /**
+   * Requests started but not yet finished or failed, counted from before
+   * `goto`. installLocalOnlyNetwork() aborts every off-origin request, and an
+   * abort settles as `requestfailed`, so the counter balances on both paths.
+   */
+  inflight: () => number;
+};
+
+async function loadColdDashboard(page: Page): Promise<ColdDashboardLoad> {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.addInitScript(() => {
     localStorage.clear();
@@ -171,18 +199,18 @@ async function loadColdDashboard(page: Page): Promise<{ mapRenderReadyMs: number
     localStorage.setItem('worldmonitor-variant', 'full');
   });
   await installLocalOnlyNetwork(page);
+  let inflight = 0;
+  page.on('request', () => { inflight += 1; });
+  page.on('requestfinished', () => { inflight -= 1; });
+  page.on('requestfailed', () => { inflight -= 1; });
   const startedAt = Date.now();
   await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => document.documentElement.dataset.wmEventHandlersReady === 'true');
   await waitForSvgMapRender(page);
-  return { mapRenderReadyMs: Date.now() - startedAt };
+  return { mapRenderReadyMs: Date.now() - startedAt, startedAt, inflight: () => inflight };
 }
 
-async function readDashboardMetrics(page: Page): Promise<{
-  collectGarbageMs: number;
-  preGc: DashboardMetrics;
-  postGc: DashboardMetrics;
-}> {
+async function readDashboardMetrics(page: Page): Promise<DashboardMetricSample> {
   const session = await page.context().newCDPSession(page);
   try {
     await session.send('Performance.enable');
@@ -216,6 +244,40 @@ async function readDashboardMetrics(page: Page): Promise<{
   }
 }
 
+/**
+ * The settled-page counterpart to the asserted first-paint sample (#7837).
+ *
+ * The asserted sample is taken at SVG map first paint, which is the readiness
+ * signal #7848 chose for determinism — and which measures the pre-hydration
+ * shell. Over 12 local cold loads it read 5,625-6,611 post-GC renderer nodes,
+ * against 13,851-13,918 once the same page settled. The CI failure that opened
+ * #7837 measured 15,506 on a settled page against this spec's 15,000 ceiling,
+ * so how much of that ceiling the hydrated dashboard actually uses is the
+ * number nobody can see today — the overlay markers this budget exists for all
+ * live past the sample point that guards it.
+ *
+ * Recorded, never asserted. Both the wait and the read are best-effort: a
+ * settled sample that could redden a required gate would trade the flake this
+ * issue exists to remove for a new one. A failure is recorded as its message
+ * rather than swallowed, a timeout as `wait.quiesced === false`, and either way
+ * the attachment says which — an absent sample must never read as a clean one.
+ */
+async function recordSettledDashboardMetrics(
+  page: Page,
+  load: ColdDashboardLoad,
+): Promise<ColdDashboardSample['quiescence']> {
+  try {
+    const wait = await waitForDomQuiescence({
+      waitForTimeout: (ms) => page.waitForTimeout(ms),
+      elementCount: () => page.evaluate(() => document.querySelectorAll('*').length),
+      inflight: load.inflight,
+    });
+    return { ...await readDashboardMetrics(page), atMs: Date.now() - load.startedAt, wait };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 function assertDashboardMetricBudgets(samples: readonly DashboardMetrics[]): void {
   for (const [metric, limit] of Object.entries(DASHBOARD_METRIC_BUDGETS) as [DashboardMetric, number][]) {
     const observed = Math.max(...samples.map((sample) => sample[metric]));
@@ -223,15 +285,35 @@ function assertDashboardMetricBudgets(samples: readonly DashboardMetrics[]): voi
   }
 }
 
+/**
+ * #7837 — attach BY PATH, never by body. `testInfo.attach({ body })` keeps the
+ * bytes in memory for reporters to persist (playwright/lib/util.js
+ * `normalizeAndSaveAttachment`), and the `list` reporter this project runs
+ * persists nothing: the shard-1 CI artifact for run 34144452921 contained zero
+ * files for this spec, so the cold-load metrics existed only inside the worker
+ * process. `{ path }` copies into the test output dir, which the workflow
+ * uploads as `playwright-ci-smoke-<shard>-<run>-<attempt>`.
+ *
+ * Called only from the test's `finally`, where a throw would REPLACE the budget
+ * assertion that put us there — a failed write must not turn a real renderer
+ * regression into an unrelated fs error. So it reports and returns; the warning
+ * is the signal that the evidence path itself needs fixing.
+ */
 async function attachColdDashboardMetrics(testInfo: TestInfo, samples: readonly ColdDashboardSample[]): Promise<void> {
-  await testInfo.attach('cold-dashboard-metrics.json', {
-    contentType: 'application/json',
-    body: JSON.stringify({
-      readiness: 'svg-map-first-paint',
-      measurement: 'post-gc',
+  try {
+    const path = testInfo.outputPath('cold-dashboard-metrics.json');
+    await writeFile(path, `${JSON.stringify({
+      // Which sample the budgets above are asserted against, and which is only
+      // recorded. Keep these keys in step with the samples they describe.
+      asserted: { readiness: 'svg-map-first-paint', measurement: 'post-gc' },
+      recorded: { readiness: 'dom-quiescence', measurement: 'post-gc' },
+      budgets: DASHBOARD_METRIC_BUDGETS,
       samples,
-    }, null, 2),
-  });
+    }, null, 2)}\n`, 'utf8');
+    await testInfo.attach('cold-dashboard-metrics.json', { path, contentType: 'application/json' });
+  } catch (err) {
+    console.warn(`[map-budget] cold-load metrics were not persisted: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /** Ready-gated harness boot, shared by the #7145 interaction tests. */
@@ -340,9 +422,14 @@ test.describe('SVG map overlay marker budget (#7112)', () => {
         });
         const page = await context.newPage();
         try {
-          const { mapRenderReadyMs } = await loadColdDashboard(page);
-          const metrics = await readDashboardMetrics(page);
-          samples.push({ coldLoad: attempt + 1, mapRenderReadyMs, ...metrics });
+          const load = await loadColdDashboard(page);
+          const firstPaint = await readDashboardMetrics(page);
+          samples.push({
+            coldLoad: attempt + 1,
+            mapRenderReadyMs: load.mapRenderReadyMs,
+            firstPaint,
+            quiescence: await recordSettledDashboardMetrics(page, load),
+          });
         } finally {
           await context.close();
         }
@@ -357,7 +444,12 @@ test.describe('SVG map overlay marker budget (#7112)', () => {
       // What this test does buy: the whole real document (not just the overlay
       // root) stays inside the production guardrail from the issue investigation,
       // and repeated fresh contexts catch cold-load drift.
-      assertDashboardMetricBudgets(samples.map((sample) => sample.postGc));
+      //
+      // Asserted on the FIRST-PAINT sample only. The settled sample beside it in
+      // the attachment is recorded, not gated (#7837) — see
+      // recordSettledDashboardMetrics for why, and read it before deciding
+      // whether this ceiling still has the headroom it looks like it has.
+      assertDashboardMetricBudgets(samples.map((sample) => sample.firstPaint.postGc));
 
       // Ceilings only — the run-to-run RANGE of these counters is deliberately not
       // asserted. The post-GC CDP values distinguish retained renderer objects from
