@@ -15,7 +15,7 @@ import { appendDeprecationPolicyLinkToRecord, DEPRECATION_POLICY_LINK } from '..
 
 export const MD_TWIN_LOOP_HEADER = 'x-wm-md-twin';
 const MAX_TWIN_CHARS = 80_000;
-const MAX_TWIN_BYTES = 80_000;
+export const MAX_TWIN_BYTES = 80_000;
 const SIBLING_FETCH_TIMEOUT_MS = 8_000;
 const SIBLING_USER_AGENT = 'WorldMonitor-MarkdownTwin/1.0';
 const FORWARDED_RESPONSE_HEADERS = [
