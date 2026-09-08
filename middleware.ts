@@ -244,7 +244,7 @@ export default function middleware(request: Request) {
   const accept = request.headers.get('accept');
   const markdownQuality = acceptQuality(accept, 'text/markdown') ?? 0;
   const wantsHomepageMarkdown = /(?:^|,)\s*text\/markdown\s*(?:;|,|$)/i.test(accept ?? '') &&
-    markdownQuality > 0 && markdownQuality >= (acceptQuality(accept, 'text/html') ?? 0);
+    markdownQuality > 0 && markdownQuality >= (acceptQuality(accept, 'text/html', true) ?? 0);
 
   if (
     path === '/' &&

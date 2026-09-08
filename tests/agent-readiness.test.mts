@@ -80,7 +80,11 @@ describe('agent homepage routing', () => {
   });
 
   it('honors explicit markdown media types and preserves HTML preferences', async () => {
-    for (const accept of ['text/markdown', 'TEXT/MARKDOWN; charset=utf-8', 'text/html;q=0.5, text/markdown']) {
+    for (const accept of [
+      'text/markdown', 'TEXT/MARKDOWN; charset=utf-8', 'text/html;q=0.5, text/markdown',
+      'text/markdown;q=0.2, text/html;q=0, */*;q=0.9',
+      'text/markdown;q=0.2, text/*;q=0, */*;q=0.9',
+    ]) {
       for (const method of ['GET', 'HEAD']) {
         const response = await middleware(new Request('https://www.worldmonitor.app/', {
           method, headers: { 'User-Agent': 'Mozilla/5.0', Accept: accept },
@@ -95,6 +99,8 @@ describe('agent homepage routing', () => {
       'text/*, text/markdown;q=0',
       'text/markdown;q=0, text/*',
       'text/*;q=0.8, text/markdown;q=0.1, text/html;q=0.5',
+      'text/markdown;q=0.2, */*;q=0.9',
+      '*/*;q=0.9, text/markdown;q=0.2',
     ]) {
       assert.equal(await middleware(new Request('https://www.worldmonitor.app/', {
         headers: { 'User-Agent': 'Mozilla/5.0', Accept: accept },
