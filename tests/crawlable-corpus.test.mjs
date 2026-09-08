@@ -4851,8 +4851,9 @@ describe('crawlable corpus generator', () => {
       comparisonPageLastmod({
         contentVersion: COMPARISONS_CONTENT_VERSION,
         pathLastmods: COMPARISON_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(repoRoot, path)),
+        snapshotDate: data.livePulse.capturedAt,
       }),
-      'comparisons lastmod must fold the generator, narratives, attribution manifest, and chokepoint registry',
+      'comparisons lastmod must fold the copy, registries, and referenced snapshot',
     );
     assert.equal(
       data.crises.length,
@@ -5044,6 +5045,8 @@ describe('live-pulse snapshot injection (#7533)', () => {
         CII_RANKING_PAGE_CONTENT_VERSION,
         CHOKEPOINT_PAGE_CONTENT_VERSION,
         CRISIS_PAGE_CONTENT_VERSION,
+        COMPARISONS_CONTENT_VERSION,
+        ...COMPARISON_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(repoRoot, path)),
       ].filter(Boolean).sort().at(-1);
       const pulseDate = !latestOther || latestOther < today ? today : dayAfter(latestOther);
       if (pulseDate !== today) {
@@ -5063,6 +5066,16 @@ describe('live-pulse snapshot injection (#7533)', () => {
           livePulseSnapshotPath: join(pulseDir, `crawlable-live-pulse-${pulseDate}.json`),
         });
         const pageFor = (route) => `${route.slice(1)}index.html`;
+        for (const route of [manifest.sections.comparisons.index, ...manifest.sections.comparisons.routes]) {
+          const document = htmlDocument(read(outDir, pageFor(route)), `https://www.worldmonitor.app${route}`);
+          const reference = document.querySelector('[data-measurement-snapshot]');
+          assert.ok(reference, `${route} needs a snapshot reference`);
+          assert.equal(reference.querySelector('time').getAttribute('datetime'), pulseDate);
+          const downloadPath = reference.querySelector('a').getAttribute('href').slice(1);
+          const download = JSON.parse(read(outDir, downloadPath));
+          assert.equal(download.capturedAt, pulseDate, `${route} must link the actual referenced snapshot`);
+          assert.equal(data.lastmod.comparisons, pulseDate, 'new snapshot must advance comparison lastmod');
+        }
         const countriesLastmod = laterDate(
           data.resilience.capturedAt,
           pulseDate,
@@ -5142,6 +5155,7 @@ describe('live-pulse snapshot injection (#7533)', () => {
             comparisonPageLastmod({
               contentVersion: COMPARISONS_CONTENT_VERSION,
               pathLastmods: COMPARISON_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(repoRoot, path)),
+              snapshotDate: pulseDate,
             }),
             pageFor(manifest.sections.comparisons.index),
           ]],
