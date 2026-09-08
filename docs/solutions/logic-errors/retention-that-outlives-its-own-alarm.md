@@ -23,6 +23,8 @@ A seeder's failure path retains last-good data by extending the payload key's TT
 
 Found while reviewing [PR #7862](https://github.com/koala73/worldmonitor/pull/7862) (issue [#7845](https://github.com/koala73/worldmonitor/issues/7845)), in the fix's own first draft, before merge.
 
+> **Status: the fix is open in [#7862](https://github.com/koala73/worldmonitor/pull/7862), not yet merged.** Every code and test excerpt below is quoted from that branch, so `COMPANIONS`, `companionMetaKey`, the `preserveKeyTtls` declaration and `tests/cloudflare-radar-companion-publication.test.mjs` do **not** exist on `main` until it lands. The *lesson* holds regardless of that PR's fate; the *citations* resolve only once it merges.
+
 ## Symptoms
 
 - A Cloudflare Radar companion source fails every tick. For ~7 days `/api/health` correctly reports `STALE_SEED` (warn).
@@ -52,19 +54,21 @@ Extend the marker at its own floor alongside the payload, still without rewritin
 // and its meta must each be extended at their own value.
 const [dataRetained, metaRetained] = await Promise.all([
   extendExistingTtl([companion.key], companion.ttlSeconds),
-  extendExistingTtl([companionMetaKey(companion)], SEED_META_MIN_TTL_SECONDS),
+  extendExistingTtl([companionMetaKey(companion)], resolveSeedMetaTtl(undefined, companion.ttlSeconds)),
 ]);
 const retained = dataRetained && metaRetained;
 ```
 
-`EXPIRE` sets a TTL absolutely rather than adding to it, so the two keys cannot share one call — extending the marker at the payload's TTL would *shorten* it from seven days to one hour. Extending it at `SEED_META_MIN_TTL_SECONDS` ([`scripts/_seed-utils.mjs:1071`](../../../scripts/_seed-utils.mjs), `86400 * 7`) can only extend or hold, because that floor is already the longest TTL the marker is ever written with (see `resolveSeedMetaTtl`, same file).
+`EXPIRE` sets a TTL absolutely rather than adding to it, so the two keys cannot share one call — extending the marker at the payload's TTL would *shorten* it from seven days to one hour.
+
+**Resolve the marker's TTL through the same function that wrote it; do not hardcode the floor.** `resolveSeedMetaTtl(metaTtlSeconds, dataTtlSeconds)` returns `metaTtlSeconds ?? Math.max(SEED_META_MIN_TTL_SECONDS, dataTtlSeconds || 0)` ([`scripts/_seed-utils.mjs:1089`](../../../scripts/_seed-utils.mjs)). The seven-day floor is a *minimum*, not a maximum: a key whose data TTL exceeds seven days has its marker written at the **data** TTL, and a caller may pass a longer explicit one. Re-arming such a marker at the floor would shorten it — the same alarm-before-data failure this page is about, reintroduced by the fix for it. The two companions here (3h and 1h) both resolve to the floor, which is exactly why hardcoding it looked safe.
 
 The same cohort is declared to `runSeed` so the fetch-failure, SIGTERM and validation-skip paths retain it too:
 
 ```js
 preserveKeyTtls: [
   ...COMPANIONS.map((c) => ({ key: c.key, ttlSeconds: c.ttlSeconds })),
-  ...COMPANIONS.map((c) => ({ key: companionMetaKey(c), ttlSeconds: SEED_META_MIN_TTL_SECONDS })),
+  ...COMPANIONS.map((c) => ({ key: companionMetaKey(c), ttlSeconds: resolveSeedMetaTtl(undefined, c.ttlSeconds) })),
 ],
 ```
 
@@ -94,13 +98,13 @@ Two reasons that fleet test cannot catch this variant, which is why it needs its
 Concrete checks when writing or reviewing a retention path:
 
 - Ask "what expires first — the data, or the thing that tells me the data is stale?" If the data can be re-armed indefinitely, the marker must be too.
-- Assert the retention TTLs, not just the resulting payload. The regression test in `tests/cloudflare-radar-companion-publication.test.mjs` captures the actual `EXPIRE` commands and asserts the marker is extended at the 7-day floor, never at the data TTL:
+- Assert the retention TTLs, not just the resulting payload — and derive the expected value the same way the writer does, so the assertion cannot outlive a TTL change:
 
   ```js
   assert.deepEqual(
     expireCommandsFor(run.redisCommands, TRAFFIC_META_KEY).map((c) => c[2]),
-    [SEED_META_MIN_TTL_SECONDS],
-    'the seed-meta key is extended at its own 7-day floor, never at the data TTL',
+    [resolveSeedMetaTtl(undefined, ANOMALIES_TTL)],
+    'the seed-meta key is extended at its own resolved TTL, never at the data TTL',
   );
   assert.equal(
     JSON.parse(run.store.get(TRAFFIC_META_KEY)).fetchedAt, NOW - 30 * 60_000,
@@ -109,7 +113,7 @@ Concrete checks when writing or reviewing a retention path:
   ```
 
   The second assertion is the one that keeps the fix honest: extending the marker's TTL is required, rewriting its `fetchedAt` is still forbidden. A fix that "kept the alarm alive" by re-stamping the clock would pass the first assertion and reintroduce the original silent-freeze.
-- Remember `EXPIRE` is absolute, not additive. Batching keys with different lifetimes into one TTL call silently shortens the longer-lived one.
+- Remember `EXPIRE` is absolute, not additive. Batching keys with different lifetimes into one TTL call silently shortens the longer-lived one — and so does re-arming a single key at a constant that is only *usually* its longest TTL.
 
 ## See Also
 
