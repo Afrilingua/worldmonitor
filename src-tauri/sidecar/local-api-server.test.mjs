@@ -2619,6 +2619,144 @@ test('rss-proxy pins an IPv6-only hostname to the validated address', async () =
   }
 });
 
+test('rss-proxy blocks IPv4-mapped IPv6 literals and DNS answers before transport', async () => {
+  const localApi = await setupApiDir({});
+  const originalResolve4 = dns.resolve4;
+  const originalResolve6 = dns.resolve6;
+  const originalHttpsRequest = https.request;
+  let outboundCalls = 0;
+
+  dns.resolve4 = async () => ['93.184.216.34'];
+  dns.resolve6 = async () => ['::ffff:7f00:1'];
+  https.request = () => {
+    outboundCalls += 1;
+    throw new Error('blocked mapped address must not reach the network');
+  };
+
+  const app = await createLocalApiServer({
+    port: 0,
+    apiDir: localApi.apiDir,
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  const { port } = await app.start();
+
+  try {
+    const mappedUrls = [
+      'https://[::ffff:127.0.0.1]/feed.xml',
+      'https://[0:0:0:0:0:ffff:127.0.0.1]/feed.xml',
+      'https://[::ffff:7f00:1]/feed.xml',
+      'https://[::ffff:c0a8:101]/feed.xml',
+      'https://[::ffff:a9fe:101]/feed.xml',
+      'https://[::ffff:c633:6401]/feed.xml',
+    ];
+    for (const feedUrl of mappedUrls) {
+      const response = await authFetch(
+        `http://127.0.0.1:${port}/api/rss-proxy?url=${encodeURIComponent(feedUrl)}`,
+      );
+      assert.equal(response.status, 403, feedUrl);
+      const body = await response.json();
+      assert.match(body.error, /private\/reserved/, feedUrl);
+    }
+
+    const dnsResponse = await authFetch(
+      `http://127.0.0.1:${port}/api/rss-proxy?url=${encodeURIComponent('https://mapped-dns.example/feed.xml')}`,
+    );
+    assert.equal(dnsResponse.status, 403);
+    assert.match((await dnsResponse.json()).error, /private\/reserved/);
+    assert.equal(outboundCalls, 0);
+  } finally {
+    dns.resolve4 = originalResolve4;
+    dns.resolve6 = originalResolve6;
+    https.request = originalHttpsRequest;
+    await app.close();
+    await localApi.cleanup();
+  }
+});
+
+test('rss-proxy forces active and error responses through an inert response policy', async () => {
+  const localApi = await setupApiDir({});
+  const originalResolve4 = dns.resolve4;
+  const originalResolve6 = dns.resolve6;
+  const originalHttpsRequest = https.request;
+  const upstreamResponses = [
+    {
+      statusCode: 200,
+      statusMessage: 'OK',
+      contentType: 'text/html; charset=utf-8',
+      body: '<html><script>globalThis.rssProxyExecuted = true;</script></html>',
+    },
+    {
+      statusCode: 502,
+      statusMessage: 'Bad Gateway',
+      contentType: 'image/svg+xml',
+      body: '<svg><script>globalThis.rssProxyExecuted = true;</script></svg>',
+    },
+  ];
+  let upstreamIndex = 0;
+
+  dns.resolve4 = async () => ['93.184.216.34'];
+  dns.resolve6 = async () => {
+    const error = new Error('No AAAA records');
+    error.code = 'ENODATA';
+    throw error;
+  };
+  https.request = (_options, onResponse) => {
+    const upstream = upstreamResponses[upstreamIndex++];
+    const req = new EventEmitter();
+    req.setTimeout = () => {};
+    req.write = () => {};
+    req.destroy = (error) => {
+      if (error) req.emit('error', error);
+    };
+    req.end = () => {
+      queueMicrotask(() => {
+        const res = new EventEmitter();
+        res.statusCode = upstream.statusCode;
+        res.statusMessage = upstream.statusMessage;
+        res.headers = { 'content-type': upstream.contentType };
+        onResponse(res);
+        res.emit('data', Buffer.from(upstream.body));
+        res.emit('end');
+      });
+    };
+    return req;
+  };
+
+  const app = await createLocalApiServer({
+    port: 0,
+    apiDir: localApi.apiDir,
+    logger: { log() {}, warn() {}, error() {} },
+  });
+  const { port } = await app.start();
+
+  try {
+    for (const upstream of upstreamResponses) {
+      const response = await authFetch(
+        `http://127.0.0.1:${port}/api/rss-proxy?url=${encodeURIComponent('https://publisher.example/feed.xml')}`,
+      );
+      assert.equal(response.status, upstream.statusCode);
+      assert.equal(await response.text(), upstream.body);
+      assert.equal(response.headers.get('content-type'), 'application/xml; charset=utf-8');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      assert.match(response.headers.get('content-security-policy') || '', /(?:^|;\s*)sandbox(?:;|$)/);
+      assert.match(response.headers.get('content-security-policy') || '', /script-src 'none'/);
+    }
+
+    for (const query of ['', '?url=http%3A%2F%2F127.0.0.1%2F']) {
+      const response = await authFetch(`http://127.0.0.1:${port}/api/rss-proxy${query}`);
+      assert.ok(response.status === 400 || response.status === 403);
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      assert.match(response.headers.get('content-security-policy') || '', /(?:^|;\s*)sandbox(?:;|$)/);
+    }
+  } finally {
+    dns.resolve4 = originalResolve4;
+    dns.resolve6 = originalResolve6;
+    https.request = originalHttpsRequest;
+    await app.close();
+    await localApi.cleanup();
+  }
+});
+
 test('rss-proxy rejects a hostname with mixed public and private DNS answers', async () => {
   const localApi = await setupApiDir({});
   const originalResolve4 = dns.resolve4;
