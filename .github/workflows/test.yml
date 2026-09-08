@@ -781,12 +781,38 @@ jobs:
           done
           sudo dpkg --configure -a || true
           npx playwright install --with-deps chromium
-      # Explicit lists keep the measured slow specs balanced across runners.
-      # The full command stays in package.json for local use, and contract tests
-      # require these two lists to be a disjoint, complete partition of it.
-      - run: npm run test:e2e:ci-smoke:${{ matrix.shard }}
-      # One upload per Playwright run: the next invocation clears test-results/.
-      # Include the matrix value because artifact names are unique per run.
+      # Capture outside outputDir: Playwright clears it at startup. Collect
+      # stderr once at the parent, since DEBUG_FILE is truncated by each worker.
+      - name: Run ci-smoke with browser-loss diagnostics
+        env:
+          DEBUG: 'pw:browser'
+          DEBUG_COLORS: '0'
+        run: |
+          set -euo pipefail
+          unset DEBUG_FILE
+          DIAGNOSTICS_DIR=$(mktemp -d)
+          sample_memory() {
+            date -u +%FT%TZ
+            free -m
+            if [ -r /sys/fs/cgroup/memory.events ]; then
+              cat /sys/fs/cgroup/memory.events
+            fi
+          }
+          sample_memory > "$DIAGNOSTICS_DIR/memory-samples.log"
+          ( while sleep 5; do sample_memory; done ) >> "$DIAGNOSTICS_DIR/memory-samples.log" 2>&1 &
+          MEM_SAMPLER_PID=$!
+          collect_diagnostics() {
+            SMOKE_STATUS=$?
+            kill "$MEM_SAMPLER_PID" 2>/dev/null || true
+            wait "$MEM_SAMPLER_PID" 2>/dev/null || true
+            sample_memory >> "$DIAGNOSTICS_DIR/memory-samples.log"
+            mkdir -p test-results/browser-loss
+            cp "$DIAGNOSTICS_DIR/"*.log test-results/browser-loss/
+            return "$SMOKE_STATUS"
+          }
+          trap collect_diagnostics EXIT
+          npm run test:e2e:ci-smoke:${{ matrix.shard }} 2>&1 | tee "$DIAGNOSTICS_DIR/playwright.log"
+
       - name: Upload ci-smoke Playwright artifacts
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
