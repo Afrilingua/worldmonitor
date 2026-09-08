@@ -110,7 +110,7 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function acceptQuality(header: string | null | undefined, type: string): number | null {
+export function acceptQuality(header: string | null | undefined, type: string): number | null {
   if (header == null) return null;
   const trimmed = header.trim();
   if (!trimmed) return null;
