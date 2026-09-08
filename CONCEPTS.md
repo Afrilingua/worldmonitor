@@ -320,7 +320,7 @@ The load-bearing consequence is that a display name cannot identify a provider. 
 
 ### Logical Provider
 
-A Catalog Provider that has no editorial host of its own because its feeds are delivered entirely through a syndication transport. It is grouped under the publisher's name rather than under the transport's host, so the inventory credits the newsroom that wrote the content instead of the service that shipped it — without which every such publisher would collapse into a single misleading entry named for the transport. Duplicate names within this grouping are rejected upstream when the attribution manifest is validated, which is what lets consumers treat a provider identifier as unique. See also: Catalog Provider, Publisher Family.
+A Catalog Provider that has no editorial host of its own because its feeds are delivered entirely through a syndication transport. It is grouped under the publisher's name rather than under the transport's host, so the inventory credits the newsroom that wrote the content instead of the service that shipped it — without which every such publisher would collapse into a single misleading entry named for the transport. Duplicate names within this grouping are rejected upstream by the validation that admits sources to the catalog at all, which is what lets consumers treat a provider identifier as unique. See also: Catalog Provider, Publisher Family.
 
 ## Prediction Markets
 
