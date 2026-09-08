@@ -59,8 +59,8 @@ const IOS_NAVIGATOR = { userAgent: IOS_GOOGLE_APP_UA, maxTouchPoints: 5 };
 /** iPadOS 13+ desktop mode: Macintosh UA, but touch-capable. */
 const IPADOS_NAVIGATOR = { userAgent: MAC_DESKTOP_UA, maxTouchPoints: 5 };
 
-function beforeSend(event, navigatorStub = DESKTOP_NAVIGATOR) {
-  return rawBeforeSend(event, isDebugBearRumScriptFrame, isIosLikeUserAgent, navigatorStub, isolateNonProductionSentryEvent, 'production');
+function beforeSend(event, navigatorStub = DESKTOP_NAVIGATOR, environment = 'production') {
+  return rawBeforeSend(event, isDebugBearRumScriptFrame, isIosLikeUserAgent, navigatorStub, isolateNonProductionSentryEvent, environment);
 }
 
 // Extract the `ignoreErrors` array literal so tests can assert which messages
@@ -1827,6 +1827,25 @@ describe('host-attributed fetch failures are fingerprinted by host (WORLDMONITOR
     { filename: '/assets/widget-store-DbqgxtxV.js', lineno: 0, function: 'Pn.window.fetch' },
     { filename: '/assets/analytics-DdK2NArM.js', lineno: 0, function: 'c' },
   ];
+
+  it('isolates non-production fetch groups after host attribution', () => {
+    for (const environment of ['preview', 'development']) {
+      for (const [host, bucket] of [
+        ['api.worldmonitor.app', 'api.worldmonitor.app'],
+        ['pub-8ace9f6a86d74cb2bd5eb1de5590dd9e.r2.dev', 'pub-8ace9f6a86d74cb2bd5eb1de5590dd9e.r2.dev'],
+        ['foreign.example', 'third-party'],
+      ]) {
+        const input = makeEvent(`Failed to fetch (${host})`, 'TypeError', zgStack);
+        input.release = 'a'.repeat(40);
+        input.dist = 'a'.repeat(40);
+        const event = beforeSend(input, DESKTOP_NAVIGATOR, environment);
+        assert.ok(event !== null);
+        assert.deepEqual(event.fingerprint, ['fetch-failure', bucket, `worldmonitor:${environment}`]);
+        assert.equal(event.release, undefined);
+        assert.equal(event.dist, undefined);
+      }
+    }
+  });
 
   it('gives a first-party origin failure its own fingerprint', () => {
     const event = beforeSend(makeEvent('Failed to fetch (api.worldmonitor.app)', 'TypeError', zgStack));

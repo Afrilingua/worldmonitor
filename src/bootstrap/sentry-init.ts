@@ -432,7 +432,6 @@ function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
       /^(?:CollectorTransportError: )?Umami collector beacon transport rejected\b/,
     ],
     beforeSend(event) {
-      isolateNonProductionSentryEvent(event, environment);
       const msg = event.exception?.values?.[0]?.value ?? '';
       if (msg.length <= 3 && /^[a-zA-Z_$]+$/.test(msg)) return null;
       const frames = event.exception?.values?.[0]?.stacktrace?.frames ?? [];
@@ -1096,6 +1095,7 @@ function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
       if (excType === 'SyntaxError'
           && /^(?:SyntaxError: )?(?:Invalid or unexpected token|Unexpected (?:token|keyword|identifier|EOF|end of script))/.test(msg)
           && frames.some(f => /\/(?:maplibre|deck-stack)-[A-Za-z0-9_-]+\.js/.test(f.filename ?? ''))) return null;
+      isolateNonProductionSentryEvent(event, environment);
       return event;
     },
   };

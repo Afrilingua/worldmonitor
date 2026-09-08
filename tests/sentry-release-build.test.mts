@@ -1,19 +1,36 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, describe, it } from 'node:test';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { BrowserClient, Scope } from '@sentry/browser';
-import { getSentryBuildMetadata, isolateNonProductionSentryEvent } from '../shared/sentry-build-metadata';
+import type { BrowserOptions, ErrorEvent } from '@sentry/browser';
+import type { Envelope } from '@sentry/core';
+import { sentryVitePlugin } from '@sentry/vite-plugin';
+import type { ConfigEnv, UserConfig } from 'vite';
+import { Window } from 'happy-dom';
 
 const originalEnv = { ...process.env };
 const sha = '0123456789abcdef0123456789abcdef01234567';
 let scratch: string;
-let loadDashboard: Function;
+let loadDashboard: (env: ConfigEnv) => UserConfig;
 let marketingConfigUrl: string;
+const initializers: Array<() => Promise<BrowserOptions>> = [];
+type UploadOptions = NonNullable<Parameters<typeof sentryVitePlugin>[0]>;
+
+function uploadOptions(config: UserConfig): NonNullable<UploadOptions['release']> {
+  const plugins: unknown[] = config.plugins ?? [];
+  const plugin = plugins.flat(Infinity).find(p => p && typeof p === 'object' && 'name' in p && p.name === 'sentry-upload');
+  assert.ok(plugin && typeof plugin === 'object' && 'options' in plugin);
+  const options = plugin.options as UploadOptions;
+  assert.ok(options.release);
+  return options.release;
+}
 
 before(async () => {
+  const { version } = JSON.parse(await readFile(resolve('package.json'), 'utf8'));
+  assert.equal(typeof version, 'string');
   const cache = resolve('pro-test/node_modules/.cache');
   await mkdir(cache, { recursive: true });
   scratch = await mkdtemp(join(cache, 'sentry-release-test-'));
@@ -37,6 +54,26 @@ before(async () => {
   }
   loadDashboard = (await import(pathToFileURL(join(scratch, 'dashboard.mjs')).href)).default;
   marketingConfigUrl = pathToFileURL(join(scratch, 'marketing.mjs')).href;
+  for (const [name, entry, initialize] of [
+    ['dashboard', 'src/bootstrap/sentry-init.ts', 'loadAndInitSentry'],
+    ['marketing', 'pro-test/src/sentry.ts', 'initSentry'],
+  ]) {
+    const outfile = join(scratch, `${name}-init.mjs`);
+    await build({
+      stdin: { contents: `import { ${initialize} } from ${JSON.stringify(resolve(entry))}; import { captured } from 'capture-sdk'; export default async () => { await ${initialize}(); return captured(); };`, resolveDir: resolve('.') },
+      outfile, bundle: true, platform: 'node', format: 'esm', packages: 'external',
+      define: { __APP_VERSION__: JSON.stringify(version), __BUILD_HASH__: JSON.stringify(sha), 'import.meta.env.VITE_SENTRY_DSN': '"https://public@example.invalid/1"' },
+      plugins: [{ name: 'capture-real-initializer', setup(bundler) {
+        bundler.onResolve({ filter: /^(?:@sentry\/(?:browser|react)|capture-sdk)$/ }, () => ({ path: 'sdk', namespace: 'capture' }));
+        bundler.onLoad({ filter: /.*/, namespace: 'capture' }, () => ({ contents: 'let options; export const init = value => { options = value; }; export const captured = () => options;' }));
+        // Locale loading is unrelated to release metadata; retain the real
+        // initializer, filtering and DOM evidence collection.
+        bundler.onResolve({ filter: /^\.\/i18n$/ }, () => ({ path: 'locale', namespace: 'locale' }));
+        bundler.onLoad({ filter: /.*/, namespace: 'locale' }, () => ({ contents: 'export const currentLanguageBase = () => "en";' }));
+      } }],
+    });
+    initializers.push((await import(pathToFileURL(outfile).href)).default);
+  }
 });
 
 afterEach(() => {
@@ -56,45 +93,61 @@ describe('Sentry build and event release contract', () => {
         (await import(`${marketingConfigUrl}?target=${target}`)).default,
       ];
       for (const [index, config] of configs.entries()) {
-        const metadata = getSentryBuildMetadata(
-          JSON.parse(config.define.__APP_VERSION__), JSON.parse(config.define.__BUILD_HASH__),
-          target,
-        );
-        const upload = config.plugins.flat(Infinity).find((p: any) => p?.name === 'sentry-upload').options;
-        assert.equal(metadata.release, target === 'production' ? sha : undefined);
-        assert.equal(upload.release.name, sha);
-        assert.equal(upload.release.dist, sha);
-        assert.equal(upload.release.inject, false);
+        assert.equal(JSON.parse(String(config.define?.__BUILD_HASH__)), sha);
+        const upload = uploadOptions(config);
+        assert.equal(upload.name, sha);
+        assert.equal(upload.dist, sha);
+        assert.equal(upload.inject, false);
         const publishes = index === 0 && target === 'production';
-        assert.equal(upload.release.create, publishes);
-        assert.equal(upload.release.finalize, publishes);
-        assert.equal(upload.release.setCommits, publishes ? undefined : false);
-        assert.equal(upload.release.deploy, publishes ? undefined : false);
+        assert.equal(upload.create, publishes);
+        assert.equal(upload.finalize, publishes);
+        assert.equal(upload.setCommits, publishes ? undefined : false);
+        assert.equal(upload.deploy, publishes ? undefined : false);
 
         // A real SDK client produces the event envelope. Only delivery is
         // replaced; release, dist and scope tags pass through Sentry itself.
-        const envelopes: any[] = [];
-        const client = new BrowserClient({
-          ...metadata, dsn: 'https://public@example.invalid/1',
-          integrations: [], stackParser: () => [],
-          beforeSend: event => { isolateNonProductionSentryEvent(event, target); return event; },
-          transport: () => ({
-            send: async (envelope) => { envelopes.push(envelope); return { statusCode: 200 }; },
-            flush: async () => true,
-          }),
-        });
-        const scope = new Scope();
-        scope.update(metadata.initialScope);
-        client.captureEvent({ message: 'synthetic release contract check' }, {}, scope);
-        await client.flush(1000);
-        assert.equal(envelopes.length, 1);
-        const event = envelopes[0][1][0][1];
-        assert.equal(event.release, target === 'production' ? sha : undefined);
-        assert.equal(event.dist, target === 'production' ? sha : undefined);
-        assert.deepEqual(event.fingerprint, target === 'production' ? undefined : ['{{ default }}', `worldmonitor:${target}`]);
-        assert.equal(event.tags.app_version, JSON.parse(config.define.__APP_VERSION__));
-        assert.equal(event.tags.build_sha, sha);
-        await client.close();
+        const hostname = target === 'production' ? 'worldmonitor.app' : target === 'preview' ? 'worldmonitor-preview.vercel.app' : 'dev.example';
+        const window = new Window({ url: `https://${hostname}/` });
+        const globals = ['window', 'document', 'location', 'navigator'] as const;
+        const descriptors = globals.map(key => Object.getOwnPropertyDescriptor(globalThis, key));
+        for (const key of globals) Object.defineProperty(globalThis, key, { value: key === 'window' ? window : window[key], configurable: true });
+        let client: BrowserClient | undefined;
+        try {
+          const options = await initializers[index]();
+          assert.equal(options.environment, target);
+          assert.equal(options.enabled, true);
+          const envelopes: Envelope[] = [];
+          client = new BrowserClient({
+            ...options,
+            integrations: [], stackParser: () => [],
+            transport: () => ({
+              send: async (envelope) => { envelopes.push(envelope); return { statusCode: 200 }; },
+              flush: async () => true,
+            }),
+          });
+          const scope = new Scope();
+          scope.update(typeof options.initialScope === 'function' ? options.initialScope(scope) : options.initialScope);
+          for (const fingerprint of [undefined, ['custom-group']]) {
+            client.captureEvent({ exception: { values: [{ type: 'Error', value: 'synthetic release contract check' }] }, fingerprint }, {}, scope);
+            await client.flush(1000);
+            const envelope = envelopes.pop();
+            assert.ok(envelope);
+            const event = envelope[1][0][1] as ErrorEvent;
+            assert.equal(event.release, target === 'production' ? sha : undefined);
+            assert.equal(event.dist, target === 'production' ? sha : undefined);
+            assert.deepEqual(event.fingerprint, target === 'production' ? fingerprint : [...(fingerprint ?? ['{{ default }}']), `worldmonitor:${target}`]);
+            assert.equal(event.tags?.app_version, JSON.parse(String(config.define?.__APP_VERSION__)));
+            assert.equal(event.tags?.build_sha, sha);
+          }
+        } finally {
+          await client?.close();
+          for (const [i, key] of globals.entries()) {
+            const descriptor = descriptors[i];
+            if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+            else Reflect.deleteProperty(globalThis, key);
+          }
+          await window.happyDOM.close();
+        }
       }
     });
   }
@@ -104,9 +157,9 @@ describe('Sentry build and event release contract', () => {
     process.env.VERCEL_ENV = 'production';
     delete process.env.VERCEL_GIT_COMMIT_SHA;
     const config = await loadDashboard({ mode: 'production', command: 'build' });
-    const upload = config.plugins.flat(Infinity).find((p: any) => p?.name === 'sentry-upload').options;
-    assert.equal(upload.release.create, false);
-    assert.equal(upload.release.finalize, false);
-    assert.equal(upload.release.setCommits, false);
+    const upload = uploadOptions(config);
+    assert.equal(upload.create, false);
+    assert.equal(upload.finalize, false);
+    assert.equal(upload.setCommits, false);
   });
 });
