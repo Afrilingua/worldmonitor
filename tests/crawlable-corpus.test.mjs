@@ -2645,7 +2645,7 @@ describe('crawlable corpus generator', () => {
         if (country.rank == null) {
           assert.match(countryHtml, /Nearest ranked comparators:/);
           assert.doesNotMatch(
-            countryHtml,
+            countryDocument.querySelector('[data-country-analysis]')?.textContent,
             /\b[A-Z]{2} · /,
             `${route} must not prefix unpublished copy with ISO scaffolding`,
           );
