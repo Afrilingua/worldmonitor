@@ -744,6 +744,19 @@ platform will run the seeder again: a standalone seeder whose newest build has
 failed is ticking its previous Active Deployment, and there the same non-zero
 exit ends its schedule outright.
 
+Because the skip's whole alarm rests on freshness monitoring rather than on the
+exit status, extending last-good has a second obligation that is easy to miss:
+the freshness marker must be kept alive alongside the data it reports on. Only
+the marker's *value* is untouchable — advancing a success clock on a failed run
+would claim a success that never happened — while its lifetime must be extended
+with the data's. A skip that re-arms the payload every tick makes that payload's
+effective lifetime unbounded; if the marker keeps its own fixed lifetime it
+expires first, and a present payload with no marker is indistinguishable from a
+healthy one, so a sustained failure decays from warn back to green with frozen
+data behind it. The general form: whichever of the two expires first decides
+what is reported, so the reporting signal must outlive the value it reports on.
+See also: Seed-Owned Key, Content Clock.
+
 ### Starved Tick
 
 A tick that completed no member while deferring due work — it published nothing
