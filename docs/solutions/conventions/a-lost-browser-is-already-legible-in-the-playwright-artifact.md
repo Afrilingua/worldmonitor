@@ -28,8 +28,7 @@ related_components:
 
 ## Context
 
-`variant-smoke` fails intermittently with `Object with guid response@<32-hex> was
-not bound in the connection` (#7880) and, in other specs, with `Target page,
+`variant-smoke` fails intermittently with `Object with guid response@<32-hex> was not bound in the connection` (#7880) and, in other specs, with `Target page,
 context or browser has been closed` (#6501). Neither reproduces locally —
 roughly 50 runs across two sessions produced zero.
 
