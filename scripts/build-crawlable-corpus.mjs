@@ -3147,7 +3147,8 @@ export function renderCountryDevelopments({ countryCode = '', countryName, devel
   if (brief) assertDevelopmentsBrief(brief);
   for (const event of timeline) assertDevelopmentsTimelineEvent(event);
 
-  const movementSentence = describeDevelopmentsMovement({ countryName: name, ciiEntry, pulse });
+  const movementSentence = developmentsHasDatedItem(rows)
+    ? describeDevelopmentsMovement({ countryName: name, ciiEntry, pulse }) : '';
   const briefExtraSources = brief
     ? (Array.isArray(brief.sources) ? brief.sources : [])
       .filter((source) => source && typeof source.url === 'string'

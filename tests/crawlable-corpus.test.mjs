@@ -5815,6 +5815,18 @@ describe('country recent developments', () => {
     assert.match(html, /No country-specific grounding sources were captured/);
     assert.match(renderCountryDevelopments({ countryName: 'Palau', developments: null }), /No brief was captured/);
     assert.equal(developmentsHasDatedItem({ headlines: [], brief: null, timeline: [] }), false);
+    for (const signals of [
+      { ciiEntry: CII_ENTRY },
+      { pulse: { score: CII_ENTRY.score, band: CII_ENTRY.band, trend: 'stable', asOf: CII_ENTRY.asOf } },
+    ]) {
+      const emptyHtml = renderCountryDevelopments({
+        countryName: 'Palau',
+        developments: { headlines: [], brief: null, timeline: [], briefSkipped: 'no-grounding' },
+        ...signals,
+      });
+      assert.match(emptyHtml, /data-brief-unavailable/);
+      assert.doesNotMatch(emptyHtml, /Reporting captured in the same window/);
+    }
   });
 
   it('explains each withheld state and never exposes internal or unknown reason text', () => {
