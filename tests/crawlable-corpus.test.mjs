@@ -6250,9 +6250,9 @@ describe('GEO residue #7869 (sources ItemList)', () => {
     .find((node) => node?.mainEntity?.['@type'] === 'ItemList')?.mainEntity;
 
   it('keeps every anchor inside the character class that makes the unescaped id safe', async () => {
-    // The card markup interpolates the anchor into id="..." without escapeHtml,
-    // unlike every sibling attribute on that element. What makes that safe is
-    // the slug's character class, not the caller — so pin the class here. A
+    // The card markup interpolates the anchor into id="..." without escapeHtml
+    // — as it does for several sibling data-* attributes. What makes that safe
+    // is the slug's character class, not the caller — so pin the class here. A
     // future relaxation (preserving dots for readability, say) would otherwise
     // remove the escaping guarantee with nothing going red.
     const { sourceCardAnchors } = await import('../scripts/crawlable-sources-page.mjs');
@@ -6289,49 +6289,80 @@ describe('GEO residue #7869 (sources ItemList)', () => {
 
   it('derives every anchor from its own provider key alone', async () => {
     // An anchor is published data — one per ListItem url — so it must be a pure
-    // function of its own key. Two weaker shapes were tried and both leak the
-    // rest of the catalog into an individual anchor: an arrival-ordered counter
-    // (order-dependent, and the catalog sorts by displayName), and suffixing
-    // only a base with more than one claimant (membership-dependent). Each
-    // assertion below pins one way the anchor must NOT move.
+    // function of its own key. Three weaker shapes were tried and each leaked
+    // something about the rest of the catalog into an individual anchor:
+    // arrival order, then catalog membership, then an arrival-ordered fallback
+    // that fired on a digest collision. Each assertion below pins one leak, and
+    // the literal expected values pin the derivation itself — without them a
+    // mutant that hashes a different field, or slices different digest
+    // characters, satisfies every structural claim.
     const { sourceCardAnchors } = await import('../scripts/crawlable-sources-page.mjs');
+    const anchorOf = (catalog, key) => sourceCardAnchors(catalog).get(key);
+
+    // (0) The exact derivation: slug of the key, then 16 hex of sha1(key).
+    // Pins WHICH bytes are hashed and WHICH characters are taken.
+    assert.equal(
+      anchorOf([{ provider: 'finance.yahoo.com' }], 'finance.yahoo.com'),
+      'provider-finance-yahoo-com-4af3021e4e1cad36',
+      'the anchor must be the key slug plus the first 16 hex of sha1 of the key itself',
+    );
+
+    // (1) The digest follows the provider key, not any other field on the entry.
+    // A mutant hashing the whole entry (or displayName) passes everything else.
+    assert.equal(
+      anchorOf([{ provider: 'finance.yahoo.com', displayName: 'Yahoo Finance' }], 'finance.yahoo.com'),
+      anchorOf([{ provider: 'finance.yahoo.com', displayName: 'RENAMED' }], 'finance.yahoo.com'),
+      'renaming a provider must not move its anchor — the digest covers the key alone',
+    );
+
+    // (2) Keys that slugify alike stay distinct.
     const colliders = [{ provider: 'a.b' }, { provider: 'a-b' }, { provider: 'a b' }];
-
-    // (1) Colliding keys stay distinct.
     const forward = sourceCardAnchors(colliders);
-    assert.equal(new Set(forward.values()).size, colliders.length, 'colliding keys must not collapse onto one anchor');
-    for (const { provider } of colliders) {
-      assert.match(forward.get(provider), /^provider-a-b-[0-9a-f]{6}$/, 'a collided base must carry its key digest');
-    }
+    assert.equal(new Set(forward.values()).size, colliders.length, 'colliding slugs must not collapse onto one anchor');
 
-    // (2) Reordering the catalog moves nothing.
+    // (3) Reordering the catalog moves nothing.
     const reversed = sourceCardAnchors([...colliders].reverse());
     for (const { provider } of colliders) {
       assert.equal(reversed.get(provider), forward.get(provider), `${provider} must keep its anchor when the catalog is reordered`);
     }
 
-    // (3) Adding a LATER collider moves nothing either — the case a
-    // claimant-count conditional gets wrong. Publish `a.b` alone, add `a-b`
-    // afterwards, and the citation already indexed for `a.b` must still resolve.
-    const alone = sourceCardAnchors([{ provider: 'a.b' }]);
+    // (4) Adding a collider — before OR after an existing entry — moves nothing.
+    // Appending alone cannot catch an arrival-ordered scheme, because the
+    // existing entry is still first; the prepend is what does.
+    assert.equal(forward.get('a.b'), anchorOf([{ provider: 'a.b' }], 'a.b'), 'appending a collider must not move a published anchor');
     assert.equal(
-      forward.get('a.b'),
-      alone.get('a.b'),
-      'adding a colliding provider must not change an anchor that was already published',
+      anchorOf([{ provider: 'zzz' }, { provider: 'a.b' }], 'a.b'),
+      anchorOf([{ provider: 'a.b' }], 'a.b'),
+      'inserting a provider BEFORE an existing one must not move its anchor',
     );
 
-    // (4) An anchor does not depend on the catalog at all: the same key alone
-    // and among 748 neighbours yields the same string.
+    // (5) An anchor does not depend on the catalog at all.
     assert.equal(
-      sourceCardAnchors([{ provider: 'finance.yahoo.com' }]).get('finance.yahoo.com'),
-      sourceCardAnchors([{ provider: 'zzz' }, { provider: 'finance.yahoo.com' }, { provider: 'aaa' }]).get('finance.yahoo.com'),
+      anchorOf([{ provider: 'finance.yahoo.com' }], 'finance.yahoo.com'),
+      anchorOf([{ provider: 'zzz' }, { provider: 'finance.yahoo.com' }, { provider: 'aaa' }], 'finance.yahoo.com'),
       'an anchor must not depend on which other providers are present',
     );
 
-    // (5) A key with nothing left after slugging still gets a distinct anchor.
+    // (6) A real same-slug digest collision. These two keys share a slug AND a
+    // 24-bit sha1 prefix, which is what made the previous 6-hex scheme fall back
+    // to an arrival-ordered suffix and swap ownership on reversal. At 64 bits
+    // they separate, so no fallback is reachable and neither anchor moves.
+    const COLLIDE_A = 'a-b-c-d-e-f.g.h-i-j-k-l-m-n-o-p-com';
+    const COLLIDE_B = 'a.b-c.d-e-f-g-h.i.j.k-l-m-n-o-p-com';
+    const pair = [{ provider: COLLIDE_A }, { provider: COLLIDE_B }];
+    const pairForward = sourceCardAnchors(pair);
+    const pairReversed = sourceCardAnchors([...pair].reverse());
+    assert.equal(new Set(pairForward.values()).size, 2, 'a 24-bit digest collision must not collapse two providers onto one anchor');
+    assert.equal(pairForward.get(COLLIDE_A), pairReversed.get(COLLIDE_A), 'a digest-colliding pair must still be order-stable');
+    assert.equal(pairForward.get(COLLIDE_B), pairReversed.get(COLLIDE_B), 'a digest-colliding pair must still be order-stable');
+    for (const anchor of pairForward.values()) {
+      assert.doesNotMatch(anchor, /-\d+$/, 'no anchor may carry an arrival-ordered numeric suffix');
+    }
+
+    // (7) A key with nothing left after slugging still gets a distinct anchor.
     const empty = sourceCardAnchors([{ provider: '---' }, { provider: '!!!' }]);
     assert.equal(new Set(empty.values()).size, 2, 'two unsluggable keys must still get distinct anchors');
-    for (const anchor of empty.values()) assert.match(anchor, /^provider-source-[0-9a-f]{6}$/);
+    for (const anchor of empty.values()) assert.match(anchor, /^provider-source-[0-9a-f]{16}$/);
 
     assert.equal(
       sourceCardAnchors([{ provider: 'x' }, { provider: 'x' }]).size,

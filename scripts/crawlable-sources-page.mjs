@@ -721,9 +721,19 @@ export function buildSourceCatalog(entries, { logicalProviders = [] } = {}) {
  *
  * Both silently repoint a citation that has already been crawled and stored.
  * These fragments are published data — one per ListItem url — so an anchor has
- * to be a pure function of its own provider key and nothing else. Paying seven
- * characters on every anchor buys exactly that. The `used` backstop below fires
- * only on a digest collision, so "no two cards share an id" holds regardless.
+ * to be a pure function of its own provider key and nothing else.
+ *
+ * A third shape got most of the way there and kept one channel open: it fell
+ * back to an arrival-ordered `-2` when two keys produced the same anchor, so a
+ * digest collision reintroduced the ordering dependence it existed to remove.
+ * That was reachable, not theoretical — `a-b-c-d-e-f.g.h-i-j-k-l-m-n-o-p-com`
+ * and `a.b-c.d-e-f-g-h.i.j.k-l-m-n-o-p-com` share both a slug and a 24-bit
+ * SHA-1 prefix, and reversing them swapped which one owned the bare anchor.
+ * So there is no fallback here any more: the digest is 64 bits, and a genuine
+ * collision between two DIFFERENT keys throws instead of renumbering. A loud
+ * build failure is the right answer to a 2^-64 event; silently handing one
+ * provider's published citation to another is not. `seen` below only detects
+ * that case — it is never an input to the anchor's value.
  *
  * The character class reduces every key to `[a-z0-9-]`, which is what lets the
  * caller interpolate the id into the card markup and the JSON-LD url without
@@ -754,13 +764,15 @@ export function sourceCardAnchors(sourceCatalog) {
     .toLowerCase() || 'source';
 
   const anchors = new Map();
-  const used = new Set();
+  const seen = new Map();
   for (const provider of sourceCatalog) {
     const key = String(provider.provider ?? '');
-    const preferred = `provider-${slugBase(key)}-${createHash('sha1').update(key).digest('hex').slice(0, 6)}`;
-    let anchor = preferred;
-    for (let suffix = 2; used.has(anchor); suffix += 1) anchor = `${preferred}-${suffix}`;
-    used.add(anchor);
+    const anchor = `provider-${slugBase(key)}-${createHash('sha1').update(key).digest('hex').slice(0, 16)}`;
+    const owner = seen.get(anchor);
+    if (owner !== undefined && owner !== key) {
+      throw new Error(`Source card anchor collision: ${JSON.stringify(owner)} and ${JSON.stringify(key)} both map to #${anchor}`);
+    }
+    seen.set(anchor, key);
     anchors.set(provider.provider, anchor);
   }
   return anchors;
