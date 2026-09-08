@@ -34,7 +34,7 @@ The fix (issue #7869, PR #7881 — open and unmerged as of this writing) gave ev
 
 - `sourceCardAnchors()` at `scripts/crawlable-sources-page.mjs` builds the per-provider anchor map, keyed on `provider` (the catalog's own unique key), not on the display name.
 - The card markup interpolates the id in `renderSourcesIndex()`, in the same `scripts/crawlable-sources-page.mjs`.
-- The JSON-LD emits `url: \`${pageUrl}#${cardAnchors.get(provider.provider)}\`` in `renderSourcesIndex()`, alongside `'@type': 'ListItem'` and a 1-based `position`.
+- The JSON-LD gives each element a `url` built from the page URL plus that card's fragment, in `renderSourcesIndex()`, alongside `'@type': 'ListItem'` and a 1-based `position`. The shipped shape is in the Examples section below.
 
 That work is where the lesson lives. Adding the ids turned two properties that had been purely cosmetic — *where* a fragment lands on screen, and *which* card a given fragment names — into correctness properties. Both broke in the first version, both were caught in code review, and both are now pinned by tests proven to fail before the fix.
 
