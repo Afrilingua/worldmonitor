@@ -18,7 +18,15 @@ const DDOS_KEY = 'cf:radar:ddos:v1';
 const TRAFFIC_ANOMALIES_KEY = 'cf:radar:traffic-anomalies:v1';
 const CACHE_TTL = 10800; // 3h — 6x the 30 min cron interval (was 1x = key expired on any missed run)
 const DDOS_TTL = 10800;
-const ANOMALIES_TTL = 3600;
+// Co-pinned with SEED_META.trafficAnomalies.maxStaleMin (60) in api/health.js:
+// the data TTL must STRICTLY exceed that gate. #7876 moved trafficAnomalies into
+// MISSING_DATA_IS_FAILURE_KEYS, so an absent payload is now EMPTY (crit) rather
+// than OK — and at the old 3600s the key expired at exactly the 60-minute mark
+// while health still read the meta as fresh (seedAge is rounded, and the test is
+// `> maxStaleMin`). A dead seeder therefore reported crit for ~30s before
+// settling into the truthful STALE_SEED warn. 2x the gate restores the ordered
+// escalation the DDoS sibling already has at 3h.
+const ANOMALIES_TTL = 7200;
 
 const COUNTRY_COORDS = {
   AF:[33.94,67.71],AL:[41.15,20.17],DZ:[28.03,1.66],AO:[-11.20,17.87],

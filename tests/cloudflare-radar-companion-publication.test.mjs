@@ -21,6 +21,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 import { __testing__ as health } from '../api/health.js';
@@ -31,8 +32,18 @@ const DDOS_KEY = 'cf:radar:ddos:v1';
 const TRAFFIC_KEY = 'cf:radar:traffic-anomalies:v1';
 const DDOS_META_KEY = 'seed-meta:cf:radar:ddos';
 const TRAFFIC_META_KEY = 'seed-meta:cf:radar:traffic-anomalies';
-const DDOS_TTL = 10800;
-const ANOMALIES_TTL = 3600;
+// Parsed from the seeder rather than retyped: the suite asserts these exact
+// values as EXPIRE arguments, so a copy that drifts from the implementation
+// would keep passing while testing the wrong contract. Same technique the fleet
+// guard in tests/seed-ttl-outlives-staleness-fleet.test.mjs uses.
+const SEEDER_SOURCE = readFileSync(new URL('../scripts/seed-internet-outages.mjs', import.meta.url), 'utf8');
+const seederTtl = (name) => {
+  const match = SEEDER_SOURCE.match(new RegExp(`^const ${name} = (\\d+);`, 'm'));
+  assert.ok(match, `seed-internet-outages.mjs no longer declares ${name}`);
+  return Number(match[1]);
+};
+const DDOS_TTL = seederTtl('DDOS_TTL');
+const ANOMALIES_TTL = seederTtl('ANOMALIES_TTL');
 
 const NOW = Date.parse('2026-09-07T12:00:00Z');
 const REDIS_ORIGIN = 'https://redis.radar-fixture.test';
@@ -523,9 +534,28 @@ test('runSeed retains both companion keys at their own TTLs when the fetch phase
 
   const ttlsFor = (key) => new Set(expireCommandsFor(run.redisCommands, key).map((command) => command[2]));
   assert.deepEqual(ttlsFor(DDOS_KEY), new Set([DDOS_TTL]), 'the DDoS key is never extended at the canonical TTL');
-  assert.deepEqual(ttlsFor(TRAFFIC_KEY), new Set([ANOMALIES_TTL]), 'the anomalies key keeps its own 1h contract');
+  assert.deepEqual(ttlsFor(TRAFFIC_KEY), new Set([ANOMALIES_TTL]), 'the anomalies key keeps its own TTL, not the canonical one');
   assert.deepEqual(ttlsFor(DDOS_META_KEY), new Set([resolveSeedMetaTtl(undefined, DDOS_TTL)]));
   assert.deepEqual(ttlsFor(TRAFFIC_META_KEY), new Set([resolveSeedMetaTtl(undefined, ANOMALIES_TTL)]));
+});
+
+test('each companion payload outlives the health gate that grades it', () => {
+  // #7876 moved both keys into MISSING_DATA_IS_FAILURE_KEYS, so an absent
+  // payload is now EMPTY (crit) rather than OK. That makes TTL > maxStaleMin
+  // load-bearing: health computes seedAge with Math.round and tests
+  // `seedAge > maxStaleMin`, so a TTL equal to the gate lets the payload vanish
+  // while the meta still reads fresh — a dead seeder reports crit for ~30s
+  // before settling into the truthful STALE_SEED warn. Same invariant as
+  // tests/seed-ttl-outlives-staleness-fleet.test.mjs, pinned here because these
+  // two keys are the ones the strict classification now applies to.
+  for (const [name, ttlSeconds] of [['ddosAttacks', DDOS_TTL], ['trafficAnomalies', ANOMALIES_TTL]]) {
+    const maxStaleSeconds = health.SEED_META[name].maxStaleMin * 60;
+    assert.ok(
+      ttlSeconds > maxStaleSeconds,
+      `${name}: data TTL (${ttlSeconds}s) must strictly exceed maxStaleMin (${maxStaleSeconds}s), `
+      + 'or the key expires before STALE_SEED can fire and a late seeder reports EMPTY/crit',
+    );
+  }
 });
 
 test('a marker whose data TTL exceeds the floor is never re-armed below its own TTL', () => {
