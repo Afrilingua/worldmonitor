@@ -211,7 +211,7 @@ async function assertSafeSidecarFetchUrl(url) {
 globalThis.fetch = async function ipv4Fetch(input, init) {
   const isRequest = input && typeof input === 'object' && 'url' in input;
   let url;
-  try { url = new URL(typeof input === 'string' ? input : input.url); } catch { return _originalFetch(input, init); }
+  try { url = new URL(isRequest ? input.url : input); } catch { return _originalFetch(input, init); }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return _originalFetch(input, init);
   const allowPrivateNetwork = init?.[ALLOW_PRIVATE_NETWORK_FETCH] === true;
   const safety = allowPrivateNetwork
