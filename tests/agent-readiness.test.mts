@@ -90,7 +90,12 @@ describe('agent homepage routing', () => {
         assert.match(response?.headers.get('cache-control') ?? '', /no-store/);
       }
     }
-    for (const accept of ['text/html', '*/*', 'text/*', 'text/markdown;q=0', 'text/markdown;q=0.2, text/html', 'text/markdown-extra']) {
+    for (const accept of [
+      'text/html', '*/*', 'text/*', 'text/markdown;q=0', 'text/markdown;q=0.2, text/html', 'text/markdown-extra',
+      'text/*, text/markdown;q=0',
+      'text/markdown;q=0, text/*',
+      'text/*;q=0.8, text/markdown;q=0.1, text/html;q=0.5',
+    ]) {
       assert.equal(await middleware(new Request('https://www.worldmonitor.app/', {
         headers: { 'User-Agent': 'Mozilla/5.0', Accept: accept },
       })), undefined);

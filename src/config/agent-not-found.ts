@@ -117,6 +117,7 @@ export function acceptQuality(header: string | null | undefined, type: string): 
   const wanted = type.toLowerCase();
   const [wantedMain] = wanted.split('/');
   let best: number | null = null;
+  let specificity = -1;
   for (const rawPart of trimmed.split(',')) {
     const tokens = rawPart.split(';').map((part) => part.trim().toLowerCase()).filter(Boolean);
     const media = tokens[0];
@@ -128,7 +129,13 @@ export function acceptQuality(header: string | null | undefined, type: string): 
     const qToken = tokens.find((token) => token.startsWith('q='));
     const q = qToken ? Number(qToken.slice(2)) : 1;
     if (!Number.isFinite(q) || q < 0) continue;
-    if (best === null || q > best) best = q;
+    const matchSpecificity = media === wanted ? 1 : 0;
+    if (matchSpecificity > specificity) {
+      best = q;
+      specificity = matchSpecificity;
+    } else if (matchSpecificity === specificity && (best === null || q > best)) {
+      best = q;
+    }
   }
   return best;
 }
