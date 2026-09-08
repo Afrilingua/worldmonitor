@@ -10,7 +10,7 @@ import {
   type ListInternetTrafficAnomaliesResponse,
 } from '../../../../src/generated/server/worldmonitor/infrastructure/v1/service_server';
 
-import { readCachedJson } from '../../../_shared/redis';
+import { logCacheReadError, readCachedJson } from '../../../_shared/redis';
 
 const SEED_CACHE_KEY = 'cf:radar:traffic-anomalies:v1';
 
@@ -19,6 +19,7 @@ export async function listInternetTrafficAnomalies(
   req: ListInternetTrafficAnomaliesRequest,
 ): Promise<ListInternetTrafficAnomaliesResponse> {
   const cached = await readCachedJson(SEED_CACHE_KEY, true);
+  if (cached.status === 'error') logCacheReadError(SEED_CACHE_KEY, cached.error);
   const data = cached.status === 'hit' ? cached.value as Partial<ListInternetTrafficAnomaliesResponse> | null : null;
   if (!data || !Array.isArray(data.anomalies)
     || !data.anomalies.every((a) => a && typeof a.locationCode === 'string')) {

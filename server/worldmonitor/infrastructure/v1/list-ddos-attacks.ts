@@ -10,7 +10,7 @@ import {
   type ListInternetDdosAttacksResponse,
 } from '../../../../src/generated/server/worldmonitor/infrastructure/v1/service_server';
 
-import { readCachedJson } from '../../../_shared/redis';
+import { logCacheReadError, readCachedJson } from '../../../_shared/redis';
 
 const SEED_CACHE_KEY = 'cf:radar:ddos:v1';
 
@@ -19,6 +19,7 @@ export async function listInternetDdosAttacks(
   _req: ListInternetDdosAttacksRequest,
 ): Promise<ListInternetDdosAttacksResponse> {
   const cached = await readCachedJson(SEED_CACHE_KEY, true);
+  if (cached.status === 'error') logCacheReadError(SEED_CACHE_KEY, cached.error);
   const data = cached.status === 'hit' ? cached.value as Partial<ListInternetDdosAttacksResponse> | null : null;
   if (!data || !Array.isArray(data.protocol) || !Array.isArray(data.vector)
     || typeof data.dateRangeStart !== 'string' || typeof data.dateRangeEnd !== 'string'

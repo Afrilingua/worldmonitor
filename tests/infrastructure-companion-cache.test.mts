@@ -42,13 +42,15 @@ for (const kind of ['ddos', 'traffic', 'country'] as const) {
     const good = kind === 'ddos' ? ddos : traffic;
     const empty = kind === 'ddos' ? emptyDdos : emptyTraffic;
     let payload: unknown = good;
-    let failure: 'http' | 'network' | 'command' | 'json' | undefined;
+    let failure: 'http' | 'network' | 'command' | 'json' | 'timeout' | undefined;
     let now = Date.now();
     const statuses: number[] = [];
     t.mock.method(Date, 'now', () => now);
     // Expected failure logs would otherwise contain the entire data-URL bundle.
-    t.mock.method(console, 'warn', () => {});
-    t.mock.method(console, 'error', () => {});
+    const logs: string[] = [];
+    const recordLog = (...args: unknown[]) => { logs.push(args.map(String).join(' ')); };
+    t.mock.method(console, 'warn', recordLog);
+    t.mock.method(console, 'error', recordLog);
     const env = { ...process.env };
     t.after(() => { process.env = env; });
     process.env.UPSTASH_REDIS_REST_URL = 'https://redis.fixture';
@@ -58,6 +60,8 @@ for (const kind of ['ddos', 'traffic', 'country'] as const) {
       const rawUrl = input instanceof Request ? input.url : String(input);
       const url = new URL(rawUrl, 'https://app.fixture');
       if (url.origin === 'https://redis.fixture') {
+        assert.equal(decodeURIComponent(url.pathname), `/get/cf:radar:${kind === 'ddos' ? 'ddos' : 'traffic-anomalies'}:v1`);
+        if (failure === 'timeout') throw new DOMException('fixture timeout', 'TimeoutError');
         if (failure === 'network') throw new TypeError('fetch failed');
         if (failure === 'http') return new Response('', { status: 503 });
         if (failure === 'command') return Response.json({ error: 'fixture read failure' });
@@ -83,9 +87,15 @@ for (const kind of ['ddos', 'traffic', 'country'] as const) {
     }
 
     assert.deepEqual(await read(), good);
-    for (const error of ['http', 'network', 'command', 'json'] as const) {
+    for (const error of ['http', 'network', 'command', 'json', 'timeout'] as const) {
       failure = error;
+      logs.length = 0;
       await refresh(good, 503);
+      if (error === 'timeout') {
+        assert.ok(logs.some((line) => line.includes(`[REDIS-TIMEOUT] getCachedJson key=cf:radar:${kind === 'ddos' ? 'ddos' : 'traffic-anomalies'}:v1`)));
+      } else {
+        assert.ok(logs.some((line) => line.startsWith('[redis] getCachedJson failed:')));
+      }
       failure = undefined;
       await refresh(good, 200);
     }
