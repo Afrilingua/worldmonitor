@@ -730,10 +730,13 @@ export function buildSourceCatalog(entries, { logicalProviders = [] } = {}) {
  * and `a.b-c.d-e-f-g-h.i.j.k-l-m-n-o-p-com` share both a slug and a 24-bit
  * SHA-1 prefix, and reversing them swapped which one owned the bare anchor.
  * So there is no fallback here any more: the digest is 64 bits, and a genuine
- * collision between two DIFFERENT keys throws instead of renumbering. A loud
- * build failure is the right answer to a 2^-64 event; silently handing one
+ * collision between two DIFFERENT catalog keys throws instead of renumbering. A
+ * loud build failure is the right answer to a 2^-64 event; silently handing one
  * provider's published citation to another is not. `seen` below only detects
- * that case — it is never an input to the anchor's value.
+ * that case — it is never an input to the anchor's value — and it compares the
+ * RAW catalog key, not the normalised one, so two entries that normalise alike
+ * (`null` and `undefined` both coerce to the empty string) are caught rather
+ * than quietly rendering one id on two cards.
  *
  * The character class reduces every key to `[a-z0-9-]`, which is what lets the
  * caller interpolate the id into the card markup and the JSON-LD url without
@@ -768,11 +771,12 @@ export function sourceCardAnchors(sourceCatalog) {
   for (const provider of sourceCatalog) {
     const key = String(provider.provider ?? '');
     const anchor = `provider-${slugBase(key)}-${createHash('sha1').update(key).digest('hex').slice(0, 16)}`;
-    const owner = seen.get(anchor);
-    if (owner !== undefined && owner !== key) {
-      throw new Error(`Source card anchor collision: ${JSON.stringify(owner)} and ${JSON.stringify(key)} both map to #${anchor}`);
+    if (seen.has(anchor) && seen.get(anchor) !== provider.provider) {
+      throw new Error(
+        `Source card anchor collision: ${JSON.stringify(seen.get(anchor))} and ${JSON.stringify(provider.provider)} both map to #${anchor}`,
+      );
     }
-    seen.set(anchor, key);
+    seen.set(anchor, provider.provider);
     anchors.set(provider.provider, anchor);
   }
   return anchors;

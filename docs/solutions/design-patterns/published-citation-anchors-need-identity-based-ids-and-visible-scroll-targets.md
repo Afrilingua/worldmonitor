@@ -84,7 +84,7 @@ A provider card is `min-height: 180px` (`sourceCardAnchors()` in `scripts/crawla
 
 Same root property as (1), stated as the invariant you can actually run. Not one check but a family, because each member catches a different leak: generate over the catalog and over its reverse (ordering); generate with a colliding entry present and absent (membership — the one shape 2 fails); generate the same key alone and among neighbours (everything else). A single "is deterministic" assertion passes on all three broken shapes, because each of them *is* deterministic — given the same catalog.
 
-### The test shape that catches all three
+### The test shape that catches them
 
 The obvious test — and the one the first version of this test wrote — asserts that every ListItem url's fragment appears somewhere in the page. That test passes on a permuted anchor map, on a buried card, and on an order-dependent counter. The stronger assertions actually shipped:
 

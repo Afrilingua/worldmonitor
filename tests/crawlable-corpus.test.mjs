@@ -6364,10 +6364,23 @@ describe('GEO residue #7869 (sources ItemList)', () => {
     assert.equal(new Set(empty.values()).size, 2, 'two unsluggable keys must still get distinct anchors');
     for (const anchor of empty.values()) assert.match(anchor, /^provider-source-[0-9a-f]{16}$/);
 
+    // (8) A repeated key is one entity, so it collapses to one entry and one
+    // anchor rather than tripping the collision guard.
+    const duplicated = sourceCardAnchors([{ provider: 'x' }, { provider: 'x' }]);
+    assert.equal(duplicated.size, 1, 'a duplicate key can only ever yield one anchor');
     assert.equal(
-      sourceCardAnchors([{ provider: 'x' }, { provider: 'x' }]).size,
-      1,
-      'the map is keyed on the catalog key, so a duplicate key can only ever yield one anchor',
+      duplicated.get('x'),
+      anchorOf([{ provider: 'x' }], 'x'),
+      'a repeated key must not push its own anchor onto a fallback',
+    );
+
+    // (9) Two DISTINCT catalog keys that normalise alike must not silently share
+    // an id. `null` and `undefined` both coerce to the empty string, so a guard
+    // comparing normalised keys would pass them and render one id on two cards.
+    assert.throws(
+      () => sourceCardAnchors([{ provider: null }, { provider: undefined }]),
+      /anchor collision/,
+      'two entries that normalise to the same key must fail loudly, not share a card id',
     );
   });
 
