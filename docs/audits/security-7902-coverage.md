@@ -97,6 +97,16 @@ No new scan was started or resumed. Existing selected-path review evidence is re
 
 ## Reproduction and verification
 
-Local evidence bundle: `worldmonitor-7902-coverage` in the task temporary evidence directory. Raw scan and provider evidence is not committed. The bundle includes `build.py`, `path-inventory.csv`, `retained-records.csv`, `evidence-index.json`, `issue.json`, `children.json`, `prs.json` and `preflight.json`.
+The public path inventory is reproducible from the pinned Git revision without private artifacts:
 
-The inventory builder checks exact tracked-path membership, one record per tracked path, all 68 retained-record mappings, and ancestry of the ten merged PR heads. Documentation checks cover Markdown, public-document references and whitespace only. They do not test application security.
+```sh
+git ls-tree -r 8442418e86420df015c1ff9187395c55ad2cacff
+```
+
+Each output row provides the mode, object type, blob ID and path. Apply the status rules above; no path acquires reviewed status from enumeration. The area totals and public issue/PR mapping are retained in this document.
+
+The detailed reconciliation is preserved in a maintainer-controlled private local archive outside temporary/task worktrees: `~/.local/share/worldmonitor/audits/security-7902-coverage/`. Its `README.md` documents the inventory, original records, source provenance, integrity manifest and access boundary. The account owner can supply this archive to an authorized successor through a separately approved private channel. No private artifact or diagnostic is published by this PR. Transfer and backup remain owner responsibilities; the repository alone does not contain the private audit evidence.
+
+The archive includes the builder, per-path inventory, all 68 retained-record mappings, original scan records, captured PR/issue evidence and verification results. Its integrity manifest detects accidental changes; it does not certify the original scan's completeness or resolve the access refusal.
+
+Verification: exact tracked-path membership and unique rows; all 68 retained-record mappings; ancestry of the ten earlier merged PR heads; Markdown lint, public-document references and whitespace checks. These checks do not test application security.
