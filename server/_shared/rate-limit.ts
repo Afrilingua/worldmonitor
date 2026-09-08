@@ -358,6 +358,12 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // unbounded (any ticker/name/domain), so these cannot inherit the fail-open
   // global fallback. Same 30/min provider-proxy budget as the sanctions lookup
   // and batch fan-out routes above.
+  // Country coverage (#7526) fans out per cache miss to two Google News RSS
+  // feeds plus a live military-flights path and an ACLED window whose cache key
+  // moves with the clock, so the miss rate is high. Same shape as the sibling
+  // provider-proxy routes above; it must not inherit the global fail-open
+  // budget on a Redis outage.
+  '/api/intelligence/v1/get-country-coverage': { limit: 30, window: '60 s' },
   '/api/intelligence/v1/get-company-enrichment': { limit: 30, window: '60 s' },
   '/api/intelligence/v1/list-company-signals': { limit: 30, window: '60 s' },
   '/api/intelligence/v1/search-sec-filings': { limit: 30, window: '60 s' },
@@ -514,6 +520,14 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // Partner embed entitlement (#6599): keyed panels look up wm_ keys in Convex.
   // Cap per-IP so a stolen snippet cannot amplify validation traffic.
   '/api/embed/entitlement': { limit: 60, window: '60 s' },
+  // Grant exchange: validates a wme_ key in Convex, so it amplifies the same
+  // way the entitlement lookup does. A frame mints once per 30-minute grant,
+  // which leaves this budget almost entirely as headroom for shared egress IPs.
+  '/api/embed/session': { limit: 60, window: '60 s' },
+  // Partner map frame. Public traffic uses the client IP; a verified grant uses
+  // its account owner so every display for one partner shares the same budget.
+  // The CDN absorbs most canonical public requests before this policy runs.
+  '/api/embed/map-frame': { limit: 120, window: '60 s' },
 };
 
 interface RateLimitPolicyDecision {
@@ -541,6 +555,9 @@ export const FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED: Record<string, RateLimit
   },
   '/api/conflict/v1/get-humanitarian-summary-batch': {
     reason: 'Batch summary fans out to the external HAPI (humdata) provider on cache miss.',
+  },
+  '/api/intelligence/v1/get-country-coverage': {
+    reason: 'Country coverage fans out to two Google News feeds and the live military-flights path on cache miss.',
   },
   '/api/intelligence/v1/get-company-enrichment': {
     reason: 'Per-company composite fans out to SEC EDGAR and Finnhub on cache miss.',
@@ -622,6 +639,12 @@ export const FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED: Record<string, RateLimit
   },
   '/api/embed/entitlement': {
     reason: 'Keyed-panel entitlement lookups amplify into Convex user-key validation; fail closed so a Redis outage cannot lift the per-IP budget.',
+  },
+  '/api/embed/session': {
+    reason: 'Grant minting amplifies into Convex embed-key validation and hands back a bearer credential; fail closed so a Redis outage cannot lift the per-IP budget on a credential-issuing path.',
+  },
+  '/api/embed/map-frame': {
+    reason: 'The keyless map frame is fully anonymous and fans out across four seed reads. Fail closed rather than inherit the availability-first global fallback: those reads come from the same Redis that would be degraded, so a fail-open origin would serve empty layers at unbounded volume while the CDN copy keeps real data on screen for the stale-while-revalidate window.',
   },
 };
 

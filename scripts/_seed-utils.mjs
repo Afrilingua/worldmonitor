@@ -1170,25 +1170,47 @@ export async function writeExtraKeyWithMetaAtomically({
     ['SET', key, JSON.stringify(data), 'EX', dataTtl],
     ['SET', metaKey, JSON.stringify(buildSeedMeta(recordCount, coverage, extra, fetchedAt)), 'EX', metaTtl],
   ];
-  const resp = await fetch(`${url}/multi-exec`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': CHROME_UA },
-    body: JSON.stringify(commands),
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (!resp.ok) {
-    throw new Error(`Atomic extra-key publish failed: HTTP ${resp.status}`);
-  }
+  // This runs after the provider fetches have settled. Retrying this bounded
+  // Redis transaction therefore recovers a transient publication failure
+  // without replaying the provider requests or exposing half the pair.
+  return withRetry(async () => {
+    const resp = await fetch(`${url}/multi-exec`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': CHROME_UA },
+      body: JSON.stringify(commands),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!resp.ok) {
+      const err = httpRetryError(resp);
+      err.message = `Atomic extra-key publish failed: HTTP ${resp.status}`;
+      err.httpStatus = resp.status;
+      throw err;
+    }
 
-  const results = await resp.json();
-  if (!Array.isArray(results)) {
-    throw new Error(`Atomic extra-key publish failed: ${results?.error || 'invalid transaction response'}`);
-  }
-  const failures = results.filter((result) => result?.error || result?.result === 'ERR');
-  if (failures.length > 0 || results.length !== commands.length) {
-    throw new Error(`Atomic extra-key publish failed: ${failures.length || 'missing'} command result(s)`);
-  }
-  return true;
+    let results;
+    try {
+      results = await resp.json();
+    } catch (cause) {
+      throw Object.assign(new Error('Atomic extra-key publish failed: invalid transaction response'), {
+        cause,
+        nonRetryable: true,
+      });
+    }
+    if (!Array.isArray(results)) {
+      throw Object.assign(
+        new Error(`Atomic extra-key publish failed: ${results?.error || 'invalid transaction response'}`),
+        { nonRetryable: true },
+      );
+    }
+    const failures = results.filter((result) => result?.error || result?.result === 'ERR');
+    if (failures.length > 0 || results.length !== commands.length) {
+      throw Object.assign(
+        new Error(`Atomic extra-key publish failed: ${failures.length || 'missing'} command result(s)`),
+        { nonRetryable: true },
+      );
+    }
+    return true;
+  }, SEED_REDIS_RETRY_ATTEMPTS - 1, SEED_REDIS_RETRY_BASE_MS);
 }
 
 // Detailed counterpart to extendExistingTtl. Results stay aligned to the input
@@ -2697,13 +2719,15 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
         // from the previous seed-meta write. The SET below replaces the whole
         // key; without this merge a validate-skip after a healthy publish wipes
         // afterPublish patches and fail-closed consumers false-alarm.
+        const currentSkipDiagnostics =
+          freshnessMetaDiagnosticsPatch(validationSkipResult?.freshnessMetaPatch) || {};
         const preservedDiagnostics = {
           ...(freshnessMetaDiagnosticsPatch(
             validationSkipMetaRead
               ? validationSkipExistingMeta
               : await readExistingSeedMeta(domain, resource),
           ) || {}),
-          ...(freshnessMetaDiagnosticsPatch(validationSkipResult?.freshnessMetaPatch) || {}),
+          ...currentSkipDiagnostics,
         };
         if (canonicalMeta) {
           // Pass-through canonical's contentAge so health doesn't lose the
@@ -2724,9 +2748,15 @@ export async function runSeed(domain, resource, canonicalKey, fetchFn, opts = {}
             `existing cache TTL extended`,
           );
         } else {
-          // No last-good envelope: quiet-period zero write. Drop prior
-          // diagnostics — they described a different cohort and would lie.
-          await writeFreshnessMetadataSafely(domain, resource, 0, opts.sourceVersion, ttlSeconds);
+          // No non-empty last-good envelope: drop prior diagnostics because
+          // they described a different cohort, but retain diagnostics emitted
+          // by this rejected attempt. A valid zero-record predecessor can
+          // still carry bounded source-failure evidence.
+          await writeFreshnessMetadataSafely(
+            domain, resource, 0, opts.sourceVersion, ttlSeconds,
+            undefined, undefined,
+            Object.keys(currentSkipDiagnostics).length > 0 ? currentSkipDiagnostics : null,
+          );
           console.log(`  SKIPPED: validation failed (empty data) — seed-meta refreshed (recordCount=0), existing cache TTL extended`);
         }
       }

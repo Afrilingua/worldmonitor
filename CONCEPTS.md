@@ -40,9 +40,21 @@ The marker's value is that the grace it grants is *self-revoking on evidence* ra
 
 ### Read Outcome
 
-The three-way result a cache read is obliged to report — **hit**, **miss**, or **failure** — as against the two-way present/absent that a bare returned value can express. The distinction exists because it is observable only at the read itself: a helper that answers the same empty value for "the key genuinely holds nothing" and "the read did not complete" has destroyed the difference at its only observation point, and every caller downstream then decides on a fabricated fact.
+The three-way result a read is obliged to report — **hit**, **miss**, or **failure** — as against the two-way present/absent that a bare returned value can express. It applies to any store whose read can fail, not only a network cache: a browser-local store can be absent, present-but-unreadable, or present and empty, and a helper written to never throw collapses the first two into the third just as a network helper does. The distinction exists because it is observable only at the read itself: a helper that answers the same empty value for "the key genuinely holds nothing" and "the read did not complete" has destroyed the difference at its only observation point, and every caller downstream then decides on a fabricated fact.
 
-What makes the collapse expensive is that the two outcomes license opposite actions. A miss is a legitimate empty state — serve the computed fallback, render the empty panel, treat the day as having no records. A failure is an outage, and the correct response is almost always to abstain: skip the tick rather than publish a partial, keep the last good value rather than replace it with nothing, report the read as incomplete rather than as a finding. Collapsing them converts an outage into a confident empty answer, which then propagates as though it were data. Two properties of the cache store's REST interface make this easy to get wrong. A transport-level success status is not evidence the command ran — the store can answer a success status whose body carries a per-command error — so a reader that checks only the status and then reads the result field silently reclassifies every such rejection as a miss. And because the rejection is per command, one command in a batch can fail while its siblings succeed, so an outcome must be tracked per command rather than inferred once for the whole batch. See also: Seed-Owned Key, One-Shot Hydration.
+What makes the collapse expensive is that the two outcomes license opposite actions. A miss is a legitimate empty state — serve the computed fallback, render the empty panel, treat the day as having no records. A failure is an outage, and the correct response is almost always to abstain: skip the tick rather than publish a partial, keep the last good value rather than replace it with nothing, report the read as incomplete rather than as a finding. Collapsing them converts an outage into a confident empty answer, which then propagates as though it were data. The cost is worst when the fabricated absence flows into a WRITE rather than a display: a payload that replaces remote state wholesale drops the unreadable field as though the user had cleared it, a read-modify-write over state shared between tabs replaces a sibling's markers with an empty set, and a version or schema marker read as "never set" re-runs a one-shot operation over data that already had it applied. A read whose outcome is unknown should abstain — the caller fails closed rather than acting on a value it did not actually observe. The collapse is not confined to the read helper: a handler built over a faithful three-way read can flatten the outcome again at its own boundary (see Failure-Opaque Dependency), which is why a composing caller cannot treat an absent exception as evidence of health. In the network-cache substrate specifically, two properties of the store's REST interface make this easy to get wrong. A transport-level success status is not evidence the command ran — the store can answer a success status whose body carries a per-command error — so a reader that checks only the status and then reads the result field silently reclassifies every such rejection as a miss. And because the rejection is per command, one command in a batch can fail while its siblings succeed, so an outcome must be tracked per command rather than inferred once for the whole batch. See also: Seed-Owned Key, One-Shot Hydration, Failure-Opaque Dependency.
+
+### Failure-Opaque Dependency
+
+A handler that catches its own faults and answers them with a well-formed empty success, so that at its boundary an outage and a genuinely empty result are the same value — the Read Outcome collapse relocated one layer up, into something that reads correctly and then flattens the outcome on its way out. What distinguishes it from a careless read is that nothing is wrong *inside* it: it may consult a three-way read faithfully and still expose only two states to its callers, and the callers cannot tell, because the distinction was destroyed at a boundary they do not own and cannot inspect.
+
+The consequence is specific and easy to miss: a surface composing such a dependency cannot learn about the outage from its own error handling, because there is no error to catch. Wrapping the call in a `try` is not merely insufficient, it is unreachable for that whole class of fault, while looking exactly like diligence. Reachability must instead come from a signal *beneath* the swallowing layer — the underlying key's own read outcome, a globally-scoped query returning rows that prove the upstream answered, an explicit disabled-sentinel — and the proof differs per dependency, so there is no single mechanism to reach for. Two rules follow. A state meaning "reachable and genuinely empty" is a claim, and may be reported only when something actually proved reachability; where nothing did, the honest state is a distinct unconfirmed one, never the healthy-empty. And a freshness budget declared over a producer whose age cannot be observed is not a weak guarantee but a nonexistent one — dead configuration shaped like a promise. See also: Read Outcome, Constant Health Flag, Seed-Owned Key.
+
+### Constant Health Flag
+
+A status boolean whose definition admits states that are permanently true, so it reports trouble on every response and therefore reports nothing. It is the degenerate case of a summary flag: the moment its condition includes a structural fact — a capability this surface will never have, a dependency that can never prove itself — no realistic input makes it false, and a consumer that learns to ignore it has learned correctly.
+
+The fix is not to widen the definition but to narrow it to what can change: states a later request could plausibly clear, such as an upstream that failed or data past its freshness budget. Structural absences stay visible in the per-item detail rather than in the summary, because the summary's whole value is that it varies. This is why the flag is never the place a guarantee lives — the per-item states carry the truth, and the flag is only a shortcut for "something got worse". The design test is one question asked before shipping: what input makes this false? A flag with no such input is decoration. See also: Failure-Opaque Dependency, Read Outcome, Vacuous Guard.
 
 ### Source Tag
 
@@ -122,13 +134,19 @@ The project's rule for any panel that joins the grid asynchronously, in either t
 
 The interval between a Deferred Tier panel being constructed and its element entering the grid — routinely minutes on a phone, since the panel is built only as its shell nears the viewport while the boot data pass finished long before. Two things cross the window in opposite directions and both need somewhere to wait: data *pushed* to a panel that does not exist yet, and a render *emitted* by a panel whose element is not attached yet.
 
-The project's rule is that neither may be discarded. A push aimed at an absent panel is queued and replayed when the panel loads; a render emitted before attachment is deferred and flushed when the element joins the grid. Both failure modes read as defensive code and are silent — no error, no failed request, no telemetry — so they surface only as a panel that shows its initial placeholder for the whole session. The attachment check is the subtler of the two, because it is genuinely correct *after* attachment (a torn-down panel must not paint) and wrong *before* it; only checking ahead of the work distinguishes "never attached yet" from "detached again". See also: Deferred Tier, Deferred-Shell Contract, Viewport Prime.
+The project's rule is that neither may be discarded. A push aimed at an absent panel is queued and replayed when the panel loads; a render emitted before attachment is deferred and flushed when the element joins the grid. Both failure modes read as defensive code and are silent — no error, no failed request, no telemetry — so they surface only as a panel that shows its initial placeholder for the whole session. The attachment check is the subtler of the two, because it is genuinely correct *after* attachment (a torn-down panel must not paint) and wrong *before* it; only checking ahead of the work distinguishes "never attached yet" from "detached again". The deferral here is at attachment; the sibling deferral at the write itself is the Content Commit. See also: Deferred Tier, Deferred-Shell Contract, Viewport Prime, Content Commit.
 
 ### Viewport Prime
 
 The dashboard's demand-driven data pass: on boot, and again on every scroll and resize, it loads data for exactly the panels near the viewport, so a Deferred Tier panel receives its content only as the user approaches it. It re-runs constantly by design, which makes its safety contract the load-bearing part: the pass dedupes *concurrent* loads but does not remember *completed* ones, so every loader it can reach must be cheap to repeat — served from a real cache, or skipped outright when the panel already renders data. A loader that repeats expensively (an uncached network call, a teardown of already-rendered content) turns every scroll into user-visible churn.
 
 Refresh triggers divide into three classes that must not be conflated: input-driven passes (scroll, resize — arbitrarily frequent, carrying no information about data staleness), the staleness clock (each panel's scheduled refresh cadence), and explicit user requests (a retry affordance). Only the latter two justify refetching data a panel already shows; an input-driven pass exists to fill empty panels, never to refresh full ones. See also: Deferred Tier, Immediate Tier.
+
+### Content Commit
+
+The moment a panel's rendered markup actually lands in the document, which is later than the call that produced it: a panel's ordinary content write is coalesced through a short window so that a burst of renders lands once, and the document keeps showing the outgoing markup until the window closes. See also: Late-Mount Window, Viewport Prime, Vacuous Guard.
+
+Three rules follow from the deferral. Anything bound to the rendered rows (cached element handles, a timer that writes into them, an observer attached to them) must be registered from the commit callback the write accepts, never from the line after the render call, because a query issued at call time binds to the outgoing subtree and comes back empty. A write whose markup equals what is already committed runs its callback at once and cancels any write still queued, so a byte-identical re-render still rebinds. And the immediate paint paths (loading, error, locked states) discard a queued write together with its callback, so a stop or teardown the callback would have performed must be issued explicitly on those branches. The failure is silent by construction: an empty binding raises nothing, and the panel simply stops updating until an unrelated user gesture happens to re-render it. Only a DOM test that advances past the window before asserting can see it.
 
 ### Detached Data Sink
 
@@ -171,6 +189,12 @@ A stack frame contributed by a monkeypatched global — most often a third-party
 ### Two-Verifier Seam
 
 The Clerk bearer is checked twice on `/api/user-prefs`: first by the edge (`jose` + cached JWKS in `validateBearerToken`), then again by Convex's OIDC verifier after `client.setAuth`. A token can pass the first check and fail the second. That gap is usually remaining lifetime versus round-trip and clock skew, not JWKS/audience/issuer drift — the edge already accepted the signature. `convex_auth_drift` (WORLDMONITOR-QK) is the Sentry name for the Convex-side rejection; it is the near-expiry face of a leftover token. A token's fate at the seam has three outcomes, not two: still inside `exp` and rejected downstream lands in QK; already past `exp` but inside the edge's bounded `clockTolerance` also reaches Convex and is rejected there, but is deliberately kept out of QK by the `acceptedWithinClockTolerance` capture skip rather than by any edge 401; only a token past `exp` *and* past that tolerance is refused at the edge, which is the XR/XQ face. Because QK's boundary is a capture skip, widening the tolerance moves events out of the bucket without changing what Convex does. Event volume here is failure rate times write volume, so QK also climbs when `CLOUD_SYNC_KEYS` grows, with no auth regression at all. See also: Anonymous Session.
+
+### Resolve Pin
+
+A resolution of an error-tracking issue that is bound to a release or commit instead of issued plainly, so the issue reopens only when an event arrives in a release *newer* than the bound one. Whether a pin can ever be satisfied depends on how the emitting surface names its releases, and this project's two surfaces disagree by design. Server and edge events are stamped with the deployment that produced them, so their pins order correctly. The browser bundle deliberately holds a stable semver release and carries the build identity alongside it, so a pin naming a commit is unsatisfiable for browser events by construction. No later browser event can outrank it, and the issue reads resolved permanently while the bug keeps firing.
+
+Three rules follow, and each is a trap on its own. A pin is created by the version-control integration whenever a resolving keyword sits next to an issue's short ID in a commit message or a pull-request body, including when the text merely quotes the marker while discussing it, and including when the referencing change is never merged; backticks and code fences do not escape it, and file content is never scanned. Clearing a pin needs a status *transition* out of resolved and back, because a resolved-to-resolved write reports success and changes nothing. And a pin is identified by which binding key the resolution carries, never by the resolution metadata being non-empty, because plain and pinned resolutions both accumulate incidental metadata while archived issues carry bindings that are not pins at all. An audit built on emptiness therefore reports both false positives and false negatives, and one built on the write's own success reports repairs that never happened. See also: Vacuous Guard.
 
 ## Timestamps & Hot-Document Writes
 
@@ -228,6 +252,18 @@ A published count of a population that grows independently of the prose quoting 
 
 The rule is about *provenance*, not about numerals, and collapsing the two is the failure that follows it around. Deleting the numbers satisfies a scanner and destroys the surface's purpose when that surface exists to be quoted — an audience that cannot lift a figure cites someone else's stale one instead, so the claim survives in a worse form somewhere the project does not control. The resolution is generation: a figure derived from the authoritative registry at build time is not hand-authored, so it is exempt on the merits rather than by concession, provided a drift check actually proves the published block still matches its source. Two further obligations travel with a generated figure. It must carry the definition that produced it, because the same noun frequently names two different populations — hosts that publish feeds versus feed definitions those hosts back — and a figure quoted without its definition will be reconciled against a different surface's number and read as a contradiction. And where two surfaces legitimately publish different counts under the same word, the surface written for quoting is the one that must state both and say which is which. See also: Unreached Guard, Closed-World Gate, Ratchet Inventory.
 
+### Isolation Control vs Golden Baseline
+
+Two different proof contracts over the same output, and neither substitutes for the other. An **isolation control** computes the same output before and after a change — both sides through the same live implementation — so it proves the change did not perturb the output, while a defect inside the shared implementation moves both sides together and stays invisible. A **golden baseline** compares the live output against committed bytes captured from an accepted earlier state, so it catches any implementation change, but says nothing about which side is correct — its bytes are only as trustworthy as the review of the commit and harness that produced them.
+
+A claim that output "stayed byte-identical" must name which contract it leans on; citing the isolation control for a non-regression claim is the standard overreach, because the exact defect class that worries the reader is the one the isolation control is blind to. Regenerating a baseline is itself a methodology event, never a way to make a failing test pass. See also: Vacuous Guard, Mutation Proof.
+
+### Sample Point
+
+The moment in a subject's lifecycle at which a budget or threshold guard takes its measurement — a free variable, independent of the threshold and of the assertion, that decides which artefact the number actually constrains. Two guards can share a ceiling, a metric, and a correct assertion and still guard different things, because one samples a page before it hydrates and the other after.
+
+The sample point is the usual price paid for determinism, and paying it is not a defect — sampling earlier narrows a wildly variable measurement into a stable one. The defect is leaving the trade undeclared, because the ceiling's *name* keeps describing the artefact it was derived from while the guard quietly moves onto a different one, and the resulting slack reads as headroom rather than as lost coverage. Three rules follow. A guard must state where it samples, since a threshold is meaningless without it and no reviewer can infer it from the assertion. A sample point may only be chosen from measurements taken in the environment the guard runs in — a developer machine and CI can differ in both directions on the same tree, so a bound calibrated locally is a guess. And when the trade is taken deliberately, the region that fell outside it should still be measured and *recorded* beside the assertion rather than dropped: a diagnostic that is emitted but never asserted keeps the unguarded gap visible without letting a slow run redden the gate. Counter-intuitively the later, more meaningful sample is not always the noisier one — waiting on a real readiness signal can be steadier than sampling early at an arbitrary instant — so determinism should be measured rather than assumed when deciding. See also: Vacuous Guard, Mutation Proof, Isolation Control vs Golden Baseline.
+
 ## News Story Tracking & Trend Detection
 
 ### Feed Digest
@@ -260,6 +296,44 @@ A term — an ordinary word, a vulnerability identifier, or a threat-group desig
 
 The stretch of time a derived statistic was *actually* computed over, as distinct from the retention horizon of the store it drew from. The two diverge whenever a bounded read — a row cap, a page size, a top-N — returns fewer rows than the horizon contains, and the divergence is silent: the read succeeds, the arithmetic runs, and only the result is wrong. Any rate, baseline, or per-unit-time figure must be divided by the span its rows demonstrably cover, and a consumer-facing statistic should report that measured span rather than the horizon constant, since a caller has no other way to tell the two apart. Truncation is also biased rather than random — a newest-first read starves the historical side of a recent-versus-baseline comparison, an oldest-first read starves the recent side. See also: Story Accumulator, Keyword Spike.
 
+## Crawlable Country Pages & Brief Grounding
+
+### Recent Developments
+
+The per-country section of a prerendered country page that carries dated, sourced, country-specific items: matched headlines, a generated country brief with the sources it cites, and timeline events, all taken from one weekly frozen capture rather than fetched live. A page with no such item renders no section at all rather than a placeholder, so the section's absence is itself the record of the enrichment gap. See also: Country Mention, Brief Grounding, Enrichment Tail, Feed Digest.
+
+### Country Mention
+
+The rule that decides whether a news item is about a country: its display name or a curated alias on a word boundary in normalized text, or a demonym matched as written (case-sensitive), after phrases that belong to a neighbouring country have been scrubbed. A bare ISO alpha-2 code token never counts, save a tiny allowlist, because every two-letter code is an English word or somebody else's acronym. One definition serves every surface that grounds a brief — the prerendered pages, the dashboard and the agent tool — so the three cannot drift apart again. See also: Brief Grounding, Recent Developments.
+
+### Brief Grounding
+
+The set of headlines a country brief is generated from and may cite — the week's digest rows that name the country, topped up from the Country Article Index where the digest leaves the country short; a brief's citations index that set and nothing else. Grounding is *thin* when its headlines come from fewer distinct Publisher Families than the publish floor requires, in which case no brief is requested or published and the page keeps only the dated headlines — a multi-horizon outlook synthesised from one outlet is not published on an indexed page. The dashboard's anonymous brief instead falls back to global stories when nothing names the country; the prerendered corpus refuses that fallback. See also: Publisher Family, Country Mention, Country Article Index, Feed Digest.
+
+### Publisher Family
+
+The newsroom behind one or more feed labels — several editions or regional feeds of one outlet are a single family, and an unmapped label is its own family so no feed can silently claim to corroborate another. Every rule that speaks of "N independent sources" counts families, never labels. For the brief floor, rows published on one site are also one publisher whatever their labels say, because an index row is labelled by its domain while a digest row is labelled by its feed. See also: Brief Grounding, Country Article Index.
+
+### Country Article Index
+
+A rolling, per-country index of GDELT GKG articles the bulk materializer keeps alongside its topic products: each article is filed under the countries its location mentions name (FIPS codes mapped to ISO-2), title mentions first and then primary mentions, and an article naming many countries is filed under its primary country only. Served through the GDELT search route's `country:` query form, it is the grounding pool for the countries the week's digest never names. A location mention alone never publishes a row: the title must pass the Country Mention rule, so an index row on a country page is about that country, not merely set in it. Index rows come from whatever host GDELT crawled rather than a curated feed, so a page renders them `nofollow`, and they corroborate a brief but never ground one alone — a published brief needs at least one curated row behind it. See also: Brief Grounding, Country Mention, Enrichment Tail.
+
+### Enrichment Tail
+
+The indexed country pages that carry no dated development in a given weekly capture. Its size is a property of the grounding pool — how many countries the week's digest and the Country Article Index actually name — not of whether the enrichment ran, and it is recorded as a count in the capture's coverage rather than gated to zero, because no article pool names every country every week. A capture whose freeze attempted the index — whatever the index answered — is held to a higher coverage floor at build time than one frozen before the index existed, so a tail the size of the digest-only era cannot ship as a green build, and a gate that relaxed when the index failed would be no gate. A measured-but-lower week can still publish through an operator override on the weekly workflow rather than by editing the floor. See also: Recent Developments, Brief Grounding, Country Article Index.
+
+## Source Catalog
+
+### Catalog Provider
+
+One addressable entry in the published source inventory, identified by its own catalog key. It takes three shapes: usually a single upstream host; sometimes several hosts of one operator collapsed under one declared identity; and sometimes a publisher with no editorial host at all, grouped across the transport its feeds arrive through. It is *not* one organisation, and host count predicts provider count in neither direction — one operator's several hosts may be one entry or several, depending on whether the inventory declares a shared identity for them.
+
+The load-bearing consequence is that neither a display name nor a host can identify a provider. The same display name legitimately appears more than once, so the provider count exceeds the number of distinct names. Anything that keys on the inventory — a filter, a citation, a published enumeration of it — must key on the provider's own identifier, and anything that publishes a per-provider count is counting hosts-and-groupings rather than newsrooms. Contrast Publisher Family, which groups the *same* underlying outlets the opposite way: a family collapses every edition and regional feed of one newsroom into a single unit so that independence counts cannot be inflated. Both groupings are correct for their own purpose, and neither substitutes for the other. See also: Publisher Family, Logical Provider.
+
+### Logical Provider
+
+A Catalog Provider that has no editorial host of its own because its feeds are delivered entirely through a syndication transport. It is grouped under the publisher's name rather than under the transport's host, so the inventory credits the newsroom that wrote the content instead of the service that shipped it — without which every such publisher would collapse into a single misleading entry named for the transport. Duplicate names within this grouping are rejected upstream by the validation that admits sources to the catalog at all, which is what lets consumers treat a provider identifier as unique. See also: Catalog Provider, Publisher Family.
+
 ## Prediction Markets
 
 ### Market Pool
@@ -287,6 +361,12 @@ The load-bearing rule: credential class never determines plan family, so any rul
 ### Streamable HTTP Transport
 
 The MCP transport this server implements over HTTP: JSON-RPC 2.0 requests via `POST`, with optional Server-Sent Events when the client advertises `Accept: text/event-stream`. Its `405` on a standalone stream-open is not an error but a contract — MCP SDK clients read it as the graceful "no standalone stream" signal and complete the handshake. Anything that converts that `405` into a `200` (including a CDN replaying a cached discovery response) breaks the handshake.
+
+### Agent Discovery File
+
+One of the published plain-text or Markdown documents an assistant reads to learn what the site offers without crawling it: the short LLM briefing at `/llms.txt`, its full corpus at `/llms-full.txt`, the Markdown homepage served to agent user agents, and the AI-search answer page. They are the *content* half of agent discovery — the MCP Server Card says how to call the product; these say what it publishes.
+
+The load-bearing rule: each file is partly hand-authored and partly generated, and every generated section has exactly one producing script, which splices it into the hand-authored text at a stable anchor and can re-derive it byte-for-byte for a staleness check. A page family that only a registry knows about must be listed by that script, never typed in by hand — otherwise it is crawlable but invisible to assistants. See also: MCP Server Card, Discovery Read vs. Transport Operation.
 
 ## Structured Data & Entity Graph
 
@@ -425,6 +505,20 @@ The gate checks the state that will actually be published rather than trusting u
 A dependency advisory the security gate knowingly tolerates, recorded per-lockfile with written reasoning for why the vulnerable path is unreachable in this project — typically a build-time-only or dev-tooling chain, or a fix that is semver-major on a parent the project cannot yet move.
 
 The baseline is an exemption list, not a suppression: an advisory outside it fails the gate for every branch at once, which is why a newly published advisory blocks the whole repository until someone either patches or baselines it. Each entry carries its justification inline so a later reader can re-evaluate rather than inherit a bare allowlist, and an entry that no longer matches any live advisory is surfaced as stale so the list does not accrete dead exemptions. See also: Third-Party Rot, Acceptance Baseline.
+
+### Deploy Gate
+
+The single merge-blocking status that CI computes for a commit once the gated workflows finish, from a fixed list of check-run names. Each listed name resolves to the conclusion of its latest check run: a name no run has published holds the gate pending, a skipped conclusion counts as passing, and any other non-success fails it. A periodic sweep re-evaluates pending or stale statuses, so a status that arrived before its checks heals on its own. It is the CI counterpart of the Tiered Gate, which is a local pre-flight rather than the merge authority.
+
+Because a listed name must publish a run on every change, only a job inside a workflow that always triggers can be listed; a workflow behind a path filter publishes nothing when its paths do not match and would hold the gate forever. Conditional coverage is therefore expressed as an if-gated job, whose skip the gate accepts, and that job's change filter must name every input of the command it runs, including the manifest that defines the command. See also: Tiered Gate, Gate Contract, Advisory-Only Check.
+
+### Gate Contract
+
+The fingerprint of the Deploy Gate's required list, stamped onto every gate status it posts. Changing the list changes the stamp, so a status minted under the old list is treated as stale and re-evaluated rather than trusted: a branch approved under a narrower set cannot stay mergeable, and open branches read a newly required name as pending until they publish it. See also: Deploy Gate.
+
+### Advisory-Only Check
+
+A CI job that runs and reports on a change but is neither a branch-protection context nor a name on the Deploy Gate's required list, so a red result blocks nothing. It is the state a check falls into silently when it is moved out of a required job without being listed itself, and the reason a Wiring Guard fails the build whenever a gated workflow gains a job the required list does not name. See also: Deploy Gate, Wiring Guard, Vacuous Guard.
 
 ## Localization & First Paint
 
@@ -666,7 +760,26 @@ instead of publishing, and lost nothing.
 It must not crash the bundle: one rate-limited source firing a deploy-crash
 alert is the alert fatigue that makes the alarm worthless. Real staleness is
 caught by freshness monitoring on the published data, never by the tick's exit
-status.
+status. A seeder running as its own cron handles the same failure the same way
+but exits non-zero on purpose, so the platform's crash badge is what surfaces a
+source that has stopped answering; a bundle member's tick absorbs that exit,
+which is the difference between the two. That badge is only a signal while the
+platform will run the seeder again: a standalone seeder whose newest build has
+failed is ticking its previous Active Deployment, and there the same non-zero
+exit ends its schedule outright.
+
+Because the skip's whole alarm rests on freshness monitoring rather than on the
+exit status, extending last-good has a second obligation that is easy to miss:
+the freshness marker must be kept alive alongside the data it reports on. Only
+the marker's *value* is untouchable — advancing a success clock on a failed run
+would claim a success that never happened — while its lifetime must be extended
+with the data's. A skip that re-arms the payload every tick makes that payload's
+effective lifetime unbounded; if the marker keeps its own fixed lifetime it
+expires first, and a present payload with no marker is indistinguishable from a
+healthy one, so a sustained failure decays from warn back to green with frozen
+data behind it. The general form: whichever of the two expires first decides
+what is reported, so the reporting signal must outlive the value it reports on.
+See also: Seed-Owned Key, Content Clock.
 
 ### Starved Tick
 
@@ -695,6 +808,25 @@ sides — above the sweep's own duration, or the head expires before the tail
 lands and the marker is never written; below the refresh interval, or every row
 still reads current when the member next comes due and the sweep completes
 having fetched nothing. See also: Section Deferral, Bundle Wall Budget.
+
+## Seeder Deployment Lifecycle
+
+### Active Deployment
+
+The build a Railway cron seeder actually starts on every scheduled tick, as
+distinct from the newest deployment record, which may be a build that failed or
+a push the watch paths declined. Ticks re-run the active build and leave no
+deployment record of their own, so a seeder with narrow watch paths can run the
+same active build for days while its record list fills with declined pushes.
+
+A failed build never becomes active; the seeder keeps ticking the previous
+active build. Once that build's tick exits non-zero it is a crashed deployment,
+and behind a failed build nothing is left to schedule: no further tick runs
+until a new successful build exists, which only a push that touches the watch
+paths or an explicit rebuild from source produces. A crashed deployment that is
+itself the newest is re-run on every tick, so the same non-zero exit is noisy
+but recoverable in one state and silent and permanent in the other. See also:
+Graceful Skip, Seed-Owned Key.
 
 ## Market Data Claims
 
@@ -777,3 +909,6 @@ The comparison needs enough accumulated history to be meaningful and is suppress
 - *"Pool"* had been used for both a labelled market category and the complete set of markets — these are distinct. A pool is always a labelled subset; the complete set has no pool and must be requested as an explicit union.
 - *"Variant"* resolves differently per surface — a served host on the web, a locally stored selection on desktop. Only the web sense is addressable by URL; a desktop artifact is never variant-specific, so a variant accompanying a desktop artifact request is an identity label rather than a selector.
 - *"wingbits"* as a publication source means different things across the two Theater Posture producers — the military-flights seeder's keyed regional supplement after adsb.lol, but the relay loop's last-resort fallback. The recorded producer disambiguates which reading applies; never compare the token across producers.
+- *"Crashed"* had been used for both a build that failed and a run that exited non-zero — these are distinct. A failed build never started a container and leaves the previous Active Deployment serving; a crash is a started run that exited non-zero. Only the second is a seeder outcome; the first is a platform outcome that decides whether the seeder will ever run again.
+- *"Release"* names two unrelated things. A desktop Release Line is a publication sequence addressable by update clients. An error-tracking release is an event grouping label, and the browser and server surfaces choose it differently, which is what decides whether a Resolve Pin is satisfiable. Never reason about one from the other.
+- *"Gate"* had been used for both the local pre-push Tiered Gate and the CI Deploy Gate — these are distinct. The Tiered Gate is a cacheable pre-flight that can be scoped or escalated on one machine; only the Deploy Gate decides mergeability, and only names on its required list count toward it.

@@ -2,7 +2,7 @@
 ## Observed Source Inventory
 
 {/* BEGIN GENERATED SOURCE ATTRIBUTION */}
-This generated inventory covers **760 active source hosts** representing **747 active providers** (**331 structured/API**, **461 feed**, and **30 operational-status** hosts). It is derived from source declarations in `scripts/`, `server/`, `api/`, and `src/`. Each row shows the configured provider identity and where the source is referenced. Syndication transports such as FeedBurner and Google News remain listed as hosts and are not counted as publishers.
+This generated inventory covers **761 active source hosts** representing **748 active providers** (**332 structured/API**, **461 feed**, and **30 operational-status** hosts). It is derived from source declarations in `scripts/`, `server/`, `api/`, and `src/`. Each row shows the configured provider identity and where the source is referenced. Syndication transports such as FeedBurner and Google News remain listed as hosts and are not counted as publishers.
 
 | Provider | Observed surface |
 | --- | --- |
@@ -93,7 +93,7 @@ This generated inventory covers **760 active source hosts** representing **747 a
 | balkaninsight.com (balkaninsight.com) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | bangkokpost.com (bangkokpost.com) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | Bank of Canada (www.bankofcanada.ca) | structured — scripts/lib/boc-valet.mjs |
-| Barchart (www.barchart.com) | structured — scripts/seed-fear-greed.mjs, scripts/seed-market-breadth.mjs |
+| Barchart (www.barchart.com) | structured — scripts/seed-fear-greed.mjs |
 | basemaps.cartocdn.com (basemaps.cartocdn.com) | structured — src/config/basemap-styles.ts |
 | BBC (feeds.bbci.co.uk) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | BBC (www.bbc.com) | feed — src/config/feeds.ts |
@@ -375,7 +375,7 @@ This generated inventory covers **760 active source hosts** representing **747 a
 | lnc-abc-news.tubi.video (lnc-abc-news.tubi.video) | feed — src/components/LiveNewsPanel.ts |
 | lobste.rs (lobste.rs) | feed+structured — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts, src/config/variants/tech.ts |
 | Local development transport (localhost) | feed+structured — scripts/ais-relay.cjs, server/worldmonitor/research/v1/list-tech-events.ts, src/components/LiveNewsPanel.ts, src/services/desktop-runtime.ts, +1 more |
-| Local loopback transport (127.0.0.1) | feed+structured — src/components/LiveNewsPanel.ts, src/services/runtime.ts |
+| Local loopback transport (127.0.0.1) | feed+structured — scripts/measure-trade-animation-rebuild.mjs, scripts/profile-news-hybrid-clustering-7782-dashboard.mjs, src/components/LiveNewsPanel.ts, src/services/runtime.ts |
 | lowyinstitute.org (lowyinstitute.org) | feed — src/config/feeds.ts |
 | macleans.ca (macleans.ca) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | Mada Masr (madamasr.com) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
@@ -408,7 +408,7 @@ This generated inventory covers **760 active source hosts** representing **747 a
 | news.cgtn.com (news.cgtn.com) | feed — src/components/LiveNewsPanel.ts |
 | news.crunchbase.com (news.crunchbase.com) | feed+structured — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts, src/config/variants/tech.ts |
 | news.err.ee (news.err.ee) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
-| news.google.com (news.google.com) | feed+structured (syndication transport) — scripts/source-catalog-identity.mjs, scripts/validate-rss-feeds.mjs, server/worldmonitor/market/v1/stock-news-search.ts, server/worldmonitor/news/v1/_feeds.ts, +4 more |
+| news.google.com (news.google.com) | feed+structured (syndication transport) — scripts/source-catalog-identity.mjs, scripts/validate-rss-feeds.mjs, server/worldmonitor/intelligence/v1/_country-coverage-feeds.ts, server/worldmonitor/market/v1/stock-news-search.ts, +5 more |
 | news.mit.edu (news.mit.edu) | feed+structured — src/config/feeds.ts, src/config/variants/tech.ts |
 | news.mongabay.com (news.mongabay.com) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | news.tuoitre.vn (news.tuoitre.vn) | feed — src/config/feeds.ts |
@@ -511,7 +511,7 @@ This generated inventory covers **760 active source hosts** representing **747 a
 | Sana'a Center (sanaacenter.org) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | sanctionslistservice.ofac.treas.gov (sanctionslistservice.ofac.treas.gov) | structured — scripts/seed-sanctions-pressure.mjs |
 | SaskAlert (emergencyalert.saskatchewan.ca) | structured — scripts/lib/saskalert.mjs, scripts/source-attribution.mjs |
-| schema.org (schema.org) | structured — api/ask.ts, scripts/build-crawlable-corpus.mjs, scripts/build-use-cases.mjs |
+| schema.org (schema.org) | structured — api/ask.ts, scripts/build-crawlable-corpus.mjs, scripts/build-use-cases.mjs, scripts/crawlable-sources-page.mjs |
 | schemas.agentskills.io (schemas.agentskills.io) | structured — scripts/build-agent-skills-index.mjs |
 | scmp.com (scmp.com) | feed — server/worldmonitor/news/v1/_feeds.ts |
 | sealevel.nasa.gov (sealevel.nasa.gov) | structured — scripts/seed-climate-ocean-ice.mjs |
@@ -525,6 +525,7 @@ This generated inventory covers **760 active source hosts** representing **747 a
 | sedeaplicaciones.minetur.gob.es (sedeaplicaciones.minetur.gob.es) | structured — scripts/backfill-fuel-prices-prev.mjs, scripts/seed-fuel-prices.mjs |
 | seekingalpha.com (seekingalpha.com) | feed+structured — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts, src/config/variants/finance.ts, src/config/variants/tech.ts |
 | semianalysis.com (semianalysis.com) | feed — src/config/feeds.ts |
+| Sentry error tracking (us.sentry.io) | structured — scripts/audit-sentry-resolve-pins.mjs |
 | sequoiacap.com (sequoiacap.com) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | SerpAPI (serpapi.com) | structured — server/worldmonitor/market/v1/stock-news-search.ts |
 | services7.arcgis.com (services7.arcgis.com) | structured — scripts/fetch-mirta-bases.mjs |
@@ -610,6 +611,7 @@ This generated inventory covers **760 active source hosts** representing **747 a
 | Toronto Police Service Open Data (data.tps.ca) | structured — scripts/lib/tps-open-data.mjs |
 | Toronto Police Service Open Data (www.tps.ca) | structured — scripts/lib/tps-open-data.mjs |
 | Toronto Transit Commission (TTC) GTFS-RT (gtfsrt.ttc.ca) | structured — scripts/seed-ttc-alerts.mjs |
+| TradingView (scanner.tradingview.com) | structured — scripts/_sp500-breadth.mjs |
 | travel.state.gov (travel.state.gov) | structured — scripts/seed-security-advisories.mjs |
 | Travelpayouts flight-price data (api.travelpayouts.com) | structured — server/worldmonitor/aviation/v1/_providers/travelpayouts_data.ts |
 | treasury.gov (treasury.gov) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
@@ -667,8 +669,8 @@ This generated inventory covers **760 active source hosts** representing **747 a
 | World Bank Open Data (api.worldbank.org) | structured — scripts/_defense-industrial-source.mjs, scripts/_demographics-capability-source.mjs, scripts/ais-relay.cjs, scripts/seed-bis-lbs.mjs, +12 more |
 | World Monitor hosted API (api.worldmonitor.app) | structured — api/a2a.ts, api/internal/mcp-grant-mint.ts, api/mcp/downstream.ts, api/mcp/skill-extension/generated.ts, +20 more |
 | World Monitor proxy (proxy.worldmonitor.app) | structured — api/widget-agent.ts, scripts/seed-security-advisories.mjs, src/utils/proxy.ts |
-| World Monitor web app (worldmonitor.app) | feed+structured — api/_agent-metadata.ts, api/a2a.ts, api/ask.ts, api/fwdstart.js, +41 more |
-| World Monitor web app (www.worldmonitor.app) | structured — api/_cors.js, api/a2a.ts, api/ask.ts, api/mcp/skill-extension/generated.ts, +26 more |
+| World Monitor web app (worldmonitor.app) | feed+structured — api/_agent-metadata.ts, api/a2a.ts, api/ask.ts, api/fwdstart.js, +40 more |
+| World Monitor web app (www.worldmonitor.app) | structured — api/_cors.js, api/a2a.ts, api/ask.ts, api/mcp/skill-extension/generated.ts, +28 more |
 | WorldMonitor test origin (worldmonitor.invalid) | structured — src/shared/public-rpc-cache.ts |
 | worldmonitor.mintlify.dev (worldmonitor.mintlify.dev) | structured — api/docs-mcp.ts, src/config/docs-locale-seo.ts |
 | wublockchain.com (wublockchain.com) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
@@ -848,7 +850,7 @@ This generated inventory covers **760 active source hosts** representing **747 a
 | www.sunnyskyz.com (www.sunnyskyz.com) | feed — src/config/feeds.ts |
 | www.svd.se (www.svd.se) | feed — src/config/feeds.ts |
 | www.svt.se (www.svt.se) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
-| www.szse.cn (www.szse.cn) | structured — scripts/china-stock-connect/adapters.mjs |
+| www.szse.cn (www.szse.cn) | structured — scripts/china-corporate-disclosures/adapters.mjs, scripts/china-stock-connect/adapters.mjs |
 | www.tagesschau.de (www.tagesschau.de) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | www.tanea.gr (www.tanea.gr) | feed — server/worldmonitor/news/v1/_feeds.ts, src/config/feeds.ts |
 | www.techinasia.com (www.techinasia.com) | feed+structured — server/worldmonitor/news/v1/_feeds.ts, src/config/variants/tech.ts |

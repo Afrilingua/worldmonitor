@@ -2,6 +2,7 @@ import './styles/main.css';
 import './styles/settings-window.css';
 import { SettingsManager } from '@/services/settings-manager';
 import { exportSettings, importSettings, type ImportResult } from '@/utils/settings-persistence';
+import { safeStorageGet, safeStorageRemove, safeStorageSet } from '@/utils/safe-storage';
 import {
   SETTINGS_CATEGORIES,
   HUMAN_LABELS,
@@ -630,6 +631,12 @@ function renderDebug(area: HTMLElement): void {
   });
 
   area.querySelector('#exportSettingsBtn')?.addEventListener('click', () => {
+    // NOTE: exportSettings throws when storage is unreadable, and this handler
+    // does not catch — same as before #7833. The user-visible fix landed on the
+    // dashboard surface (preferences-content.ts), which already shows
+    // `exportFailed`. Reporting it here needs `components.settings.exportFailed`
+    // in en.shell.json, and that file has ~128 bytes of first-paint budget left
+    // (tests/i18n-english-shell.test.mjs) — not worth spending on an error path.
     exportSettings();
   });
 
@@ -675,9 +682,9 @@ function initDiagnostics(): void {
   const trafficCount = document.getElementById('trafficCount');
 
   if (fetchDebugToggle) {
-    fetchDebugToggle.checked = localStorage.getItem('wm-debug-log') === '1';
+    fetchDebugToggle.checked = safeStorageGet('wm-debug-log') === '1';
     fetchDebugToggle.addEventListener('change', () => {
-      localStorage.setItem('wm-debug-log', fetchDebugToggle.checked ? '1' : '0');
+      safeStorageSet('wm-debug-log', fetchDebugToggle.checked ? '1' : '0');
     });
   }
 
@@ -953,7 +960,7 @@ async function initSettingsWindow(): Promise<void> {
   });
 }
 
-localStorage.setItem('wm-settings-open', '1');
-window.addEventListener('beforeunload', () => localStorage.removeItem('wm-settings-open'));
+safeStorageSet('wm-settings-open', '1');
+window.addEventListener('beforeunload', () => safeStorageRemove('wm-settings-open'));
 
 void initSettingsWindow();

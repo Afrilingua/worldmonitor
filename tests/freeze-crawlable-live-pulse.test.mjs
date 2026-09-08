@@ -7,7 +7,7 @@ import { afterEach, describe, it } from 'node:test';
 import {
   authedGet,
   buildBriefContext,
-  countryDisplayName,
+  COUNTRY_DIGEST_VARIANTS,
   freezeCrawlableLivePulse,
   minimumBriefCaptures,
   mintSession,
@@ -16,6 +16,12 @@ import {
   timelineRecord,
   selectCountryHeadlines,
 } from '../scripts/freeze-crawlable-live-pulse.mjs';
+import {
+  COUNTRY_INDEX_MAX_AGE_MS,
+  selectCountryIndexHeadlines,
+} from '../scripts/crawlable-country-index.mjs';
+import { GDELT_COUNTRY_INDEX_WINDOW_MS } from '../scripts/_gdelt-bulk-materializer.mjs';
+import { COUNTRY_INDEX_ORIGIN, developmentsHasDatedItem } from '../scripts/crawlable-developments.mjs';
 
 describe('freeze crawlable live pulse API base routing', () => {
   const originalFetch = globalThis.fetch;
@@ -184,17 +190,35 @@ function countryPayload() {
       digestItem({ title: 'Headline five', importanceScore: 50 }),
     ],
     digestCoverage = { state: 'complete', servedStale: false },
+    // Per-variant digest items; variants absent here serve `digestItems`.
+    digestItemsByVariant = null,
+    // Variants whose fetch fails with a 503.
+    digestFailVariants = [],
     briefStatus = 'ok',
     briefOverrides = {},
     briefFailCodes = [],
     timelineStatus = 'ok',
     timelineSourceUrl = 'https://example.test/port-call',
+    // Per-country index (#7748): articles served for `country:<code>`
+    // queries, keyed by code; countries absent here serve an empty list.
+    // `countryIndexStatus` is 'ok' | 'seed-unavailable' | 'fail';
+    // `countryIndexFailCodes` 503 individual countries;
+    // `countryIndexErrorCodes` answers a route error string for a country
+    // ({ BT: 'revocations-unavailable' }); `countryIndexServeFirst` serves
+    // that many requests and answers seed-unavailable afterwards (an index
+    // key expiring mid-run).
+    countryArticles = {},
+    countryIndexStatus = 'ok',
+    countryIndexFailCodes = [],
+    countryIndexErrorCodes = {},
+    countryIndexServeFirst = Infinity,
     onRequest = null,
     marketSymbols = ['^GSPC', '^IXIC', '^VIX'],
     commoditySymbols = ['CL=F', 'BZ=F', 'GC=F', 'HG=F', 'NG=F', 'EURUSD=X', 'USDJPY=X'],
     cryptoSymbols = ['BTC', 'ETH'],
   } = {}) {
     let countriesServed = 0;
+    let indexServed = 0;
     globalThis.fetch = async (url, options = {}) => {
       const href = String(url);
       onRequest?.(href, options);
@@ -219,10 +243,32 @@ function countryPayload() {
       if (href.includes('get-humanitarian-summary')) {
         return jsonResponse(humanitarianPayload(new URL(href).searchParams.get('country_code')));
       }
-      if (href.includes('list-feed-digest')) return jsonResponse(digestPayload(digestItems, digestCoverage));
+      if (href.includes('list-feed-digest')) {
+        const variant = new URL(href).searchParams.get('variant') || 'full';
+        if (digestFailVariants.includes(variant)) return { ok: false, status: 503, text: async () => '{}' };
+        const items = digestItemsByVariant && Object.hasOwn(digestItemsByVariant, variant)
+          ? digestItemsByVariant[variant]
+          : digestItems;
+        return jsonResponse(digestPayload(items, digestCoverage));
+      }
       if (href.includes('list-market-quotes')) return jsonResponse(quotePayload(marketSymbols));
       if (href.includes('list-commodity-quotes')) return jsonResponse(quotePayload(commoditySymbols));
       if (href.includes('list-crypto-quotes')) return jsonResponse(quotePayload(cryptoSymbols));
+      if (href.includes('search-gdelt-documents')) {
+        const query = new URL(href).searchParams.get('query') || '';
+        const code = query.replace(/^country:/, '');
+        if (countryIndexStatus === 'fail' || countryIndexFailCodes.includes(code)) {
+          return { ok: false, status: 503, text: async () => '{}' };
+        }
+        if (countryIndexStatus === 'seed-unavailable' || indexServed >= countryIndexServeFirst) {
+          return jsonResponse({ articles: [], query, error: 'seed-unavailable' });
+        }
+        if (countryIndexErrorCodes[code]) {
+          return jsonResponse({ articles: [], query, error: countryIndexErrorCodes[code] });
+        }
+        indexServed += 1;
+        return jsonResponse({ articles: countryArticles[code] || [], query, error: '' });
+      }
       if (href.includes('get-country-intel-brief')) {
         if (briefStatus === 'fail') return { ok: false, status: 503, text: async () => '{}' };
         const code = new URL(href).searchParams.get('country_code');
@@ -231,19 +277,21 @@ function countryPayload() {
           return jsonResponse({ countryCode: code, countryName: code, brief: '', model: '', generatedAt: Date.now(), sources: [] });
         }
         const context = new URL(href).searchParams.get('context') || '';
-        const firstSourceLine = context.match(/^Source \[1\]: (.+)$/m);
-        const firstSource = firstSourceLine ? JSON.parse(firstSourceLine[1]) : null;
+        // Echo every grounding source the freeze sent, like the server does:
+        // a brief off fewer than MIN_BRIEF_GROUNDING_SOURCES is withheld.
+        const contextSources = [...context.matchAll(/^Source \[\d+\]: (.+)$/gm)]
+          .map((match) => JSON.parse(match[1]));
         const override = briefOverrides[code] || {};
         const sources = Object.hasOwn(override, 'sources')
           ? override.sources
-          : firstSource ? [{
-            ...firstSource,
-            url: override.sourceUrl || firstSource.url,
-          }] : [];
+          : contextSources.map((source, index) => ({
+            ...source,
+            url: index === 0 && override.sourceUrl ? override.sourceUrl : source.url,
+          }));
         return jsonResponse({
           countryCode: code,
           countryName: code,
-          brief: override.brief || 'SITUATION NOW\nCalm seas and steady traffic [1].',
+          brief: override.brief || `SITUATION NOW\n${contextSources[0]?.title || 'No report'} [1].`,
           model: 'test-model',
           generatedAt: Object.hasOwn(override, 'generatedAt') ? override.generatedAt : Date.now(),
           sources,
@@ -595,13 +643,6 @@ describe('freeze per-country developments selection', () => {
     };
   }
 
-  it('resolves display names for matching and rejects unknown codes', () => {
-    assert.equal(countryDisplayName('NO'), 'Norway');
-    assert.equal(countryDisplayName('no'), 'Norway');
-    assert.equal(countryDisplayName('XX'), '');
-    assert.equal(countryDisplayName(''), '');
-  });
-
   it('matches display names on word boundaries in title and snippet', () => {
     const items = [
       countryItem('Norway opens new arctic port'),
@@ -695,6 +736,17 @@ describe('freeze per-country developments capture', () => {
         publishedAt: Date.now() - 3600_000,
         importanceScore: 80,
       },
+      // A second Sudan row from a second publisher: briefs need
+      // MIN_BRIEF_GROUNDING_PUBLISHERS distinct outlets (#7748). Matched by
+      // demonym, which the old name-or-code matcher never saw.
+      {
+        title: 'Sudanese negotiators return to Jeddah',
+        source: 'Test Wire',
+        link: 'https://example.test/sudan-jeddah',
+        snippet: '',
+        publishedAt: Date.now() - 4000_000,
+        importanceScore: 70,
+      },
       {
         title: 'Norway opens new arctic port',
         source: 'Test Wire',
@@ -702,6 +754,16 @@ describe('freeze per-country developments capture', () => {
         snippet: '',
         publishedAt: Date.now() - 7200_000,
         importanceScore: 40,
+      },
+      // A second Norway publisher on its own host: rows on one site are one
+      // publisher for the brief floor (#7748).
+      {
+        title: 'Oslo fund trims holdings',
+        source: 'Nordic Wire',
+        link: 'https://nordic.test/norway-fund',
+        snippet: 'Norway wealth fund rebalances.',
+        publishedAt: Date.now() - 7300_000,
+        importanceScore: 35,
       },
       // Filler to clear the four-global-headlines gate; country-neutral.
       {
@@ -758,7 +820,7 @@ describe('freeze per-country developments capture', () => {
     assert.ok(!requested.some((href) => href.includes('get-intel-timeline')));
     assert.equal(snapshot.coverage.serviceKeyPresent, false);
     const sudan = snapshot.countries.SD.developments;
-    assert.equal(sudan.headlines.length, 1);
+    assert.equal(sudan.headlines.length, 2);
     assert.equal(sudan.headlines[0].source, 'UN News');
     assert.equal(sudan.brief, null);
     assert.equal(sudan.briefSkipped, 'no-service-key');
@@ -767,6 +829,10 @@ describe('freeze per-country developments capture', () => {
     // A country with no digest match still gets a uniform developments shape.
     assert.deepEqual(snapshot.countries.BT.developments.headlines, []);
     assert.equal(snapshot.coverage.headlineCountryCount >= 2, true);
+    // The enrichment tail is a number in the artifact, never an absence
+    // (#7748): without a key only the headline-matched countries are enriched.
+    assert.equal(snapshot.coverage.developmentsCountryCount, 2);
+    assert.equal(snapshot.coverage.developmentsMissingCount, snapshot.coverage.countryCount - 2);
   });
 
   it('captures briefs and timelines with a key, grounding the brief call', async () => {
@@ -775,10 +841,10 @@ describe('freeze per-country developments capture', () => {
     const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
     assert.equal(snapshot.coverage.serviceKeyPresent, true);
     const sudan = snapshot.countries.SD.developments;
-    assert.equal(sudan.headlines.length, 1);
+    assert.equal(sudan.headlines.length, 2);
     assert.equal(sudan.briefSkipped, null);
     assert.ok(sudan.brief.text.includes('SITUATION NOW'));
-    assert.equal(sudan.brief.sources.length, 1);
+    assert.equal(sudan.brief.sources.length, 2);
     assert.equal(sudan.timeline.length, 1);
     assert.equal(sudan.timelineStatus, 'available');
     assert.ok(sudan.timeline[0].occurredAt);
@@ -804,6 +870,492 @@ describe('freeze per-country developments capture', () => {
     const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
     assert.equal(snapshot.countries.BT.developments.brief, null);
     assert.equal(snapshot.countries.BT.developments.briefSkipped, 'no-grounding');
+  });
+
+  it('keeps the headlines but skips the brief on a single publisher', async () => {
+    // Bhutan and Nauru shipped 24/48/72h forecasts off one article (#7748
+    // item 3), and Egypt's cleared a raw source count on three articles from
+    // one newsroom. Two headlines from one outlet are dated developments;
+    // they are not a brief.
+    const requested = [];
+    stubFetch({
+      digestItems: [
+        ...countryDigestItems(),
+        {
+          title: 'Bhutan hydropower export deal signed',
+          source: 'Test Wire',
+          link: 'https://example.test/bhutan-hydro',
+          snippet: '',
+          publishedAt: Date.now() - 3600_000,
+          importanceScore: 60,
+        },
+        {
+          title: 'Bhutan tightens monetary policy',
+          source: 'Test Wire',
+          link: 'https://example.test/bhutan-rates',
+          snippet: '',
+          publishedAt: Date.now() - 3700_000,
+          importanceScore: 55,
+        },
+      ],
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const bhutan = snapshot.countries.BT.developments;
+    assert.equal(bhutan.headlines.length, 2);
+    assert.equal(bhutan.brief, null);
+    assert.equal(bhutan.briefSkipped, 'thin-grounding');
+    assert.ok(!requested.some((href) => href.includes('get-country-intel-brief?country_code=BT')),
+      'no LLM call is spent on a brief that would be withheld');
+    assert.equal(snapshot.coverage.briefThinGroundingCount, 1);
+    assert.equal(snapshot.coverage.briefMatchedCount, 2, 'only the two-headline countries are owed a brief');
+    // The stub timeline serves every country, so a keyed run has no tail.
+    assert.equal(snapshot.coverage.developmentsMissingCount, 0);
+    assert.equal(
+      snapshot.coverage.developmentsCountryCount + snapshot.coverage.developmentsMissingCount,
+      snapshot.coverage.countryCount,
+    );
+  });
+
+  // GDELT compact seendate for an instant `ageMs` before now.
+  function seenDate(ageMs) {
+    const digits = new Date(Date.now() - ageMs).toISOString().replace(/\D/g, '').slice(0, 14);
+    return `${digits.slice(0, 8)}T${digits.slice(8)}Z`;
+  }
+
+  function indexArticle(title, url, source, ageMs = 3600_000) {
+    return { title, url, source, date: seenDate(ageMs), image: '', language: 'English', tone: 0.5 };
+  }
+
+  // What the search route serves for `country:PW`: two publishable rows and
+  // four the freeze must refuse even though the route served them.
+  function palauIndexArticles() {
+    return [
+      indexArticle('Palau signs maritime surveillance pact', 'https://islandtimes.example/palau-pact', 'islandtimes.example'),
+      indexArticle('Palauan senate passes budget', 'https://www.rnz.co.nz/news/pacific/palau-budget', 'rnz.co.nz', 7200_000),
+      // Indexed by a Koror location mention; the title never names Palau.
+      indexArticle('Pacific leaders gather for climate summit', 'https://example.test/roundup', 'example.test', 1000),
+      // Older than the timeline window: not "recent".
+      indexArticle('Palau marks independence day', 'https://islandtimes.example/old', 'islandtimes.example', 20 * 86_400_000),
+      // Not https.
+      indexArticle('Palau ferry schedule changes', 'http://islandtimes.example/ferry', 'islandtimes.example', 5000),
+      // An aggregator redirect carries no masthead a reader can verify.
+      indexArticle('Palau tourism rebounds', 'https://news.google.com/rss/articles/abc', 'news.google.com', 6000),
+    ];
+  }
+
+  it('tops up a country the digest never names from the per-country index: dated headlines, no brief', async () => {
+    const requested = [];
+    stubFetch({
+      digestItems: countryDigestItems(),
+      countryArticles: { PW: palauIndexArticles() },
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const palau = snapshot.countries.PW.developments;
+    assert.deepEqual(palau.headlines.map((row) => row.url), [
+      'https://islandtimes.example/palau-pact',
+      'https://www.rnz.co.nz/news/pacific/palau-budget',
+    ], 'only title-named, recent, https, non-aggregator rows are frozen');
+    assert.equal(palau.headlines[0].source, 'islandtimes.example');
+    assert.equal(palau.headlines[0].origin, COUNTRY_INDEX_ORIGIN, 'an index row carries its provenance');
+    assert.match(palau.headlines[0].publishedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/, 'the compact seendate is frozen as an ISO instant');
+    // Two open-web hosts are two publishers, but neither is a curated feed:
+    // index rows corroborate a brief, they never ground one alone, so no
+    // LLM call is spent and the page keeps its dated headlines.
+    assert.equal(palau.brief, null);
+    assert.equal(palau.briefSkipped, 'uncurated-grounding');
+    assert.ok(!requested.some((href) => href.includes('get-country-intel-brief?country_code=PW')));
+    assert.ok(requested.some((href) => href.endsWith('/api/intelligence/v1/search-gdelt-documents?query=country%3APW&max_records=12')));
+    assert.equal(snapshot.coverage.developmentsCountryIndex.state, 'available');
+    assert.equal(snapshot.coverage.developmentsCountryIndex.countryCount, 1);
+    assert.ok(snapshot.coverage.developmentsCountryIndex.requestCount >= snapshot.coverage.countryCount - 2,
+      'every country the digest leaves short is asked');
+    assert.equal(snapshot.coverage.developmentsCountryIndex.errorCount, 0);
+    assert.equal(snapshot.coverage.briefUncuratedGroundingCount, 1);
+    assert.equal(snapshot.coverage.headlineCountryCount, 3);
+    assert.ok(developmentsHasDatedItem(palau), 'the page still carries a dated, sourced item');
+  });
+
+  it('lets an index row corroborate a single curated row into a brief, and stamps the cited source', async () => {
+    const requested = [];
+    stubFetch({
+      digestItems: [
+        ...countryDigestItems(),
+        {
+          title: 'Bhutan hydropower export deal signed',
+          source: 'Test Wire',
+          link: 'https://example.test/bhutan-hydro',
+          snippet: '',
+          publishedAt: Date.now() - 3600_000,
+          importanceScore: 60,
+        },
+      ],
+      countryArticles: {
+        BT: [indexArticle('Bhutan tightens monetary policy', 'https://kuenselonline.example/rates', 'kuenselonline.example')],
+      },
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const bhutan = snapshot.countries.BT.developments;
+    assert.deepEqual(bhutan.headlines.map((row) => row.source), ['Test Wire', 'kuenselonline.example']);
+    assert.equal(bhutan.briefSkipped, null);
+    assert.ok(bhutan.brief, 'one curated feed plus one index row is two publishers with a curated anchor');
+    assert.ok(requested.some((href) => href.includes('get-country-intel-brief?country_code=BT')));
+    // The server echoes Source lines without provenance; the freeze restores
+    // it by URL so the corpus's publish-time floor sees the same split.
+    const cited = bhutan.brief.sources.find((source) => source.url === 'https://kuenselonline.example/rates');
+    assert.equal(cited.origin, COUNTRY_INDEX_ORIGIN);
+    assert.equal(bhutan.brief.sources.find((source) => source.url === 'https://example.test/bhutan-hydro').origin, undefined);
+  });
+
+  it('keeps digest rows ahead of index rows and never asks for a country already at the limit', async () => {
+    const requested = [];
+    const norwayFill = Array.from({ length: 3 }, (_, index) => ({
+      title: `Norway update ${index}`,
+      source: `Fjord Wire ${index}`,
+      link: `https://fjord${index}.test/${index}`,
+      snippet: '',
+      publishedAt: Date.now() - 1000 * (index + 1),
+      importanceScore: 60,
+    }));
+    stubFetch({
+      digestItems: [...countryDigestItems(), ...norwayFill],
+      countryArticles: {
+        SD: [
+          indexArticle('Sudan ceasefire monitors deploy', 'https://www.dabangasudan.org/monitors', 'dabangasudan.org'),
+          // The same URL the digest already froze: counted once.
+          indexArticle('Sudan aid convoy reaches Darfur amid talks', 'https://news.un.org/feed/view/en/story/2026/09/1168270', 'news.un.org'),
+          indexArticle('Sudanese pound steadies', 'https://sudantribune.example/pound', 'sudantribune.example', 4000),
+          indexArticle('Sudan grain imports resume', 'https://radiotamazuj.example/grain', 'radiotamazuj.example', 5000),
+          indexArticle('Sudan cholera response scales up', 'https://who.example/cholera', 'who.example', 6000),
+          indexArticle('Sudan port traffic recovers', 'https://portsudan.example/traffic', 'portsudan.example', 7000),
+        ],
+        NO: [indexArticle('Norway index row', 'https://nordic.test/index-row', 'nordic.test')],
+      },
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const sudan = snapshot.countries.SD.developments.headlines;
+    // Two digest rows leave three slots; five publishable index rows are
+    // offered, so the cap must truncate rather than be a no-op.
+    assert.equal(sudan.length, 5);
+    assert.deepEqual(sudan.slice(0, 3).map((row) => row.source), ['UN News', 'Test Wire', 'dabangasudan.org']);
+    assert.ok(!sudan.some((row) => row.url === 'https://portsudan.example/traffic'), 'the sixth candidate does not fit');
+    assert.equal(snapshot.countries.NO.developments.headlines.length, 5);
+    assert.ok(!requested.some((href) => href.includes('query=country%3ANO')), 'five digest rows leave no slot to fill');
+    assert.ok(!snapshot.countries.NO.developments.headlines.some((row) => row.url === 'https://nordic.test/index-row'));
+    assert.ok(requested.some((href) => href.includes('query=country%3ASD')));
+  });
+
+  it('records an unseeded index once and keeps freezing on digest rows', async () => {
+    const requested = [];
+    stubFetch({
+      digestItems: countryDigestItems(),
+      countryIndexStatus: 'seed-unavailable',
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.equal(requested.filter((href) => href.includes('search-gdelt-documents')).length, 1,
+      'one seed-unavailable answer settles it for every country');
+    assert.equal(snapshot.coverage.developmentsCountryIndex.state, 'unavailable');
+    assert.equal(snapshot.coverage.developmentsCountryIndex.countryCount, 0);
+    const entries = snapshot.errors.developments.filter((entry) => entry.stage === 'country-index');
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].code, '*');
+    assert.ok(snapshot.countries.SD.developments.brief, 'digest-grounded briefs are unaffected');
+    assert.deepEqual(snapshot.countries.PW.developments.headlines, []);
+    assert.equal(snapshot.countries.PW.developments.briefSkipped, 'no-grounding');
+  });
+
+  it('records a per-country index failure, continues, and never names it as the brief gate cause', async () => {
+    stubFetch({
+      digestItems: countryDigestItems(),
+      countryArticles: { PW: palauIndexArticles() },
+      countryIndexFailCodes: ['BT'],
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.equal(snapshot.coverage.developmentsCountryIndex.state, 'available');
+    assert.equal(snapshot.coverage.developmentsCountryIndex.errorCount, 1);
+    assert.ok(snapshot.errors.developments.some((entry) => (
+      entry.code === 'BT' && entry.stage === 'country-index' && /HTTP 503/.test(entry.message)
+    )));
+    assert.deepEqual(snapshot.countries.BT.developments.headlines, []);
+    assert.equal(snapshot.countries.PW.developments.headlines.length, 2, 'other countries still top up');
+    // A brief collapse is blamed on the brief, never on the top-up hiccup.
+    stubFetch({ digestItems: countryDigestItems(), countryIndexFailCodes: ['BT'], briefStatus: 'fail' });
+    await assert.rejects(
+      runFreeze({ serviceKey: 'test-key' }),
+      (error) => /captured briefs for 0 of 2/.test(error.message) && !/search-gdelt-documents/.test(error.message),
+    );
+  });
+
+  it('treats a transient route error as that country\'s error, not a run-wide condition', async () => {
+    // One Redis blip on the revocation set (or the index read) answers one
+    // request; the next country must still be asked, or a single hiccup
+    // reverts the week's tail to digest-only (review of #7748).
+    const requested = [];
+    stubFetch({
+      digestItems: countryDigestItems(),
+      countryArticles: { PW: palauIndexArticles() },
+      countryIndexErrorCodes: { AD: 'revocations-unavailable', BT: 'index-read-failed' },
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.equal(snapshot.coverage.developmentsCountryIndex.state, 'available');
+    assert.equal(snapshot.coverage.developmentsCountryIndex.errorCount, 2);
+    assert.equal(snapshot.coverage.developmentsCountryIndex.unavailableCount, 0);
+    assert.ok(snapshot.coverage.developmentsCountryIndex.requestCount > 100, 'the loop kept asking after the blips');
+    assert.equal(snapshot.countries.PW.developments.headlines.length, 2);
+    const entries = snapshot.errors.developments.filter((entry) => entry.stage === 'country-index');
+    assert.deepEqual(entries.map((entry) => entry.code).sort(), ['AD', 'BT']);
+    assert.ok(entries.every((entry) => /answered (revocations-unavailable|index-read-failed)/.test(entry.message)));
+    assert.ok(!entries.some((entry) => entry.code === '*'));
+  });
+
+  it('records an index that expires mid-run as partial and stops asking', async () => {
+    const requested = [];
+    stubFetch({
+      digestItems: countryDigestItems(),
+      countryArticles: { PW: palauIndexArticles() },
+      countryIndexServeFirst: 3,
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.equal(snapshot.coverage.developmentsCountryIndex.state, 'partial');
+    assert.equal(snapshot.coverage.developmentsCountryIndex.servedCount, 3);
+    assert.equal(snapshot.coverage.developmentsCountryIndex.unavailableCount, 1);
+    assert.equal(requested.filter((href) => href.includes('search-gdelt-documents')).length, 4,
+      'three served, one seed-unavailable, then the run is settled');
+    assert.equal(snapshot.errors.developments.filter((entry) => entry.stage === 'country-index').length, 1);
+  });
+
+  it('keeps the freeze window at least as wide as the materializer index window', () => {
+    // A row the index still holds must not be refused here as too old; the
+    // two constants live in different modules, so pin them together.
+    assert.ok(COUNTRY_INDEX_MAX_AGE_MS >= GDELT_COUNTRY_INDEX_WINDOW_MS);
+  });
+
+  it('tops up the tail without a key, since the index route is anonymous', async () => {
+    const requested = [];
+    stubFetch({
+      digestItems: countryDigestItems(),
+      countryArticles: { PW: palauIndexArticles() },
+      onRequest: (href, options) => requested.push({ href, options }),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: '' });
+    const palau = snapshot.countries.PW.developments;
+    assert.equal(palau.headlines.length, 2);
+    assert.equal(palau.brief, null);
+    assert.equal(palau.briefSkipped, 'no-service-key');
+    const call = requested.find(({ href }) => href.includes('query=country%3APW'));
+    assert.ok(call.options.headers?.Cookie?.startsWith('wm-session='), 'the minted session carries the index request');
+    assert.equal(snapshot.coverage.developmentsCountryCount, 3);
+  });
+
+  it('selects index rows by the same bar the page enforces', () => {
+    const now = Date.now();
+    const rows = selectCountryIndexHeadlines([
+      ...palauIndexArticles(),
+      indexArticle('Palau **breaking** news', 'https://islandtimes.example/bold', 'islandtimes.example'),
+      indexArticle('Palau signs maritime surveillance pact', 'https://islandtimes.example/palau-pact', 'islandtimes.example'),
+      { title: 'Palau undated', url: 'https://islandtimes.example/undated', source: 'islandtimes.example', date: '' },
+      { title: 'Palau unlabelled', url: 'https://islandtimes.example/unlabelled', source: '', date: seenDate(1000) },
+      { title: 'Palau from the future', url: 'https://islandtimes.example/future', source: 'islandtimes.example', date: seenDate(-3 * 3600_000) },
+    ], 'pw', now);
+    assert.deepEqual(rows.map((row) => row.url), [
+      'https://islandtimes.example/palau-pact',
+      'https://www.rnz.co.nz/news/pacific/palau-budget',
+    ]);
+    assert.ok(rows.every((row) => row.origin === COUNTRY_INDEX_ORIGIN));
+    assert.deepEqual(selectCountryIndexHeadlines(null, 'PW'), []);
+    assert.deepEqual(selectCountryIndexHeadlines([], 'PWX'), []);
+  });
+
+  it('pools every digest variant for country matching and de-duplicates by URL', async () => {
+    const requested = [];
+    const [sudanLead] = countryDigestItems();
+    stubFetch({
+      digestItemsByVariant: {
+        full: countryDigestItems(),
+        // The same Sudan article again under tech, plus a country `full`
+        // never mentions: pooled, Bhutan gets its rows; Sudan keeps two.
+        tech: [
+          { ...sudanLead, title: 'Sudan aid convoy reaches Darfur (syndicated)' },
+          {
+            title: 'Bhutan hydropower export deal signed',
+            source: 'Test Wire',
+            link: 'https://example.test/bhutan-hydro',
+            snippet: '',
+            publishedAt: Date.now() - 3600_000,
+            importanceScore: 60,
+          },
+          {
+            title: 'Thimphu bank raises rates',
+            source: 'Himalayan Wire',
+            link: 'https://himalayan.test/bhutan-rates',
+            snippet: 'Bhutan tightens policy.',
+            publishedAt: Date.now() - 3700_000,
+            importanceScore: 55,
+          },
+        ],
+      },
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    for (const variant of COUNTRY_DIGEST_VARIANTS) {
+      assert.ok(requested.some((href) => href.includes(`list-feed-digest?variant=${variant}&lang=en`)),
+        `the ${variant} digest must be fetched`);
+    }
+    assert.equal(snapshot.countries.SD.developments.headlines.length, 2, 'a syndicated duplicate URL counts once');
+    assert.equal(snapshot.countries.SD.developments.headlines[0].title, 'Sudan aid convoy reaches Darfur amid talks',
+      'the `full` row wins the URL tie');
+    assert.equal(snapshot.countries.BT.developments.headlines.length, 2);
+    assert.equal(snapshot.countries.BT.developments.briefSkipped, null);
+    assert.ok(snapshot.countries.BT.developments.brief, 'a country grounded only by a sibling variant still gets its brief');
+    assert.deepEqual(Object.keys(snapshot.coverage.developmentsDigestVariants).sort(), [...COUNTRY_DIGEST_VARIANTS].sort());
+    assert.equal(snapshot.coverage.developmentsDigestVariants.full, 'complete');
+    // The homepage strip still reads `full` alone.
+    assert.ok(!snapshot.headlines.some((row) => row.url === 'https://example.test/bhutan-hydro'));
+  });
+
+  it('freezes the brief in publish form: no markdown, no preamble, the country name in the heading', async () => {
+    stubFetch({
+      digestItems: countryDigestItems(),
+      briefOverrides: {
+        SD: {
+          brief: [
+            '**INTELLIGENCE BRIEF: SD (SUDAN)**',
+            '**CLASSIFICATION:** CONFIDENTIAL',
+            '',
+            '**SITUATION NOW**',
+            'Sudan aid convoys move under escort [1].',
+            '',
+            'WHAT THIS MEANS FOR SD',
+            '• **Jeddah**: could host further talks [2].',
+          ].join('\n'),
+        },
+      },
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    const text = snapshot.countries.SD.developments.brief.text;
+    assert.ok(text.startsWith('SITUATION NOW\n'), `preamble must not be frozen, got: ${text.slice(0, 40)}`);
+    assert.ok(!text.includes('**'));
+    assert.ok(!text.includes('CONFIDENTIAL'));
+    // The coded heading is the corpus build's to repair with the page's own
+    // display name; the freeze has no source for "DR Congo"-style names.
+    assert.ok(text.includes('WHAT THIS MEANS FOR SD'));
+    assert.ok(text.includes('• Jeddah: could host further talks [2].'));
+  });
+
+  it('withholds unsupported citations without discarding the dated pulse capture (#7865)', async () => {
+    stubFetch({
+      digestItems: countryDigestItems(),
+      briefOverrides: {
+        SD: { brief: 'SITUATION NOW\nCerrejón faces disruption [1].' },
+        NO: { brief: 'SITUATION NOW\nEl Guri faces disruption [1].' },
+      },
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.equal(snapshot.coverage.briefMatchedCount, 2);
+    assert.equal(snapshot.coverage.briefCountryCount, 0);
+    assert.equal(snapshot.coverage.briefUnsupportedCitationCount, 2);
+    for (const code of ['SD', 'NO']) {
+      const row = snapshot.countries[code].developments;
+      assert.equal(row.brief, null);
+      assert.equal(row.briefSkipped, 'unsupported-citation');
+      assert.ok(row.headlines.length > 0);
+      assert.ok(snapshot.errors.developments.some((error) => error.code === code
+        && /source \[1\] does not ground/.test(error.message)));
+    }
+  });
+
+  it('records a failed sibling digest variant as a state and keeps the strip and the gate intact', async () => {
+    const requested = [];
+    stubFetch({
+      digestItemsByVariant: { full: countryDigestItems() },
+      digestFailVariants: ['tech'],
+      onRequest: (href) => requested.push(href),
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.equal(snapshot.coverage.developmentsDigestVariants.tech, 'error');
+    assert.equal(snapshot.coverage.developmentsDigestVariants.full, 'complete');
+    assert.equal(snapshot.coverage.headlineErrorCount, 0, 'the strip reads `full` only');
+    assert.equal(snapshot.headlines.length, 4);
+    assert.ok(snapshot.errors.developments.some((entry) => entry.stage === 'digest' && entry.message.startsWith('tech:')));
+    // Country rows still come from the surviving variants and briefs still capture.
+    assert.equal(snapshot.countries.SD.developments.headlines.length, 2);
+    assert.ok(snapshot.countries.SD.developments.brief);
+    // The variant error sits after the per-country errors so a brief collapse
+    // is blamed on the brief, never on the sibling hiccup.
+    stubFetch({ digestItemsByVariant: { full: countryDigestItems() }, digestFailVariants: ['tech'], briefStatus: 'fail' });
+    await assert.rejects(
+      runFreeze({ serviceKey: 'test-key' }),
+      (error) => /captured briefs for 0 of 2/.test(error.message) && !/tech:/.test(error.message),
+      'the thrown cause must be the brief failure, not the digest variant',
+    );
+  });
+
+  it('empties the strip but keeps the country pool when only `full` fails', async () => {
+    stubFetch({
+      digestItemsByVariant: { tech: countryDigestItems() },
+      digestFailVariants: ['full'],
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.equal(snapshot.headlines.length, 0);
+    assert.equal(snapshot.coverage.headlineErrorCount, 1);
+    assert.equal(snapshot.coverage.developmentsDigestVariants.full, 'error');
+    assert.equal(snapshot.countries.SD.developments.headlines.length, 2, 'country matching pools the surviving variants');
+  });
+
+  it('keeps a brief withheld after the response inside the capture gate', async () => {
+    // The server echoes one source where the freeze sent two: normalization
+    // withholds the brief, the attempt stays in the gate's denominator, and
+    // the withholding is a recorded capture error rather than a silent skip.
+    stubFetch({
+      digestItems: countryDigestItems(),
+      briefOverrides: {
+        SD: { sources: [{ title: 'Sudan aid convoy reaches Darfur amid talks', source: 'UN News', url: 'https://news.un.org/feed/view/en/story/2026/09/1168270', publishedAt: new Date().toISOString() }] },
+      },
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.equal(snapshot.countries.SD.developments.brief, null);
+    assert.equal(snapshot.countries.SD.developments.briefSkipped, 'thin-grounding');
+    assert.equal(snapshot.coverage.briefMatchedCount, 2, 'the withheld attempt is still a requested brief');
+    assert.equal(snapshot.coverage.briefThinGroundingCount, 0, 'Sudan had enough headlines to request; it is not pre-request thin');
+    assert.ok(snapshot.errors.developments.some((entry) => (
+      entry.code === 'SD' && entry.stage === 'brief' && entry.message.includes('thin-grounding')
+    )));
+    // With every attempted brief withheld the gate must fire, not be skipped.
+    stubFetch({
+      digestItems: countryDigestItems(),
+      briefOverrides: {
+        SD: { sources: [{ title: 'Sudan aid convoy reaches Darfur amid talks', source: 'UN News', url: 'https://news.un.org/feed/view/en/story/2026/09/1168270', publishedAt: new Date().toISOString() }] },
+        NO: { sources: [{ title: 'Norway opens new arctic port', source: 'Test Wire', url: 'https://example.test/norway-port', publishedAt: new Date().toISOString() }] },
+      },
+    });
+    await assert.rejects(
+      runFreeze({ serviceKey: 'test-key' }),
+      /captured briefs for 0 of 2 headline-matched countries/,
+    );
+  });
+
+  it('rejects a headline title carrying markdown emphasis', async () => {
+    stubFetch({
+      digestItems: [
+        ...countryDigestItems(),
+        {
+          title: 'Sudan **urgent** update',
+          source: 'Test Wire',
+          link: 'https://example.test/sudan-bold',
+          snippet: '',
+          publishedAt: Date.now() - 1000,
+          importanceScore: 99,
+        },
+      ],
+    });
+    const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
+    assert.ok(!snapshot.countries.SD.developments.headlines.some((row) => row.title.includes('**')));
   });
 
   it('treats an empty brief response as a capture error, not content', async () => {
@@ -867,7 +1419,7 @@ describe('freeze per-country developments capture', () => {
     const sudan = snapshot.countries.SD.developments;
     assert.equal(sudan.brief, null);
     assert.ok(snapshot.errors.developments.some((entry) => (
-      entry.code === 'SD' && entry.stage === 'brief' && entry.message.includes('not in the frozen digest')
+      entry.code === 'SD' && entry.stage === 'brief' && entry.message.includes('not in the frozen grounding pool')
     )));
   });
 
@@ -886,7 +1438,7 @@ describe('freeze per-country developments capture', () => {
   it('rejects a brief with an out-of-range citation', async () => {
     stubFetch({
       digestItems: countryDigestItems(),
-      briefOverrides: { SD: { brief: 'SITUATION NOW\nCalm seas and steady traffic [2].' } },
+      briefOverrides: { SD: { brief: 'SITUATION NOW\nCalm seas and steady traffic [3].' } },
     });
     const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
     assert.equal(snapshot.countries.SD.developments.brief, null);
@@ -895,14 +1447,30 @@ describe('freeze per-country developments capture', () => {
     )));
   });
 
+  // Two rows from two publishers per country: a single outlet is thin
+  // grounding and gets no brief attempt (MIN_BRIEF_GROUNDING_PUBLISHERS), so
+  // it never enters the gate.
+  function manyGroundedItems() {
+    return ['Sudan', 'Norway', 'Romania', 'Brazil', 'Bhutan', 'Palau', 'Andorra'].flatMap((name, index) => [
+      {
+        title: `${name} item ${index}`,
+        source: 'Test Wire',
+        link: `https://example.test/c-${index}`,
+        publishedAt: Date.now() - 3600_000,
+        importanceScore: 50,
+      },
+      {
+        title: `${name} follow-up ${index}`,
+        source: 'Second Wire',
+        link: `https://second.test/c-${index}-b`,
+        publishedAt: Date.now() - 3700_000,
+        importanceScore: 45,
+      },
+    ]);
+  }
+
   it('rejects a keyed freeze whose brief capture collapses', async () => {
-    const many = ['Sudan', 'Norway', 'Romania', 'Brazil', 'Bhutan', 'Palau', 'Andorra'].map((name, index) => ({
-      title: `${name} item ${index}`,
-      source: 'Test Wire',
-      link: `https://example.test/c-${index}`,
-      publishedAt: Date.now() - 3600_000,
-      importanceScore: 50,
-    }));
+    const many = manyGroundedItems();
     stubFetch({ digestItems: many, briefStatus: 'fail' });
     await assert.rejects(
       runFreeze({ serviceKey: 'test-key' }),
@@ -912,22 +1480,18 @@ describe('freeze per-country developments capture', () => {
   });
 
   it('tolerates a few brief failures but not a majority collapse', async () => {
-    const many = ['Sudan', 'Norway', 'Romania', 'Brazil', 'Bhutan', 'Palau', 'Andorra'].map((name, index) => ({
-      title: `${name} item ${index}`,
-      source: 'Test Wire',
-      link: `https://example.test/c-${index}`,
-      publishedAt: Date.now() - 3600_000,
-      importanceScore: 50,
-    }));
+    const many = manyGroundedItems();
     // 7 matched, 1 failure: within the shortfall tolerance, freeze passes.
     stubFetch({ digestItems: many, briefFailCodes: ['SD'] });
     const { snapshot } = await runFreeze({ serviceKey: 'test-key' });
     assert.equal(snapshot.coverage.briefCountryCount, 6);
+    assert.equal(snapshot.countries.SD.developments.briefSkipped, 'failed',
+      'a failed request is a named state, like timelineStatus, not a null that reads as captured');
     // 7 matched, 6 failures: below minBriefs (7-5=2), freeze rejects.
     stubFetch({ digestItems: many, briefFailCodes: ['SD', 'NO', 'RO', 'BR', 'BT', 'PW'] });
     await assert.rejects(
       runFreeze({ serviceKey: 'test-key' }),
-      /captured briefs for only 1 of 7 headline-matched countries/,
+      /captured or withheld unsupported briefs for only 1 of 7 headline-matched countries/,
       'a majority brief collapse must fail even when one brief survives',
     );
   });

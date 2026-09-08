@@ -16,6 +16,15 @@ on:
   schedule:
     - cron: '41 4 * * 1'
   workflow_dispatch:
+    inputs:
+      developments_coverage_ratio:
+        description: >-
+          Operator override for the developments coverage floor, a ratio in
+          (0, 1]. Use it to publish a measured-but-lower week (the first freeze
+          after the GDELT materializer redeploys, an index outage) instead of
+          losing the capture (#7748). Leave empty for the built-in floor.
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -28,7 +37,14 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The freeze fetches five digest variants, tops every under-filled country
+    # up from the per-country GDELT index (~190 requests, ~50 minutes if every
+    # one hit its 20s timeout), and requests a brief for every country whose
+    # grounding clears the floor (#7748). The LLM calls dominate the wall
+    # clock (a keyed run took ~20 minutes at 54 briefs; index corroboration
+    # can roughly double the attempts), and a timed-out job writes no
+    # snapshot at all, so the budget is generous.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -91,8 +107,24 @@ jobs:
           API_BASE: https://www.worldmonitor.app
           WORLDMONITOR_API_KEY: ${{ secrets.WORLDMONITOR_API_KEY }}
         run: npm run freeze:crawlable-live-pulse
+      - name: Preserve the frozen snapshot
+        # The verification below can reject the capture (the developments
+        # coverage floor, #7748). A rejected capture must stay inspectable
+        # and republishable with the operator override, not vanish with the
+        # job: the freeze spent ~190 index requests and ~100 LLM calls on it.
+        if: steps.reconcile.outputs.skip != 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: crawlable-live-pulse-snapshot
+          path: docs/snapshots/crawlable-live-pulse-*.json
+          retention-days: 14
+          if-no-files-found: error
       - name: Rebuild and verify published artifacts
         if: steps.reconcile.outputs.skip != 'true'
+        env:
+          # Empty on the schedule; a workflow_dispatch operator can lower the
+          # developments coverage floor for one measured week (#7748).
+          CRAWLABLE_DEVELOPMENTS_COVERAGE_RATIO: ${{ inputs.developments_coverage_ratio }}
         run: |
           npm run build:crawlable-corpus
           npm run build:sitemap
@@ -103,7 +135,9 @@ jobs:
           npm run teasers:welcome
           node --import tsx --test --test-concurrency=1 \
             tests/crawlable-corpus.test.mjs \
+            tests/crawlable-developments.test.mjs \
             tests/crawlable-live-tools.test.mjs \
+            tests/country-mention.test.mjs \
             tests/freeze-crawlable-live-pulse.test.mjs \
             tests/welcome-teasers.test.mjs \
             tests/sitemap-generation.test.mjs
@@ -127,8 +161,15 @@ jobs:
           git switch -c "$BRANCH_NAME"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$snapshot_path" public/sitemap.xml public/sitemap-main.xml pro-test/src/generated/teasers.json pro-test/welcome.html
+          git add "$snapshot_path" public/sitemap.xml public/sitemap-main.xml pro-test/src/generated/teasers.json pro-test/welcome.html pro-test/index.html
           git commit -m "chore(corpus): refresh crawlable live pulse ${snapshot_date}"
+          # Route lastmod dates come from committed material sources.
+          npm run build:sitemap
+          git add public/sitemap.xml public/sitemap-main.xml
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(corpus): align pulse sitemap dates ${snapshot_date}"
+          fi
+          node scripts/build-sitemap.mjs --check
           git push --set-upstream origin "$BRANCH_NAME"
           gh pr create \
             --base main \

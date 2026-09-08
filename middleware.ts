@@ -1,5 +1,6 @@
-import { isKnownPublicPagePath, originNotFoundResponse } from './src/config/agent-not-found';
+import { acceptQuality, isKnownPublicPagePath, originNotFoundResponse } from './src/config/agent-not-found';
 import {
+  DOCS_PUBLIC_ORIGIN,
   DOCS_UPSTREAM_ORIGIN,
   DOCS_UPSTREAM_TIMEOUT_MS,
   isDocsFullDocumentRequest,
@@ -8,6 +9,9 @@ import {
   shouldTransformDocsUpstreamHtml,
 } from './src/config/docs-locale-seo';
 import { getRootlessDocsDestination } from './src/config/docs-root-redirects';
+import agentRequestPolicy from './shared/agent-request-policy.json';
+
+const AGENT_UA = new RegExp(`(?:^|[^a-z0-9-])(?:${agentRequestPolicy.userAgents.join('|')})(?:$|[^a-z0-9-])`, 'i');
 
 const BOT_UA =
   /bot|crawl|spider|slurp|archiver|wget|curl\/|python-requests|scrapy|httpclient|go-http|java\/|libwww|perl|ruby|php\/|ahrefsbot|semrushbot|mj12bot|dotbot|baiduspider|yandexbot|sogou|bytespider|petalbot|gptbot|claudebot|ccbot/i;
@@ -85,48 +89,6 @@ const VARIANT_HOST_MAP: Record<string, string> = {
   'energy.worldmonitor.app': 'energy',
 };
 
-// Source of truth: src/config/variant-meta.ts — keep in sync when variant metadata changes.
-// `name` is the short brand for JSON-LD `SoftwareApplication.name`; `title` is the full
-// page <title>. They are split fields (not derived via title.split(' - ')) so a
-// future title format change cannot silently corrupt the JSON-LD name.
-const VARIANT_OG: Record<string, { name: string; title: string; description: string; image: string; url: string }> = {
-  tech: {
-    name: 'Tech Monitor',
-    title: 'Tech Monitor - Real-Time AI & Tech Industry Dashboard',
-    description: 'Real-time AI and tech industry dashboard tracking tech giants, AI labs, startup ecosystems, funding rounds, and technology events worldwide with live context.',
-    image: 'https://tech.worldmonitor.app/favico/tech/og-image.png',
-    url: 'https://tech.worldmonitor.app/dashboard',
-  },
-  finance: {
-    name: 'Finance Monitor',
-    title: 'Finance Monitor - Real-Time Markets & Trading Dashboard',
-    description: 'Real-time finance and trading dashboard tracking global markets, stock exchanges, central banks, commodities, forex, crypto, and economic indicators worldwide.',
-    image: 'https://finance.worldmonitor.app/favico/finance/og-image.png',
-    url: 'https://finance.worldmonitor.app/dashboard',
-  },
-  commodity: {
-    name: 'Commodity Monitor',
-    title: 'Commodity Monitor - Real-Time Commodity Markets & Supply Chain Dashboard',
-    description: 'Real-time commodity markets dashboard tracking mining sites, processing plants, commodity ports, supply chains, and global trade flows with live context.',
-    image: 'https://commodity.worldmonitor.app/favico/commodity/og-image.png',
-    url: 'https://commodity.worldmonitor.app/dashboard',
-  },
-  happy: {
-    name: 'Happy Monitor',
-    title: 'Happy Monitor - Good News & Global Progress',
-    description: 'Curated positive news, global progress data, science breakthroughs, conservation wins, and uplifting stories from around the world with daily highlights.',
-    image: 'https://happy.worldmonitor.app/favico/happy/og-image.png',
-    url: 'https://happy.worldmonitor.app/dashboard',
-  },
-  energy: {
-    name: 'Energy Atlas',
-    title: 'Energy Atlas - Real-Time Global Energy Intelligence Dashboard',
-    description: 'Real-time global energy atlas tracking oil and gas pipelines, storage facilities, chokepoints, fuel shortages, tanker flows, and disruption events worldwide.',
-    image: 'https://energy.worldmonitor.app/favico/energy/og-image.png',
-    url: 'https://energy.worldmonitor.app/dashboard',
-  },
-};
-
 function normalizeHost(raw: string): string {
   return raw.toLowerCase().replace(/:\d+$/, '');
 }
@@ -149,15 +111,6 @@ function clientAcceptsSse(request: Request): boolean {
     const q = Number(qParam.slice(2));
     return Number.isFinite(q) && q > 0;
   });
-}
-
-function escHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 /** Query keys that create duplicate index entries without changing document identity. */
@@ -288,6 +241,30 @@ export default function middleware(request: Request) {
     return new Response(null, { status: 308, headers: uaConditionedRedirectHeaders(dashboardUrl) });
   }
 
+  const accept = request.headers.get('accept');
+  const markdownQuality = acceptQuality(accept, 'text/markdown') ?? 0;
+  const wantsHomepageMarkdown = /(?:^|,)\s*text\/markdown\s*(?:;|,|$)/i.test(accept ?? '') &&
+    markdownQuality > 0 && markdownQuality >= (acceptQuality(accept, 'text/html', true) ?? 0);
+
+  if (
+    path === '/' &&
+    (host === 'www.worldmonitor.app' || host === 'worldmonitor.app') &&
+    (request.method === 'GET' || request.method === 'HEAD') &&
+    url.searchParams.get('mode') !== 'agent' &&
+    (AGENT_UA.test(ua) || wantsHomepageMarkdown)
+  ) {
+    return new Response(null, {
+      headers: {
+        'x-middleware-rewrite': new URL('/pro/home.md', url).toString(),
+        'Content-Type': 'text/markdown; charset=utf-8',
+        Vary: 'User-Agent, Accept',
+        'Cache-Control': 'private, no-store',
+        'CDN-Cache-Control': 'no-store',
+        'Vercel-CDN-Cache-Control': 'no-store',
+      },
+    });
+  }
+
   if (request.method === 'GET' || request.method === 'HEAD') {
     const docsDestination = getRootlessDocsDestination(path);
     if (docsDestination) {
@@ -300,7 +277,7 @@ export default function middleware(request: Request) {
     // for /docs/zh/* (issue #7378). Proxy full-document HTML only — leave RSC
     // flights and static assets on the direct Mintlify rewrite.
     if (isDocsHtmlDocumentPath(path) && isDocsFullDocumentRequest(request)) {
-      return proxyDocsLocaleHtml(request, url);
+      return proxyDocsLocaleHtml(request, url, host);
     }
 
     // Real HTTP 404 for unknown pages. Agents get markdown (orank
@@ -309,42 +286,6 @@ export default function middleware(request: Request) {
     // matcher and fall through to public/404.html.
     if (!isKnownPublicPagePath(path)) {
       return originNotFoundResponse(path, request);
-    }
-  }
-
-  if (path === '/' && SOCIAL_PREVIEW_UA.test(ua)) {
-    // variant is truthy only for VARIANT_HOST_MAP keys, which are all served
-    // hosts by construction — no separate allowlist check (#7616).
-    const variant = VARIANT_HOST_MAP[host];
-    if (variant) {
-      const og = VARIANT_OG[variant as keyof typeof VARIANT_OG];
-      if (og) {
-        const eTitle = escHtml(og.title);
-        const eDesc = escHtml(og.description);
-        const eImage = escHtml(og.image);
-        const eUrl = escHtml(og.url);
-        const html = `<!DOCTYPE html><html lang="en"><head>
-<meta property="og:type" content="website"/>
-<meta property="og:title" content="${eTitle}"/>
-<meta property="og:description" content="${eDesc}"/>
-<meta property="og:image" content="${eImage}"/>
-<meta property="og:url" content="${eUrl}"/>
-<meta name="twitter:card" content="summary_large_image"/>
-<meta name="twitter:title" content="${eTitle}"/>
-<meta name="twitter:description" content="${eDesc}"/>
-<meta name="twitter:image" content="${eImage}"/>
-<link rel="canonical" href="${eUrl}"/>
-<title>${eTitle}</title>
-</head><body></body></html>`;
-        return new Response(html, {
-          status: 200,
-          headers: {
-            'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'no-store',
-            'Vary': 'User-Agent, Host',
-          },
-        });
-      }
     }
   }
 
@@ -444,24 +385,35 @@ export default function middleware(request: Request) {
     return;
   }
 
-  // Block bots from all API routes
-  if (BOT_UA.test(ua)) {
-    return new Response('{"error":"Forbidden"}', {
+  if (BOT_UA.test(ua) || !ua || ua.length < 10) {
+    return Response.json(agentRequestPolicy.blockedResponse, {
       status: 403,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  // No user-agent or suspiciously short — likely a script
-  if (!ua || ua.length < 10) {
-    return new Response('{"error":"Forbidden"}', {
-      status: 403,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Cache-Control': 'no-store',
+        'CDN-Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+      },
     });
   }
 }
 
-async function proxyDocsLocaleHtml(request: Request, url: URL): Promise<Response> {
+function docsResponseHeaders(upstream: Response, host: string): Headers {
+  const headers = new Headers(upstream.headers);
+  if (host !== new URL(DOCS_PUBLIC_ORIGIN).hostname) {
+    const robots = headers.get('x-robots-tag');
+    headers.set('x-robots-tag', robots ? `noindex, ${robots}` : 'noindex');
+  }
+  const varyParts = new Set(
+    (headers.get('vary') ?? '').split(',').map((part) => part.trim().toLowerCase()).filter(Boolean),
+  );
+  for (const name of ['host', 'accept', 'rsc', 'next-router-state-tree', 'next-router-prefetch']) {
+    varyParts.add(name);
+  }
+  headers.set('vary', [...varyParts].join(', '));
+  return headers;
+}
+
+async function proxyDocsLocaleHtml(request: Request, url: URL, host: string): Promise<Response> {
   const upstreamUrl = `${DOCS_UPSTREAM_ORIGIN}${url.pathname}${url.search}`;
   const forwardHeaders = new Headers();
   for (const name of ['accept', 'accept-language', 'user-agent', 'if-none-match', 'if-modified-since']) {
@@ -482,17 +434,18 @@ async function proxyDocsLocaleHtml(request: Request, url: URL): Promise<Response
       signal: AbortSignal.timeout(DOCS_UPSTREAM_TIMEOUT_MS),
     });
 
-    // Pass through redirects / not-modified without rewriting.
-    if (upstream.status >= 300 && upstream.status < 400) {
+    const contentType = upstream.headers.get('content-type');
+    if (upstream.status !== 304 && (
+      upstream.status !== 200 || !shouldTransformDocsUpstreamHtml(url.pathname, contentType)
+    )) {
       return upstream;
     }
     if (upstream.status === 304 || request.method === 'HEAD') {
-      return upstream;
-    }
-
-    const contentType = upstream.headers.get('content-type');
-    if (!shouldTransformDocsUpstreamHtml(url.pathname, contentType)) {
-      return upstream;
+      return new Response(null, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: docsResponseHeaders(upstream, host),
+      });
     }
 
     html = await upstream.text();
@@ -501,25 +454,13 @@ async function proxyDocsLocaleHtml(request: Request, url: URL): Promise<Response
   }
 
   const rewritten = rewriteDocsLocaleHtml(html, url.pathname);
-  const headers = new Headers(upstream.headers);
+  const headers = docsResponseHeaders(upstream, host);
   // Fetch already decoded the body; hop-by-hop / recomputed framing must not
   // be forwarded onto the rewritten string response (Mintlify serves br).
   for (const name of ['content-encoding', 'content-length', 'transfer-encoding', 'connection']) {
     headers.delete(name);
   }
   headers.set('x-wm-docs-locale-seo', '1');
-  // Ensure shared caches vary on the headers that select this proxy path.
-  const vary = headers.get('vary');
-  const varyParts = new Set(
-    (vary ? vary.split(',') : [])
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => part.toLowerCase()),
-  );
-  varyParts.add('accept');
-  varyParts.add('rsc');
-  headers.set('vary', [...varyParts].join(', '));
-
   return new Response(rewritten, {
     status: upstream.status,
     statusText: upstream.statusText,

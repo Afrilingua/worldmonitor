@@ -11,6 +11,12 @@
       "status": "excluded",
       "references": [
         {
+          "path": "scripts/measure-trade-animation-rebuild.mjs"
+        },
+        {
+          "path": "scripts/profile-news-hybrid-clustering-7782-dashboard.mjs"
+        },
+        {
           "path": "src/components/LiveNewsPanel.ts"
         },
         {
@@ -6371,6 +6377,9 @@
           "path": "scripts/validate-rss-feeds.mjs"
         },
         {
+          "path": "server/worldmonitor/intelligence/v1/_country-coverage-feeds.ts"
+        },
+        {
           "path": "server/worldmonitor/market/v1/stock-news-search.ts"
         },
         {
@@ -7963,6 +7972,20 @@
       ]
     },
     {
+      "host": "scanner.tradingview.com",
+      "provider": "TradingView",
+      "kind": "structured",
+      "observed": true,
+      "license": "TradingView terms; the screener scan endpoint is undocumented and redistribution requires review",
+      "attribution": "TradingView; link to the S&P 500 stock screener.",
+      "status": "terms-review",
+      "references": [
+        {
+          "path": "scripts/_sp500-breadth.mjs"
+        }
+      ]
+    },
+    {
       "host": "schema.org",
       "provider": "schema.org",
       "kind": "structured",
@@ -7979,6 +8002,9 @@
         },
         {
           "path": "scripts/build-use-cases.mjs"
+        },
+        {
+          "path": "scripts/crawlable-sources-page.mjs"
         }
       ]
     },
@@ -9737,6 +9763,20 @@
       ]
     },
     {
+      "host": "us.sentry.io",
+      "provider": "Sentry error tracking",
+      "kind": "structured",
+      "observed": true,
+      "license": "Excluded: World Monitor operational telemetry, not an external data provider",
+      "attribution": "Excluded from the provider count: internal error-tracking request.",
+      "status": "excluded",
+      "references": [
+        {
+          "path": "scripts/audit-sentry-resolve-pins.mjs"
+        }
+      ]
+    },
+    {
       "host": "user",
       "provider": "Proxy URL placeholder",
       "kind": "structured",
@@ -10186,9 +10226,6 @@
         },
         {
           "path": "server/worldmonitor/infrastructure/v1/reverse-geocode.ts"
-        },
-        {
-          "path": "src/app/panel-layout.ts"
         },
         {
           "path": "src/bootstrap/web-vitals-utils.ts"
@@ -10676,9 +10713,6 @@
       "references": [
         {
           "path": "scripts/seed-fear-greed.mjs"
-        },
-        {
-          "path": "scripts/seed-market-breadth.mjs"
         }
       ]
     },
@@ -13540,6 +13574,9 @@
       "status": "terms-review",
       "references": [
         {
+          "path": "scripts/china-corporate-disclosures/adapters.mjs"
+        },
+        {
           "path": "scripts/china-stock-connect/adapters.mjs"
         }
       ]
@@ -14269,10 +14306,16 @@
           "path": "scripts/seo-indexnow-submit.mjs"
         },
         {
+          "path": "scripts/verify-agent-readiness.mjs"
+        },
+        {
           "path": "scripts/verify-sitemaps.mjs"
         },
         {
           "path": "server/_shared/deprecation-policy.ts"
+        },
+        {
+          "path": "src/app/panel-layout.ts"
         },
         {
           "path": "src/components/RuntimeConfigPanel.ts"

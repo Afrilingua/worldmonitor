@@ -1,19 +1,17 @@
 # WorldMonitor — Agent Authentication (auth.md)
 
-How agents authenticate with the WorldMonitor API and MCP server, per the
-WorkOS **auth.md** spec: <https://workos.com/auth-md>.
+Use API keys or OAuth 2.1 to authenticate with the WorldMonitor API and MCP server.
+This walkthrough follows the WorkOS **auth.md** spec: <https://workos.com/auth-md>.
 
 Discovery is open. `get_sources` alone is credential- and daily-quota-free
 (10 anonymous calls/minute/IP, fail closed). Other MCP data tools need
 subscription credentials.
 
-Send a descriptive `User-Agent` (for example, `mytool/1.0`). Default library
-values can receive a firewall HTML 403 before the request reaches the API.
+Send a descriptive `User-Agent`, such as `mytool/1.0`. Default library values can receive a firewall 403.
 
 ## Discover
 
-Learn the auth requirements from one unauthenticated request, then follow the
-chain:
+Discover the authentication requirements:
 
 1. Call any subscription-gated data method without credentials; read the
    `WWW-Authenticate` header. (`get_sources` succeeds anonymously instead.)

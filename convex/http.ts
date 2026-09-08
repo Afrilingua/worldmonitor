@@ -1,6 +1,7 @@
 import { anyApi, httpRouter } from "convex/server";
 import { httpAction, type ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
+import { lookupVerifiedAccountEmail, requireVerifiedAccountEmail } from "./lib/notificationEmail";
 import { TOUCH_DEBOUNCE_MS } from "./apiKeys";
 import {
   CHECKOUT_RATE_LIMITED,
@@ -51,6 +52,14 @@ function corsHeaders(origin: string | null): Headers {
     headers.set("Access-Control-Max-Age", "86400");
   }
   return headers;
+}
+
+export async function userPrefsOptionsHttpHandler(
+  _ctx: ActionCtx,
+  request: Request,
+): Promise<Response> {
+  const headers = corsHeaders(request.headers.get("Origin"));
+  return new Response(null, { status: 204, headers });
 }
 
 async function timingSafeEqualStrings(a: string, b: string): Promise<boolean> {
@@ -133,6 +142,96 @@ function setRateLimitResponseHeaders(headers: Headers, limit: number, reset: num
   headers.set("X-RateLimit-Remaining", "0");
   headers.set("X-RateLimit-Reset", String(reset));
   headers.set("Retry-After", String(retryAfter));
+}
+
+const REGISTER_INTEREST_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const REGISTER_INTEREST_MAX_EMAIL_LENGTH = 320;
+const REGISTER_INTEREST_MAX_META_LENGTH = 100;
+
+/**
+ * Server-to-server bridge for the anonymous waitlist flow. The public
+ * registerInterest mutation is internal so a Convex client cannot bypass the
+ * edge handler's Turnstile/desktop proof, email validation, and rate limits.
+ */
+export async function registerInterestHttpHandler(
+  ctx: ActionCtx,
+  request: Request,
+): Promise<Response> {
+  const providedSecret = request.headers.get("x-convex-shared-secret") ?? "";
+  const expectedSecret = process.env.CONVEX_SERVER_SHARED_SECRET ?? "";
+  if (!expectedSecret || !(await timingSafeEqualStrings(providedSecret, expectedSecret))) {
+    return new Response(JSON.stringify({ error: "UNAUTHORIZED" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const body = await parseJsonObjectBody<{
+    email?: unknown;
+    source?: unknown;
+    appVersion?: unknown;
+    referredBy?: unknown;
+  }>(request);
+  if (!body) {
+    return new Response(JSON.stringify({ error: "INVALID_JSON" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const email = typeof body.email === "string" ? body.email : "";
+  if (
+    email.length === 0 ||
+    email.length > REGISTER_INTEREST_MAX_EMAIL_LENGTH ||
+    !REGISTER_INTEREST_EMAIL_RE.test(email)
+  ) {
+    return new Response(JSON.stringify({ error: "INVALID_EMAIL" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const metadata = [
+    ["source", body.source],
+    ["appVersion", body.appVersion],
+    ["referredBy", body.referredBy],
+  ] as const;
+  for (const [field, value] of metadata) {
+    if (
+      value !== undefined &&
+      (typeof value !== "string" || value.length > REGISTER_INTEREST_MAX_META_LENGTH)
+    ) {
+      return new Response(JSON.stringify({ error: `INVALID_${field.toUpperCase()}` }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  }
+  if (typeof body.referredBy === "string" && body.referredBy.length > 20) {
+    return new Response(JSON.stringify({ error: "INVALID_REFERRED_BY" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  try {
+    const result = await ctx.runMutation(internal.registerInterest.register, {
+      email,
+      source: body.source as string | undefined,
+      appVersion: body.appVersion as string | undefined,
+      referredBy: body.referredBy as string | undefined,
+    });
+    return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (err) {
+    console.error("[register-interest] internal mutation failed:", err);
+    return new Response(JSON.stringify({ error: "REGISTRATION_UNAVAILABLE" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 }
 
 export async function internalEntitlementsHttpHandler(
@@ -260,6 +359,12 @@ export async function internalEntitlementsHttpHandler(
 const http = httpRouter();
 
 http.route({
+  path: "/api/internal-register-interest",
+  method: "POST",
+  handler: httpAction(registerInterestHttpHandler),
+});
+
+http.route({
   path: "/api/internal-entitlements",
   method: "POST",
   handler: httpAction(internalEntitlementsHttpHandler),
@@ -268,10 +373,7 @@ http.route({
 http.route({
   path: "/api/user-prefs",
   method: "OPTIONS",
-  handler: httpAction(async (_ctx, request) => {
-    const headers = corsHeaders(request.headers.get("Origin"));
-    return new Response(null, { status: 204, headers });
-  }),
+  handler: httpAction(userPrefsOptionsHttpHandler),
 });
 
 http.route({
@@ -430,18 +532,22 @@ http.route({
     if (!msg) return new Response("OK", { status: 200 });
 
     if (msg.chat?.type !== "private") return new Response("OK", { status: 200 });
-
-    if (!msg.date || Math.abs(Date.now() / 1000 - msg.date) > 900) {
+    if (typeof msg.chat.id !== "number" || !Number.isSafeInteger(msg.chat.id) || msg.chat.id <= 0) {
       return new Response("OK", { status: 200 });
     }
 
-    const text = msg.text?.trim() ?? "";
+    if (typeof msg.date !== "number" || !Number.isSafeInteger(msg.date) || Math.abs(Date.now() / 1000 - msg.date) > 900) {
+      return new Response("OK", { status: 200 });
+    }
+
+    if (typeof msg.text !== "string") return new Response("OK", { status: 200 });
+    const text = msg.text.trim();
     const chatId = String(msg.chat.id);
 
     const match = text.match(/^\/start\s+([A-Za-z0-9_-]{40,50})$/);
-    if (!match) return new Response("OK", { status: 200 });
+    if (!match?.[1]) return new Response("OK", { status: 200 });
 
-    const claimed = await ctx.runMutation(anyApi.notificationChannels!.claimPairingToken as any, {
+    const claimed = await ctx.runMutation(internal.notificationChannels.claimPairingToken, {
       token: match[1],
       chatId,
     });
@@ -646,12 +752,16 @@ http.route({
         if (!body.channelType) {
           return new Response(JSON.stringify({ error: "channelType required" }), { status: 400, headers: { "Content-Type": "application/json" } });
         }
+        const verifiedAccountEmail = body.channelType === "email"
+          ? requireVerifiedAccountEmail(body.email, await lookupVerifiedAccountEmail(userId))
+          : undefined;
         const setResult = await ctx.runMutation((internal as any).notificationChannels.setChannelForUser, {
           userId,
           channelType: body.channelType as "telegram" | "slack" | "email" | "webhook",
           chatId: body.chatId,
           webhookEnvelope: body.webhookEnvelope,
           email: body.email,
+          verifiedAccountEmail,
           webhookLabel: body.webhookLabel,
           scheduleWelcome: body.scheduleWelcome === true,
         });
@@ -879,6 +989,10 @@ http.route({
 
       return new Response(JSON.stringify({ error: "Unknown action" }), { status: 400, headers: { "Content-Type": "application/json" } });
     } catch (err: unknown) {
+      const code = extractConvexErrorCode(err);
+      if (code === "EMAIL_OWNERSHIP_REQUIRED" || code === "PRO_REQUIRED") {
+        return new Response(JSON.stringify({ error: code }), { status: code === "PRO_REQUIRED" ? 402 : 400, headers: { "Content-Type": "application/json" } });
+      }
       const msg = err instanceof Error ? err.message : String(err);
       return new Response(JSON.stringify({ error: msg }), { status: 500, headers: { "Content-Type": "application/json" } });
     }
@@ -1216,6 +1330,66 @@ http.route({
     );
 
     return new Response(JSON.stringify(result), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }),
+});
+
+// Service-to-service: validate a partner-embed key by its SHA-256 hash.
+// Separate from /api/internal-validate-api-key on purpose — the two credential
+// surfaces must never resolve through one another's table.
+http.route({
+  path: "/api/internal-validate-embed-key",
+  method: "POST",
+  handler: httpAction(async (ctx, request) => {
+    const providedSecret = request.headers.get("x-convex-shared-secret") ?? "";
+    const expectedSecret = process.env.CONVEX_SERVER_SHARED_SECRET ?? "";
+    if (!expectedSecret || !(await timingSafeEqualStrings(providedSecret, expectedSecret))) {
+      return new Response(JSON.stringify({ error: "UNAUTHORIZED" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const body = await parseJsonObjectBody<{ keyHash?: unknown }>(request);
+    if (!body) {
+      return new Response(JSON.stringify({ error: "INVALID_JSON" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (typeof body.keyHash !== "string" || !/^[a-f0-9]{64}$/.test(body.keyHash)) {
+      return new Response(JSON.stringify({ error: "INVALID_KEY_HASH" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    const result = await ctx.runQuery(
+      (internal as any).embedKeys.validateKeyByHash,
+      { keyHash: body.keyHash },
+    );
+
+    if (result && touchIsDue(result.lastUsedAt)) {
+      try {
+        await ctx.scheduler.runAfter(0, (internal as any).embedKeys.touchKeyLastUsed, { keyId: result.id });
+      } catch (err) {
+        // sentry-coverage-ok: re-throwing here would 500 the edge validator, which
+        // coerces to null and stamps a negative-cache sentinel for a valid key.
+        // lastUsedAt is best-effort telemetry.
+        console.warn("[validate-embed-key] touchKeyLastUsed schedule failed:", err instanceof Error ? err.message : String(err));
+      }
+    }
+
+    // Strip the gate's input from the response for the same reason the API-key
+    // route does: the edge caches this blob and its shape is load-bearing.
+    const publicResult = result
+      ? (({ lastUsedAt: _lastUsedAt, ...rest }) => rest)(result)
+      : null;
+
+    return new Response(JSON.stringify(publicResult), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
