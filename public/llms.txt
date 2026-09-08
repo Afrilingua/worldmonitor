@@ -12,7 +12,7 @@ The project is built with TypeScript, Vite, MapLibre GL JS, deck.gl, D3.js, and 
 
 ## Product identity and press references
 
-- [Product identity and press references](https://www.worldmonitor.app/world-monitor.md): Official name, canonical domain, contact details, and external reporting.
+- [Product identity and press references](https://www.worldmonitor.app/world-monitor.md): Official name, canonical domain, contact details, and the press list — WIRED, The Atlantic, El País, The Economic Times, Arabian Business, Entrepreneur Middle East, Silicon Canals and L'Orient Today — each linked to its article.
 - [Human about page](https://www.worldmonitor.app/docs/about)
 
 ## When to Use World Monitor (Agent Guidance)
