@@ -1562,8 +1562,9 @@ async function dispatch(requestUrl, req, routes, context) {
     }
     return json({ verboseMode });
   }
-  // Registration — call Convex directly when CONVEX_URL is available (self-hosted),
-  // otherwise proxy to cloud (desktop sidecar never has CONVEX_URL).
+  // Registration — use the authenticated Convex HTTP bridge when CONVEX_URL is
+  // available (self-hosted), otherwise proxy to cloud (desktop sidecar never
+  // has CONVEX_URL).
   // Keeps the legacy /api/register-interest local path so older desktop builds
   // continue to work; cloud fallback rewrites to the new sebuf RPC path.
   if (requestUrl.pathname === '/api/register-interest' && req.method === 'POST') {
@@ -1594,20 +1595,42 @@ async function dispatch(requestUrl, req, routes, context) {
       if (!email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
         return json({ error: 'Invalid email address' }, 400);
       }
-      const response = await fetchWithTimeout(`${convexUrl}/api/mutation`, {
+      const sharedSecret = process.env.CONVEX_SERVER_SHARED_SECRET;
+      if (!sharedSecret) {
+        context.logger.warn('[local-api] self-hosted register-interest bridge is not configured');
+        return json({ error: 'Registration service unavailable' }, 503);
+      }
+      const convexSiteUrl = (
+        process.env.CONVEX_SITE_URL || convexUrl.replace(/\.convex\.cloud\/?$/, '.convex.site')
+      ).replace(/\/$/, '');
+      const args = {
+        email,
+        source: typeof parsed.source === 'string' ? parsed.source : 'desktop',
+        appVersion: typeof parsed.appVersion === 'string' ? parsed.appVersion : 'unknown',
+      };
+      if (typeof parsed.referredBy === 'string') args.referredBy = parsed.referredBy;
+      const response = await fetchWithTimeout(`${convexSiteUrl}/api/internal-register-interest`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          path: 'registerInterest:register',
-          args: { email, source: parsed.source || 'desktop', appVersion: parsed.appVersion || 'unknown' },
-          format: 'json',
-        }),
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'worldmonitor-sidecar/1.0',
+          'x-convex-shared-secret': sharedSecret,
+        },
+        body: JSON.stringify(args),
       }, 15000);
+      if (!response.ok) {
+        context.logger.warn(`[local-api] self-hosted register-interest bridge returned ${response.status}`);
+        return json({ error: 'Registration failed' }, 502);
+      }
       const responseBody = await response.text();
       let result;
-      try { result = JSON.parse(responseBody); } catch { result = { status: 'registered' }; }
-      if (result.status === 'error') {
-        return json({ error: result.errorMessage || 'Registration failed' }, 500);
+      try {
+        result = JSON.parse(responseBody);
+      } catch {
+        return json({ error: 'Registration failed' }, 502);
+      }
+      if (result.status === 'already_registered') {
+        return json({ status: 'registered', referralCode: '', referralCount: 0, position: 0, emailSuppressed: false });
       }
       return json(result.value || result);
     } catch (e) {

@@ -781,6 +781,71 @@ test('preserves caller Authorization while hiding the sidecar transport token', 
   }
 });
 
+test('uses the authenticated Convex bridge for self-hosted register-interest', async () => {
+  const originalConvex = process.env.CONVEX_URL;
+  const originalSite = process.env.CONVEX_SITE_URL;
+  const originalSecret = process.env.CONVEX_SERVER_SHARED_SECRET;
+  const originalFetch = globalThis.fetch;
+  process.env.CONVEX_URL = 'https://self-hosted.convex.cloud';
+  process.env.CONVEX_SITE_URL = 'http://self-hosted.convex.site';
+  process.env.CONVEX_SERVER_SHARED_SECRET = 'convex-test-secret';
+
+  let captured;
+  globalThis.fetch = async (url, init) => {
+    captured = { url, init };
+    return new Response(JSON.stringify({
+      status: 'already_registered',
+      referralCode: 'secret-referral-code',
+      referralCount: 9,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+
+  const localApi = await setupApiDir({});
+  const app = await createLocalApiServer({
+    port: 0,
+    apiDir: localApi.apiDir,
+    remoteBase: 'https://worldmonitor.app',
+    logger: { log() { }, warn() { }, error() { } },
+  });
+  const { port } = await app.start();
+
+  try {
+    const response = await postJsonViaHttp(`http://127.0.0.1:${port}/api/register-interest`, {
+      email: 'self-hosted@example.com',
+      source: 'desktop-settings',
+      appVersion: '2.8.0',
+      referredBy: 'REF123',
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.json, {
+      status: 'registered',
+      referralCode: '',
+      referralCount: 0,
+      position: 0,
+      emailSuppressed: false,
+    });
+    assert.equal(captured.url, 'http://self-hosted.convex.site/api/internal-register-interest');
+    assert.equal(captured.init.headers['x-convex-shared-secret'], 'convex-test-secret');
+    assert.equal(captured.init.headers['User-Agent'], 'worldmonitor-sidecar/1.0');
+    assert.deepEqual(JSON.parse(captured.init.body), {
+      email: 'self-hosted@example.com',
+      source: 'desktop-settings',
+      appVersion: '2.8.0',
+      referredBy: 'REF123',
+    });
+  } finally {
+    await app.close();
+    await localApi.cleanup();
+    globalThis.fetch = originalFetch;
+    if (originalConvex === undefined) delete process.env.CONVEX_URL;
+    else process.env.CONVEX_URL = originalConvex;
+    if (originalSite === undefined) delete process.env.CONVEX_SITE_URL;
+    else process.env.CONVEX_SITE_URL = originalSite;
+    if (originalSecret === undefined) delete process.env.CONVEX_SERVER_SHARED_SECRET;
+    else process.env.CONVEX_SERVER_SHARED_SECRET = originalSecret;
+  }
+});
+
 test('does not forward the sidecar transport token through Docker cloud proxy routes', async () => {
   const originalConvex = process.env.CONVEX_URL;
   delete process.env.CONVEX_URL;
