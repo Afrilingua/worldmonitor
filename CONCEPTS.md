@@ -310,6 +310,18 @@ A rolling, per-country index of GDELT GKG articles the bulk materializer keeps a
 
 The indexed country pages that carry no dated development in a given weekly capture. Its size is a property of the grounding pool — how many countries the week's digest and the Country Article Index actually name — not of whether the enrichment ran, and it is recorded as a count in the capture's coverage rather than gated to zero, because no article pool names every country every week. A capture whose freeze attempted the index — whatever the index answered — is held to a higher coverage floor at build time than one frozen before the index existed, so a tail the size of the digest-only era cannot ship as a green build, and a gate that relaxed when the index failed would be no gate. A measured-but-lower week can still publish through an operator override on the weekly workflow rather than by editing the floor. See also: Recent Developments, Brief Grounding, Country Article Index.
 
+## Source Catalog
+
+### Catalog Provider
+
+One addressable entry in the published source inventory: a single upstream host, or a publisher grouped across the transport hosts its feeds arrive through. It is *not* one organisation. A publisher reached through several hosts contributes several Catalog Providers, so the same display name legitimately appears more than once in the inventory and the provider count exceeds the number of distinct names.
+
+The load-bearing consequence is that a display name cannot identify a provider. Anything that keys on the inventory — a filter, a citation, a published enumeration of it — must key on the provider's own identifier, and anything that publishes a per-provider count is counting hosts-and-groupings rather than newsrooms. Contrast Publisher Family, which groups the *same* underlying outlets the opposite way: a family collapses every edition and regional feed of one newsroom into a single unit so that independence counts cannot be inflated. Both groupings are correct for their own purpose, and neither substitutes for the other. See also: Publisher Family, Logical Provider.
+
+### Logical Provider
+
+A Catalog Provider that has no editorial host of its own because its feeds are delivered entirely through a syndication transport. It is grouped under the publisher's name rather than under the transport's host, so the inventory credits the newsroom that wrote the content instead of the service that shipped it — without which every such publisher would collapse into a single misleading entry named for the transport. Duplicate names within this grouping are rejected upstream when the attribution manifest is validated, which is what lets consumers treat a provider identifier as unique. See also: Catalog Provider, Publisher Family.
+
 ## Prediction Markets
 
 ### Market Pool
