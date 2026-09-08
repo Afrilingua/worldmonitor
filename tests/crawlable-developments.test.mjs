@@ -260,6 +260,11 @@ describe('normalizeFrozenDevelopments', () => {
       'Łódź faces disruption [1].',
       'ΔΕΗ faces disruption [1].',
       'The øBrand faces disruption [1].',
+      '3M faces disruption [1].',
+      '7-Eleven faces disruption [1].',
+      'Israel resumes talks [1].\nOutlook for Tamar deteriorates [1].\nIsrael resumes talks [1].',
+      'Israel resumes talks [1].\nOutlook for Tamar deteriorates.\nIsrael resumes talks [1].',
+      'Israel resumes talks [1].\nWHAT THIS MEANS FOR ISRAEL: Tamar closed [1].',
     ]) {
       const row = { headlines: sources, brief: { text, sources }, timeline: [], briefSkipped: null };
       const out = normalizeFrozenDevelopments(row);
@@ -284,7 +289,7 @@ describe('normalizeFrozenDevelopments', () => {
   });
 
   it('retains Unicode names when the cited title supports them', () => {
-    for (const name of ['Ørsted', 'Łódź', 'ΔΕΗ', 'øBrand']) {
+    for (const name of ['Ørsted', 'Łódź', 'ΔΕΗ', 'øBrand', '3M', '7-Eleven']) {
       const sources = [
         { title: `${name} resumes operations`, source: 'Reuters', url: 'https://reuters.com/a' },
         { title: 'Talks resume', source: 'BBC', url: 'https://bbc.com/b' },

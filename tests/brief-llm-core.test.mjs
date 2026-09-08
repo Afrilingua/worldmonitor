@@ -509,11 +509,12 @@ describe('validateNoHallucinatedProperNouns — May 19 regression + class', () =
   });
 
   it('recognizes Unicode capitals, including non-decomposing Latin initials', () => {
-    for (const name of ['Ørsted', 'Łódź', 'ΔΕΗ', 'Роскосмос']) {
+    for (const name of ['Ørsted', 'Łódź', 'ΔΕΗ', 'Роскосмос', '3M', '7-Eleven', 'eBay', 'iPhone']) {
       assert.deepEqual(extractProperNounSequences(`${name} resumes operations.`), [[name.toLowerCase()]]);
       assert.equal(validateNoHallucinatedProperNouns(`${name} faces disruption.`, 'Talks resume.').ok, false);
       assert.equal(validateNoHallucinatedProperNouns(`${name} faces disruption.`, `${name} resumes operations.`).ok, true);
     }
+    assert.equal(validateNoHallucinatedProperNouns('3M faces disruption.', 'a 3m barrier was installed.').ok, false);
   });
 
   it('out-of-scope: headline already contains a wrong name → validator does NOT fact-check', () => {

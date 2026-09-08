@@ -5575,6 +5575,21 @@ describe('country recent developments', () => {
       html: html.replace('Sudan aid convoys move under escort [1].', 'Tamar faces disruption [1].'),
     }), /unsupported citation/);
     assert.throws(() => assertCountryBriefPresentation({ ...input, sources: [] }), /missing source titles/);
+    for (const claim of ['Outlook for Tamar deteriorates [1].', '3M faces disruption [1].', '7-Eleven faces disruption [1].']) {
+      assert.throws(() => assertCountryBriefPresentation({
+        ...input,
+        html: html.replace('Sudan aid convoys move under escort [1].', `Sudan aid convoys move under escort [1].</p><p>${claim}`),
+      }), /unsupported citation/, claim);
+    }
+  });
+
+  it('preserves supported prose that starts with a section label', () => {
+    const text = 'SITUATION NOW\nSudan aid convoys move under escort [1].\nOutlook for Sudan aid convoys remains uncertain [1].\nSudan aid convoys move under escort [1].';
+    const sources = [{ ...BRIEF.sources[0], title: 'Outlook for Sudan aid convoys remains uncertain' }, BRIEF.sources[1]];
+    const developments = { ...DEVELOPMENTS, brief: { ...BRIEF, text, sources } };
+    const html = renderCountryDevelopments({ countryName: 'Sudan', developments });
+    assert.ok(html.includes('<p>Outlook for Sudan aid convoys remains uncertain [1].</p>'));
+    assertCountryBriefPresentation({ pagePath: '/countries/sudan/', html, sources });
   });
 
   it('renders nothing when zero items were captured', () => {

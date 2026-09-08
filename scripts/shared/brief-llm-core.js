@@ -524,7 +524,7 @@ function normalizeDottedAcronyms(text) {
 }
 
 function properNounTokenValue(token) {
-  if (typeof token !== 'string' || token.length < 2 || !/^[\p{Lu}\p{Lt}]/u.test(token)) return null;
+  if (typeof token !== 'string' || token.length < 2 || !/[\p{Lu}\p{Lt}]/u.test(token)) return null;
   const stripped = token.replace(/[.,;:'’]+$/g, '').replace(/['’]s$/i, '');
   return (stripped || token).toLowerCase();
 }
@@ -609,13 +609,14 @@ function extractProperNounSequencesWithMeta(text) {
       const tokenForLookup = stripped || token;
       const isTitlePrefix = TITLE_PREFIX_STOP.has(stripped);
       const isJoiner = PROPER_NOUN_JOINER.has(token.toLowerCase());
-      // Capitalized: at least 2 chars long. Single-letter capitalized
+      // Name casing can occur after a digit or lowercase prefix (3M, eBay).
+      // Require at least 2 chars. Single-letter capitalized
       // tokens are sentence-final initials ("...J.D. Vance was met by Smith
       // and J."), middle initials in names, or "I" (the pronoun, already
       // handled by SENTENCE_START_AMBIGUOUS). None should register as
       // a standalone proper noun.
-      const isCapitalized = token.length >= 2 && /^[\p{Lu}\p{Lt}]/u.test(token);
-      const isAllCapsAcronym = /^\p{Lu}{2,6}$/u.test(token);
+      const isCapitalized = token.length >= 2 && /[\p{Lu}\p{Lt}]/u.test(token);
+      const isAllCapsAcronym = /^(?=.*\p{Lu})[\p{Lu}\p{N}]{2,6}$/u.test(token);
       const isAmbiguousSentenceStart = firstToken
         && !isAllCapsAcronym
         && SENTENCE_START_AMBIGUOUS.has(token.toLowerCase());

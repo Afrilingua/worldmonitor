@@ -9,7 +9,7 @@
 
 import { publisherFamilyFor, publisherFamilyForDomain } from '../shared/publisher-families.js';
 import { validateNoHallucinatedProperNouns } from '../shared/brief-llm-core.js';
-const BRIEF_SECTION_HEADERS = ['SITUATION NOW', 'WHAT THIS MEANS FOR', 'KEY RISKS', 'OUTLOOK', 'WATCH ITEMS'];
+const BRIEF_SECTION_HEADERS = ['SITUATION NOW', 'KEY RISKS', 'OUTLOOK', 'WATCH ITEMS'];
 
 // Provenance stamp on a headline row the freeze took from the per-country
 // GDELT article index (#7748) rather than the curated digest feeds. Carried
@@ -43,9 +43,15 @@ export function isVerifiableArticleUrl(url) {
   return hostname.length > 0 && !AGGREGATOR_LINK_HOSTS.has(hostname);
 }
 
-function isBriefSectionHeader(line) {
-  const upper = String(line || '').trim().toUpperCase();
-  return BRIEF_SECTION_HEADERS.some((header) => upper.startsWith(header));
+export function isBriefSectionHeader(line, { countryCode = '', countryName = '' } = {}) {
+  const upper = String(line || '').trim().toUpperCase().replace(/:\s*$/, '');
+  if (BRIEF_SECTION_HEADERS.includes(upper)) return true;
+  const country = upper.match(/^WHAT THIS MEANS FOR (.+)$/)?.[1];
+  // Legacy ISO headings are rewritten by the renderer. Named headings must
+  // equal the page's country; a section prefix alone is ordinary claim text.
+  return Boolean(country && (/^[A-Z]{2}$/.test(country)
+    || country === String(countryCode).trim().toUpperCase()
+    || country === String(countryName).trim().toUpperCase()));
 }
 
 // Briefs need grounding from at least this many DISTINCT PUBLISHERS before
@@ -175,7 +181,7 @@ export function normalizeBriefText(text, { countryCode = '', countryName = '' } 
     .replace(MARKDOWN_MARKERS_RE, '')
     .split('\n')
     .map((line) => line.replace(/\s+$/, '').replace(MARKDOWN_HEADING_RE, ''));
-  const firstHeader = lines.findIndex((line) => isBriefSectionHeader(line));
+  const firstHeader = lines.findIndex((line) => isBriefSectionHeader(line, { countryCode: code, countryName: name }));
   // Theatre carries no citations. A lead the model wrote under its own
   // header name ("CURRENT SITUATION ... [1]") is content, so a preamble with
   // a [n] citation anywhere is kept whole rather than guessed at.
@@ -195,27 +201,25 @@ export function normalizeBriefText(text, { countryCode = '', countryName = '' } 
 // Check whole paragraphs/bullets against EACH cited source: this deliberately
 // withholds mixed-source paragraphs when per-sentence attribution is ambiguous.
 // Uncited lines must still ground their names in the retained source set.
-export function briefCitationGroundingGap(brief) {
+export function briefCitationGroundingGap(brief, country = {}) {
   if (typeof brief?.text !== 'string' || !brief.text.trim()) return 'missing text';
   if (!Array.isArray(brief.sources) || !brief.sources.length
     || brief.sources.some((source) => typeof source?.title !== 'string' || !source.title.trim())) {
     return 'missing source titles';
   }
-  // Fold Latin accents and capitalize mixed-case brands (iPhone, eBay) for
-  // the shared extractor, on both sides of the comparison.
-  const comparable = (text) => text.normalize('NFKD').replace(/\p{M}/gu, '')
-    .replace(/(?<![\p{L}\p{N}_])\p{Ll}(?=\p{Ll}*\p{Lu})/gu, (letter) => letter.toUpperCase());
+  const comparable = (text) => text.normalize('NFKD').replace(/\p{M}/gu, '');
   const titles = brief.sources.map((source) => comparable(stripMarkdownMarkers(source.title)));
   let citationCount = 0;
-  for (const rawLine of normalizeBriefText(brief.text).split('\n')) {
+  for (const rawLine of normalizeBriefText(brief.text, country).split('\n')) {
     const line = rawLine.trim();
-    if (!line || isBriefSectionHeader(line)) continue;
+    if (!line || isBriefSectionHeader(line, country)) continue;
     const indexes = [...line.matchAll(/\[(\d+)\]/g)].map((match) => Number(match[1]));
     citationCount += indexes.length;
     if (indexes.some((index) => index < 1 || index > titles.length)) return 'out-of-range citation';
     const claim = comparable(line.replace(/\[\d+\]/g, '')
       .replace(/^(?:[•-]\s*|\*\s+)/, '')
-      .replace(/^NEXT \d+H:\s*/i, '').trim());
+      .replace(/^NEXT \d+H:\s*/i, '')
+      .replace(/^WHAT THIS MEANS FOR\s+/i, '').trim());
     if (!claim) return 'empty cited claim';
     const evidence = indexes.length ? indexes.map((index) => titles[index - 1]) : [titles.join('\n')];
     for (const [position, title] of evidence.entries()) {
@@ -283,7 +287,7 @@ export function normalizeFrozenDevelopments(developments, { countryCode = '', co
   if (gap) {
     return { ...cleaned, brief: null, briefSkipped: gap };
   }
-  if (briefCitationGroundingGap(brief)) {
+  if (briefCitationGroundingGap(brief, { countryCode, countryName })) {
     return { ...cleaned, brief: null, briefSkipped: 'unsupported-citation' };
   }
   return {

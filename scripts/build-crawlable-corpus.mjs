@@ -61,6 +61,7 @@ import {
   briefCitationGroundingGap,
   COUNTRY_INDEX_ORIGIN,
   developmentsHasDatedItem,
+  isBriefSectionHeader,
   normalizeFrozenDevelopments,
 } from './crawlable-developments.mjs';
 
@@ -3047,8 +3048,6 @@ ${faqs.map((faq) => `        <details data-country-faq><summary>${escapeHtml(faq
 // numbers moved in the same window the reporting was captured. Asserting that
 // a headline *drove* a score move would be fabrication — only an analyst (or
 // the brief, which cites its sources) may draw that link.
-const INTEL_BRIEF_SECTION_RE = /^(SITUATION NOW|WHAT THIS MEANS FOR\b.*|KEY RISKS|OUTLOOK|WATCH ITEMS)\s*$/i;
-
 function unwrapBriefEmphasisLine(line) {
   let current = String(line || '').trim();
   for (let i = 0; i < 4; i++) {
@@ -3095,29 +3094,12 @@ export function formatCrawlableIntelBrief(text, countryName) {
       closeList();
       continue;
     }
-    if (/^WHAT THIS MEANS FOR\b/i.test(trimmed)) {
+    if (isBriefSectionHeader(trimmed, { countryName: name })) {
       closeList();
-      out.push(`          <h3>What this means for ${escapeHtml(name)}</h3>`);
-      continue;
-    }
-    if (/^SITUATION NOW\b/i.test(trimmed)) {
-      closeList();
-      out.push('          <h3>Situation now</h3>');
-      continue;
-    }
-    if (/^KEY RISKS\b/i.test(trimmed)) {
-      closeList();
-      out.push('          <h3>Key risks</h3>');
-      continue;
-    }
-    if (/^OUTLOOK\b/i.test(trimmed)) {
-      closeList();
-      out.push('          <h3>Outlook</h3>');
-      continue;
-    }
-    if (/^WATCH ITEMS\b/i.test(trimmed)) {
-      closeList();
-      out.push('          <h3>Watch items</h3>');
+      const heading = /^WHAT THIS MEANS FOR\b/i.test(trimmed)
+        ? `What this means for ${name}`
+        : trimmed.replace(/:\s*$/, '').toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
+      out.push(`          <h3>${escapeHtml(heading)}</h3>`);
       continue;
     }
     if (/^(?:[•\-]\s*|\*\s+)/.test(trimmed)) {
@@ -3333,7 +3315,7 @@ export function assertCountryDevelopmentsRendered({
     const contentLines = rows.brief.text.trim().split('\n')
       .map((line) => unwrapBriefEmphasisLine(line.trim()))
       .filter(Boolean)
-      .filter((line) => !INTEL_BRIEF_SECTION_RE.test(line))
+      .filter((line) => !isBriefSectionHeader(line, { countryCode, countryName }))
       .map((line) => line.replace(/^(?:[•\-]\s*|\*\s+)/, '').replace(/\*\*/g, ''));
     const anchors = [contentLines[0], contentLines.at(-1)]
       .filter((line, index, all) => line && all.indexOf(line) === index)
