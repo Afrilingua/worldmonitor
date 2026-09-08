@@ -3709,7 +3709,8 @@ describe('crawlable corpus generator', () => {
       assert.equal(catalog.dataset.length, corpusData.crises.length + 1);
       for (const dataset of catalog.dataset) {
         assert.ok(dataset['@id'], `${dataset.name} must reuse its detail-page identity`);
-        const detailPath = new URL(dataset.url).pathname.slice(1) + 'index.html';
+        assert.deepEqual(dataset, { '@id': dataset['@id'] }, 'catalog must reference the canonical Dataset');
+        const detailPath = new URL(dataset['@id']).pathname.slice(1) + 'index.html';
         const details = jsonLdObjects(read(outDir, detailPath)).flatMap((node) => collectDatasets(node));
         assert.ok(details.some((node) => node['@type'] === 'Dataset' && node['@id'] === dataset['@id']),
           `${dataset['@id']} must identify a Dataset on the generated detail page`);

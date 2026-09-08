@@ -5047,38 +5047,14 @@ export async function buildCorpus({
   }
 
   // Flagship downloadable datasets for the /sources/ DataCatalog node: every
-  // entry resolves to a generated download the corpus writes, so the catalog
-  // never advertises a dataset without a distribution.
-  const convergenceMetricName = data.livePulse.signalConvergence.metricName || 'Geographic Convergence Score';
+  // entry references the detail-page Dataset with its generated download.
+  // Keep the body on that page so shared identities cannot diverge.
   const sourcesCatalogDatasets = [
-    ...data.crises.map((crisis) => {
-      const pagePath = `/crises/${crisis.slug}/`;
-      return {
-        '@type': 'Dataset',
-        '@id': `${absoluteUrl(baseUrl, pagePath)}#crisis-dataset`,
-        name: crisis.title,
-        description: crisis.description,
-        url: absoluteUrl(baseUrl, pagePath),
-        keywords: ['crisis tracker', 'armed conflict', 'humanitarian response'],
-        creator: { ...WORLD_MONITOR_ORG },
-        license: DATASET_LICENSE,
-        distribution: [
-          dataDownload(absoluteUrl(baseUrl, datasetDownloadHref(pagePath, CRISIS_DATASET_DOWNLOAD))),
-        ],
-      };
-    }),
+    ...data.crises.map((crisis) => ({
+      '@id': `${absoluteUrl(baseUrl, `/crises/${crisis.slug}/`)}#crisis-dataset`,
+    })),
     {
-      '@type': 'Dataset',
-      name: `${convergenceMetricName} reference`,
       '@id': `${absoluteUrl(baseUrl, '/tools/signal-convergence/')}#signal-convergence-dataset`,
-      description: `World Monitor's ${convergenceMetricName} (0-100) names when protests, military flights, naval vessels, and earthquakes co-occur in the same 1° cell.`,
-      url: absoluteUrl(baseUrl, '/tools/signal-convergence/'),
-      keywords: ['signal convergence', 'geographic correlation', 'early warning'],
-      creator: { ...WORLD_MONITOR_ORG },
-      license: DATASET_LICENSE,
-      distribution: [
-        dataDownload(absoluteUrl(baseUrl, datasetDownloadHref('/tools/signal-convergence/', CONVERGENCE_DATASET_DOWNLOAD))),
-      ],
     },
   ];
 
