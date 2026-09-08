@@ -5,7 +5,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 import { BrowserClient, Scope } from '@sentry/browser';
-import { getSentryBuildMetadata } from '../shared/sentry-build-metadata';
+import { getSentryBuildMetadata, isolateNonProductionSentryEvent } from '../shared/sentry-build-metadata';
 
 const originalEnv = { ...process.env };
 const sha = '0123456789abcdef0123456789abcdef01234567';
@@ -58,11 +58,13 @@ describe('Sentry build and event release contract', () => {
       for (const [index, config] of configs.entries()) {
         const metadata = getSentryBuildMetadata(
           JSON.parse(config.define.__APP_VERSION__), JSON.parse(config.define.__BUILD_HASH__),
+          target,
         );
         const upload = config.plugins.flat(Infinity).find((p: any) => p?.name === 'sentry-upload').options;
-        assert.equal(metadata.release, sha);
-        assert.equal(upload.release.name, metadata.release);
-        assert.equal(upload.release.dist, metadata.dist);
+        assert.equal(metadata.release, target === 'production' ? sha : undefined);
+        assert.equal(upload.release.name, sha);
+        assert.equal(upload.release.dist, sha);
+        assert.equal(upload.release.inject, false);
         const publishes = index === 0 && target === 'production';
         assert.equal(upload.release.create, publishes);
         assert.equal(upload.release.finalize, publishes);
@@ -75,6 +77,7 @@ describe('Sentry build and event release contract', () => {
         const client = new BrowserClient({
           ...metadata, dsn: 'https://public@example.invalid/1',
           integrations: [], stackParser: () => [],
+          beforeSend: event => { isolateNonProductionSentryEvent(event, target); return event; },
           transport: () => ({
             send: async (envelope) => { envelopes.push(envelope); return { statusCode: 200 }; },
             flush: async () => true,
@@ -86,8 +89,9 @@ describe('Sentry build and event release contract', () => {
         await client.flush(1000);
         assert.equal(envelopes.length, 1);
         const event = envelopes[0][1][0][1];
-        assert.equal(event.release, upload.release.name);
-        assert.equal(event.dist, upload.release.dist);
+        assert.equal(event.release, target === 'production' ? sha : undefined);
+        assert.equal(event.dist, target === 'production' ? sha : undefined);
+        assert.deepEqual(event.fingerprint, target === 'production' ? undefined : ['{{ default }}', `worldmonitor:${target}`]);
         assert.equal(event.tags.app_version, JSON.parse(config.define.__APP_VERSION__));
         assert.equal(event.tags.build_sha, sha);
         await client.close();

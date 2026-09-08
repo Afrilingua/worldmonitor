@@ -8,7 +8,7 @@
 
 import { isIosLikeUserAgent } from './platform-ua';
 import { SENTRY_ALLOW_URLS } from './sentry-allow-urls';
-import { getSentryBuildMetadata } from '../../shared/sentry-build-metadata';
+import { getSentryBuildMetadata, isolateNonProductionSentryEvent } from '../../shared/sentry-build-metadata';
 
 type SentryNs = typeof import('@sentry/browser');
 
@@ -58,12 +58,13 @@ const THIRD_PARTY_FETCH_HOST_ALLOWLIST = new Set([
 
 function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
   const sentryDsn = import.meta.env.VITE_SENTRY_DSN?.trim();
+  const environment = (location.hostname === 'worldmonitor.app' || location.hostname.endsWith('.worldmonitor.app')) ? 'production'
+    : location.hostname.includes('vercel.app') ? 'preview'
+    : 'development';
   return {
     dsn: sentryDsn || undefined,
-    ...getSentryBuildMetadata(__APP_VERSION__, __BUILD_HASH__),
-    environment: (location.hostname === 'worldmonitor.app' || location.hostname.endsWith('.worldmonitor.app')) ? 'production'
-      : location.hostname.includes('vercel.app') ? 'preview'
-      : 'development',
+    ...getSentryBuildMetadata(__APP_VERSION__, __BUILD_HASH__, environment),
+    environment,
     enabled: Boolean(sentryDsn) && !location.hostname.startsWith('localhost') && !('__TAURI_INTERNALS__' in window),
     allowUrls: SENTRY_ALLOW_URLS,
     sendDefaultPii: true,
@@ -431,6 +432,7 @@ function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
       /^(?:CollectorTransportError: )?Umami collector beacon transport rejected\b/,
     ],
     beforeSend(event) {
+      isolateNonProductionSentryEvent(event, environment);
       const msg = event.exception?.values?.[0]?.value ?? '';
       if (msg.length <= 3 && /^[a-zA-Z_$]+$/.test(msg)) return null;
       const frames = event.exception?.values?.[0]?.stacktrace?.frames ?? [];

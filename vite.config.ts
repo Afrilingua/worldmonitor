@@ -962,6 +962,7 @@ export default defineConfig(({ mode }) => {
             telemetry: false,
             release: {
               name: sentryBuild.release,
+              inject: false,
               dist: sentryBuild.dist,
               // Preview/local uploads must not resolve shared production issues.
               create: publishSentryRelease,

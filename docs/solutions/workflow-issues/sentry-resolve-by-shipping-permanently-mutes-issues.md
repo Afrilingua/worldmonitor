@@ -27,10 +27,17 @@ the installed integration settings; GitHub issue-status synchronization is a
 separate setting. Do not disable the integration or replace it with manual triage.
 
 `shared/sentry-build-metadata.ts` now supplies the deployment SHA as `release`
-for both dashboard and marketing events, matching `api/_sentry-common.js`.
+for production dashboard and marketing events, matching `api/_sentry-common.js`.
 Both Vite uploaders use that same release and `dist`. `app_version` retains the
 semantic version for searches across deployments; release health is now per SHA.
-Missing or malformed build markers retain the local semver fallback.
+Missing or malformed production build markers retain the semver fallback.
+
+Preview and development browser events retain build/version tags but omit release
+and dist, and use environment-specific fingerprints even for custom groups.
+This keeps them out of production release ordering and issue regression state.
+Both uploaders disable automatic release injection; the SDK sets production
+release metadata explicitly. Build-time `create: false` alone is insufficient
+because an event carrying a release can create that release during ingestion.
 
 The marketing build only uploads artifacts. The production root build owns
 release creation, finalization, and automatic commit association. Preview and
@@ -58,7 +65,8 @@ The release owner must record the following evidence before calling #7838 closed
    Then send the same fingerprint from a later release C and confirm the issue
    reopens. Include a client still running the old semver bundle in the old-build
    check. Do not infer release ordering from the lexical order of SHA strings.
-4. Verify preview builds do not associate resolving commits. Audit any historical
+4. Verify preview events have no release and group separately from production,
+   and preview builds do not associate resolving commits. Audit any historical
    pin against actual deployed releases; alignment does not repair existing pins
    or issues with missing release metadata by itself.
 

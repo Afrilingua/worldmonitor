@@ -39,6 +39,7 @@ export default defineConfig({
           telemetry: false,
           release: {
             name: sentryBuild.release,
+            inject: false,
             dist: sentryBuild.dist,
             // The root build publishes the release after both bundles build.
             create: false,
