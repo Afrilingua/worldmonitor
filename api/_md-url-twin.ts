@@ -5,8 +5,16 @@
  * text/markdown (or a heading-led non-HTML body). Static files under public/
  * win. Everything else is generated from the sibling URL.
  *
+ * The sibling is asked for text/markdown first, so a prerendered page comes
+ * back as Vercel's own markdown conversion instead of a scrape of its HTML.
+ * Same-origin redirects are followed (every content URL here 308s /x to /x/)
+ * and the twin inherits the final target's status, so an invented path is a
+ * 404 rather than an indexable stub. The canonical always names the final
+ * HTML page, never the .md twin, and only a response that carries the real
+ * document is left indexable.
+ *
  * Loop-prevention: sibling fetches send x-wm-md-twin so a .md handler never
- * fetches another .md handler.
+ * fetches another .md handler, and a redirect onto a .md path is not followed.
  */
 
 // @ts-expect-error — JS module, no declaration file
@@ -14,8 +22,9 @@ import { getPublicCorsHeaders } from './_cors.js';
 import { appendDeprecationPolicyLinkToRecord, DEPRECATION_POLICY_LINK } from '../server/_shared/deprecation-policy';
 
 export const MD_TWIN_LOOP_HEADER = 'x-wm-md-twin';
-const MAX_TWIN_CHARS = 80_000;
-export const MAX_TWIN_BYTES = 80_000;
+const MAX_TWIN_CHARS = 512_000;
+export const MAX_TWIN_BYTES = 512_000;
+const MAX_SIBLING_REDIRECTS = 3;
 const SIBLING_FETCH_TIMEOUT_MS = 8_000;
 const SIBLING_USER_AGENT = 'WorldMonitor-MarkdownTwin/1.0';
 const FORWARDED_RESPONSE_HEADERS = [
@@ -139,14 +148,35 @@ function jsonToMarkdown(raw: string, heading: string): string {
   return `# ${heading}\n\n\`\`\`json\n${pretty}\n\`\`\``.slice(0, MAX_TWIN_CHARS);
 }
 
-function withMarkdownMetadata(markdown: string, canonical: string): string {
-  if (markdown.startsWith('---\n')) return markdown;
-  const title = markdown.match(/^# (.+)$/m)?.[1] ?? headingFromPath(new URL(canonical).pathname);
-  return `---\ntitle: ${JSON.stringify(title)}\ncanonical: ${JSON.stringify(canonical)}\n---\n\n${markdown}`;
+const FRONT_MATTER = /^---\n([\s\S]*?)\n---(?:\n|$)/;
+
+function withHeading(markdown: string, heading: string): string {
+  if (/^# /m.test(markdown)) return markdown;
+  // Asking the sibling for markdown makes a front-matter-led body the common
+  // case, and a heading prepended above the opening `---` would swallow the
+  // whole block into the document text.
+  const block = markdown.match(FRONT_MATTER)?.[0];
+  return block
+    ? `${block}\n# ${heading}\n\n${markdown.slice(block.length)}`
+    : `# ${heading}\n\n${markdown}`;
 }
 
-function markdownHeaders(req: Request, markdownPath: string, extra: Record<string, string> = {}): Record<string, string> {
-  const origin = new URL(req.url).origin;
+function withMarkdownMetadata(markdown: string, canonical: string | null, fallbackTitle: string): string {
+  const frontMatter = markdown.match(FRONT_MATTER);
+  if (frontMatter) {
+    if (!canonical) return markdown;
+    // Vercel's own front-matter carries title/description/image but no
+    // canonical; keep its lines byte-for-byte and append ours.
+    const lines = (frontMatter[1] ?? '').split('\n').filter((line) => !line.startsWith('canonical:'));
+    lines.push(`canonical: ${JSON.stringify(canonical)}`);
+    return `---\n${lines.join('\n')}\n---\n${markdown.slice(frontMatter[0].length)}`;
+  }
+  const title = markdown.match(/^# (.+)$/m)?.[1] ?? fallbackTitle;
+  const canonicalLine = canonical ? `\ncanonical: ${JSON.stringify(canonical)}` : '';
+  return `---\ntitle: ${JSON.stringify(title)}${canonicalLine}\n---\n\n${markdown}`;
+}
+
+function markdownHeaders(canonical: string | null, extra: Record<string, string> = {}): Record<string, string> {
   return {
     'Content-Type': 'text/markdown; charset=utf-8',
     'X-Content-Type-Options': 'nosniff',
@@ -157,7 +187,7 @@ function markdownHeaders(req: Request, markdownPath: string, extra: Record<strin
     // no other variance needs declaring.
     Vary: MD_TWIN_LOOP_HEADER,
     ...getPublicCorsHeaders('GET, HEAD, OPTIONS'),
-    Link: `<${origin}${markdownPath}>; rel="canonical", ${DEPRECATION_POLICY_LINK}`,
+    Link: canonical ? `<${canonical}>; rel="canonical", ${DEPRECATION_POLICY_LINK}` : DEPRECATION_POLICY_LINK,
     ...extra,
   };
 }
@@ -238,14 +268,14 @@ export async function buildMarkdownTwinResponse(
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return new Response('# Method not allowed\n', {
       status: 405,
-      headers: markdownHeaders(req, markdownPath, { Allow: 'GET, HEAD, OPTIONS' }),
+      headers: markdownHeaders(null, { Allow: 'GET, HEAD, OPTIONS', 'X-Robots-Tag': 'noindex' }),
     });
   }
 
   if (req.headers.get(MD_TWIN_LOOP_HEADER) === '1') {
     return new Response('# Not found\n', {
       status: 404,
-      headers: markdownHeaders(req, markdownPath, { 'Cache-Control': 'no-store' }),
+      headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
     });
   }
 
@@ -253,70 +283,97 @@ export async function buildMarkdownTwinResponse(
   if (!sibling) {
     return new Response('# Not found\n', {
       status: 404,
-      headers: markdownHeaders(req, markdownPath, { 'Cache-Control': 'no-store' }),
+      headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
     });
   }
 
-  const siblingUrl = new URL(sibling, req.url);
-  siblingUrl.search = new URL(req.url).search;
+  const heading = headingFromPath(sibling);
+  const requestUrl = new URL(req.url);
+  let siblingUrl = new URL(sibling, requestUrl);
+  siblingUrl.search = requestUrl.search;
+  if (requestUrl.pathname === '/api/md-twin' || requestUrl.pathname === '/api/md-twin/') {
+    // `path`/`mdPath` belong to the afterFiles rewrite, not to the caller.
+    siblingUrl.searchParams.delete('path');
+    siblingUrl.searchParams.delete('mdPath');
+  }
 
   const outbound = new Headers();
   outbound.set('user-agent', SIBLING_USER_AGENT);
   outbound.set(MD_TWIN_LOOP_HEADER, '1');
-  outbound.set('accept', 'text/html, application/json;q=0.9, text/plain;q=0.8, */*;q=0.1');
+  outbound.set('accept', 'text/markdown, text/html;q=0.9, application/json;q=0.8, text/plain;q=0.7, */*;q=0.1');
 
   let siblingRes: Response;
-  try {
-    siblingRes = await fetchImpl(siblingUrl, {
-      method: req.method,
-      headers: outbound,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(SIBLING_FETCH_TIMEOUT_MS),
-    });
-  } catch {
-    return new Response(`# ${headingFromPath(sibling)}\n\nThe sibling page at \`${sibling}\` could not be fetched.\n`, {
-      status: 502,
-      headers: markdownHeaders(req, markdownPath, { 'Cache-Control': 'no-store' }),
-    });
-  }
+  for (let hops = 0; ; hops += 1) {
+    let redirectTarget: URL | null;
+    try {
+      siblingRes = await fetchImpl(siblingUrl, {
+        method: req.method,
+        headers: outbound,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(SIBLING_FETCH_TIMEOUT_MS),
+      });
+      const location = siblingRes.headers.get('location');
+      redirectTarget =
+        siblingRes.status >= 300 && siblingRes.status < 400 && location ? new URL(location, siblingUrl) : null;
+    } catch {
+      return new Response(`# ${heading}\n\nThe sibling page at \`${sibling}\` could not be fetched.\n`, {
+        status: 502,
+        headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
+      });
+    }
+    if (!redirectTarget) break;
 
-  const location = siblingRes.headers.get('location');
-  if (siblingRes.status >= 300 && siblingRes.status < 400 && location) {
-    const body = `# ${headingFromPath(sibling)}\n\nThis resource redirects to [${location}](${location}).\n`;
-    return new Response(req.method === 'HEAD' ? null : withMarkdownMetadata(body, new URL(markdownPath, req.url).href), {
-      status: 200,
-      headers: markdownHeaders(req, markdownPath),
-    });
+    if (redirectTarget.origin !== requestUrl.origin) {
+      const body = `# ${heading}\n\nThis resource redirects to [${redirectTarget.href}](${redirectTarget.href}).\n`;
+      return new Response(req.method === 'HEAD' ? null : withMarkdownMetadata(body, null, heading), {
+        status: 200,
+        headers: markdownHeaders(null, { 'X-Robots-Tag': 'noindex' }),
+      });
+    }
+
+    // A .md target would re-enter this handler; the hop budget bounds the
+    // chain even when every hop is a legitimate same-origin redirect.
+    if (hops >= MAX_SIBLING_REDIRECTS || isMarkdownTwinPath(redirectTarget.pathname)) {
+      return new Response('# Not found\n', {
+        status: 404,
+        headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
+      });
+    }
+    siblingUrl = redirectTarget;
   }
 
   const isFailure = !siblingRes.ok;
   const siblingStatus = isFailure ? siblingRes.status : 200;
+  // Query-less, matching what the sibling's own <link rel="canonical"> emits:
+  // /countries/iran/?foo=1 canonicalises to /countries/iran/. Carrying the
+  // query here would chain one canonical into another and let query params
+  // reopen the unbounded twin space this handler exists to close.
+  const canonical = isFailure ? null : `${siblingUrl.origin}${siblingUrl.pathname}`;
   const responseHeaders: Record<string, string> = {
-    ...(isFailure ? { 'Cache-Control': 'no-store' } : {}),
+    ...(isFailure ? { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' } : {}),
     ...forwardedResponseHeaders(siblingRes),
   };
 
   if (req.method === 'HEAD') {
     return new Response(null, {
       status: siblingStatus,
-      headers: markdownHeaders(req, markdownPath, responseHeaders),
+      headers: markdownHeaders(canonical, responseHeaders),
     });
   }
 
   if (siblingStatus === 304) {
     return new Response(null, {
       status: siblingStatus,
-      headers: markdownHeaders(req, markdownPath, responseHeaders),
+      headers: markdownHeaders(canonical, responseHeaders),
     });
   }
 
-  const heading = headingFromPath(sibling);
   let markdown: string;
   try {
     const contentType = siblingRes.headers.get('content-type') ?? '';
     const raw = await readSiblingBody(siblingRes);
 
-    if (/markdown|text\/plain/i.test(contentType) && /^# /m.test(raw)) {
+    if (/markdown|text\/plain/i.test(contentType) && (/^# /m.test(raw) || FRONT_MATTER.test(raw))) {
       markdown = raw.slice(0, MAX_TWIN_CHARS);
     } else if (/json/i.test(contentType) || raw.trim().startsWith('{') || raw.trim().startsWith('[')) {
       markdown = jsonToMarkdown(raw, heading);
@@ -328,18 +385,16 @@ export async function buildMarkdownTwinResponse(
       markdown = /^# /m.test(raw) ? raw.slice(0, MAX_TWIN_CHARS) : `# ${heading}\n\n${raw}`.slice(0, MAX_TWIN_CHARS);
     }
 
-    if (!/^# /m.test(markdown)) {
-      markdown = `# ${heading}\n\n${markdown}`;
-    }
+    markdown = withHeading(markdown, heading);
   } catch {
     return new Response(`# ${heading}\n\nThe sibling page at \`${sibling}\` could not be read.\n`, {
       status: 502,
-      headers: markdownHeaders(req, markdownPath, { 'Cache-Control': 'no-store' }),
+      headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
     });
   }
 
-  return new Response(withMarkdownMetadata(markdown, new URL(markdownPath, req.url).href), {
+  return new Response(withMarkdownMetadata(markdown, canonical, heading), {
     status: siblingStatus,
-    headers: markdownHeaders(req, markdownPath, responseHeaders),
+    headers: markdownHeaders(canonical, responseHeaders),
   });
 }

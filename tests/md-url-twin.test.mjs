@@ -268,6 +268,54 @@ describe('api/md-twin.ts', () => {
     });
   });
 
+  it('keeps the canonical query-less, the way the sibling page canonicalises itself', async () => {
+    const originalFetch = globalThis.fetch;
+    const { fetchImpl } = siblingChain(
+      new Response('# AAPL\n', { status: 200, headers: { 'content-type': 'text/markdown' } }),
+    );
+    globalThis.fetch = fetchImpl;
+    let response;
+    try {
+      response = await handler(
+        new Request('https://www.worldmonitor.app/api/md-twin?path=stocks%2FAAPL&range=1y'),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    // /stocks/AAPL?range=1y emits <link rel="canonical" href=".../dashboard">,
+    // so a query-bearing twin canonical would chain, and every param value
+    // would mint another indexable twin URL.
+    assert.match(
+      response.headers.get('link') ?? '',
+      /<https:\/\/www\.worldmonitor\.app\/stocks\/AAPL>; rel="canonical"/,
+    );
+    assert.doesNotMatch(response.headers.get('link') ?? '', /range=1y/);
+    assert.doesNotMatch(await response.text(), /range=1y/);
+  });
+
+  it('keeps front-matter intact when the sibling document has no H1', async () => {
+    const response = await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/example.md'),
+      '/example.md',
+      async () =>
+        new Response('---\ntitle: Upstream title\n---\n\nBody with no heading.\n', {
+          status: 200,
+          headers: { 'content-type': 'text/markdown; charset=utf-8' },
+        }),
+    );
+
+    const document = await response.text();
+    assert.ok(document.startsWith('---\n'), `front-matter must stay first, got: ${document.slice(0, 40)}`);
+    const block = document.match(/^---\n([\s\S]*?)\n---\n/);
+    assert.deepEqual(load(block[1]), {
+      title: 'Upstream title',
+      canonical: 'https://www.worldmonitor.app/example',
+    });
+    assert.match(document, /^# example$/m, 'the twin stays heading-led below the front-matter');
+    assert.match(document, /Body with no heading\./);
+  });
+
   it('returns the deprecation policy Link on OPTIONS preflights', async () => {
     const res = await buildMarkdownTwinResponse(
       new Request('https://www.worldmonitor.app/dashboard.md', { method: 'OPTIONS' }),
