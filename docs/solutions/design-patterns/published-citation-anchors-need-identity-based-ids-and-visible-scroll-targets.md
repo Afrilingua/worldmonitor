@@ -28,13 +28,13 @@ related_components:
 
 ## Context
 
-`/sources/` is a generated static page listing World Monitor's whole provider catalog. Round 7 of the GEO audit found its schema.org `ItemList` announcing all of the catalog's elements as **bare strings**, with 43 of the display names repeated (`sourceCardAnchors()` in `scripts/crawlable-sources-page.mjs`). The repeats were not duplicate data: they are one publisher reached through several hosts — Yahoo Finance through three, Euronews through eight language editions — each of which is a distinct catalog entry that a display name alone cannot tell apart. A parser reading that list had 748 opaque labels, no way to key on them, and no way to distinguish the eight Euronews entries from each other.
+`/sources/` is a generated static page listing World Monitor's whole provider catalog. Round 7 of the GEO audit found its schema.org `ItemList` announcing all of the catalog's elements as **bare strings**, with 43 of the display names repeated (`renderSourcesIndex()` in `scripts/crawlable-sources-page.mjs`). The repeats were not duplicate data: they are one publisher reached through several hosts — Yahoo Finance through three, Euronews through eight language editions — each of which is a distinct catalog entry that a display name alone cannot tell apart. A parser reading that list had 748 opaque labels, no way to key on them, and no way to distinguish the eight Euronews entries from each other.
 
 The fix (issue #7869, PR #7881 — open and unmerged as of this writing) gave every provider card a stable `id` and gave every `ListItem` a `url` addressing one specific card:
 
 - `sourceCardAnchors()` at `scripts/crawlable-sources-page.mjs` builds the per-provider anchor map, keyed on `provider` (the catalog's own unique key), not on the display name.
-- The card markup interpolates the id at `scripts/crawlable-sources-page.mjs`.
-- The JSON-LD emits `url: \`${pageUrl}#${cardAnchors.get(provider.provider)}\`` at `scripts/crawlable-sources-page.mjs`, alongside `'@type': 'ListItem'` and a 1-based `position` (`:1123-1125`).
+- The card markup interpolates the id in `renderSourcesIndex()`, in the same `scripts/crawlable-sources-page.mjs`.
+- The JSON-LD emits `url: \`${pageUrl}#${cardAnchors.get(provider.provider)}\`` in `renderSourcesIndex()`, alongside `'@type': 'ListItem'` and a 1-based `position`.
 
 That work is where the lesson lives. Adding the ids turned two properties that had been purely cosmetic — *where* a fragment lands on screen, and *which* card a given fragment names — into correctness properties. Both broke in the first version, both were caught in code review, and both are now pinned by tests proven to fail before the fix.
 
@@ -75,10 +75,10 @@ The through-line is worth stating plainly, because it is the part that generaliz
 
 Two stacked `position: sticky` elements sit above the card grid:
 
-- `.sources-page header` — `position: sticky; top: 0`, 146px tall (`sourceCardAnchors()` in `scripts/crawlable-sources-page.mjs`)
-- `.catalog-controls` — `position: sticky; top: 68px`, bottom edge at 167px (`sourceCardAnchors()` in `scripts/crawlable-sources-page.mjs`)
+- `.sources-page header` — `position: sticky; top: 0`, 146px tall (`renderSourcesIndex()` in `scripts/crawlable-sources-page.mjs`)
+- `.catalog-controls` — `position: sticky; top: 68px`, bottom edge at 167px (`renderSourcesIndex()` in `scripts/crawlable-sources-page.mjs`)
 
-A provider card is `min-height: 180px` (`sourceCardAnchors()` in `scripts/crawlable-sources-page.mjs`). Following `#provider-x` scrolled the card to viewport y = -0.06 — measured in Chromium against the generated page before the offset landed — leaving 167 of its 180px buried under chrome. The fix is `scroll-margin-top: 176px` on `.provider-card`, in the same rule (`sourceCardAnchors()` in `scripts/crawlable-sources-page.mjs`). Below 720px `.catalog-controls` goes `static` and only the header stickies, so 176px is generous there rather than wrong (`sourceCardAnchors()` in `scripts/crawlable-sources-page.mjs`).
+A provider card is `min-height: 180px` (`renderSourcesIndex()` in `scripts/crawlable-sources-page.mjs`). Following `#provider-x` scrolled the card to viewport y = -0.06 — measured in Chromium against the generated page before the offset landed — leaving 167 of its 180px buried under chrome. The fix is `scroll-margin-top: 176px` on `.provider-card`, in the same rule. Below 720px `.catalog-controls` goes `static` and only the header stickies, so 176px is generous there rather than wrong.
 
 ### 3. Anchors must survive every change to the rest of the catalog
 
@@ -88,7 +88,7 @@ Same root property as (1), stated as the invariant you can actually run. Not one
 
 The obvious test — and the one the first version of this test wrote — asserts that every ListItem url's fragment appears somewhere in the page. That test passes on a permuted anchor map, on a buried card, and on an order-dependent counter. The stronger assertions actually shipped:
 
-- **Right card, not just some card.** `tests/crawlable-corpus.test.mjs` builds a `cardProviderByAnchor` map from the rendered `<article class="provider-card" id="..." data-provider="...">` markup and asserts each anchor's `data-provider` equals `corpusData.sourceCatalog[index].provider`. The comment at `:3606-3612` states why: "an anchor map that permuted its urls across the catalog would satisfy 'every fragment resolves' while sending every citation to the wrong source."
+- **Right card, not just some card.** `tests/crawlable-corpus.test.mjs` builds a `cardProviderByAnchor` map from the rendered `<article class="provider-card" id="..." data-provider="...">` markup and asserts each anchor's `data-provider` equals `corpusData.sourceCatalog[index].provider`. The test's own comment states why: "an anchor map that permuted its urls across the catalog would satisfy 'every fragment resolves' while sending every citation to the wrong source."
 - **Rendered stylesheet clears the chrome.** `tests/crawlable-corpus.test.mjs` reads the `extraStyles` the page generator *returns* — not the module's source text — matches the `.provider-card { ... }` rule, and asserts `scroll-margin-top` is `>= 167`. Reading the rendered style block is what makes a future header resize that re-buries the anchors fail.
 - **Independence from the rest of the catalog.** `tests/crawlable-corpus.test.mjs` pins each way an anchor must not move, as separate assertions: colliding keys stay distinct; reversing the catalog changes nothing; adding a *later* collider changes nothing (the assertion that shape 2 fails); and the same key alone versus among neighbours yields the same string. Writing them as four named claims rather than one "is deterministic" check is what made the shape-2 gap visible as a specific missing assertion.
 - **Character class.** The `keeps every anchor inside the character class...` test pins every anchor to `/^provider-[a-z0-9-]+$/`. The card markup interpolates the id without `escapeHtml` — as it does for `data-source-domain`, `data-source-kind` and `data-source-country` — so the slug's character class, not the caller, is what makes that safe.
@@ -226,7 +226,7 @@ The same block pins the degenerate case too: two unsluggable keys (`'---'`, `'!!
 
 ### The JSON-LD the anchors feed
 
-`scripts/crawlable-sources-page.mjs` — every element is a `ListItem` with a dense 1-based `position` and a fragment url, and `numberOfItems` now counts addressable things:
+`renderSourcesIndex()` in `scripts/crawlable-sources-page.mjs` — every element is a `ListItem` with a dense 1-based `position` and a fragment url, and `numberOfItems` now counts addressable things:
 
 ```js
 mainEntity: {
