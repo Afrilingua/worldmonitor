@@ -242,6 +242,43 @@ describe('developmentsHasDatedItem', () => {
 });
 
 describe('normalizeFrozenDevelopments', () => {
+  it('withholds invented assets and citations to the wrong source (#7865)', () => {
+    const sources = [
+      { title: 'Israel resumes talks', source: 'Reuters', url: 'https://reuters.com/a' },
+      { title: 'Tamar resumes production', source: 'BBC', url: 'https://bbc.com/b' },
+    ];
+    for (const text of [
+      'Tamar faces disruption [1].',
+      'Tamar faces disruption [1][2].',
+      'Israel resumes talks [1]. Leviathan faces disruption [1].',
+      'Israel resumes talks [1].\n• Cerrejón faces disruption.',
+      'Caño Limón-Coveñas faces disruption [1].',
+      'El Guri faces disruption [1].',
+      'Électricité de France faces disruption [1].',
+      'The iPhone faces disruption [1].',
+    ]) {
+      const row = { headlines: sources, brief: { text, sources }, timeline: [], briefSkipped: null };
+      const out = normalizeFrozenDevelopments(row);
+      assert.equal(out.brief, null, text);
+      assert.equal(out.briefSkipped, 'unsupported-citation');
+      assert.deepEqual(out.headlines, sources);
+      assert.equal(row.brief.text, text, 'the historical input is unchanged');
+      assert.deepEqual(normalizeFrozenDevelopments(out), out, 'withholding is idempotent');
+    }
+  });
+
+  it('retains supported entities and the original source indexes', () => {
+    const sources = [
+      { title: 'Israel resumes talks', source: 'Reuters', url: 'https://reuters.com/a' },
+      { title: 'Tamar resumes production', source: 'BBC', url: 'https://bbc.com/b' },
+    ];
+    const text = 'SITUATION NOW\nIsrael resumes talks [1].\nWHAT THIS MEANS FOR ISRAEL\n• Tamar faces disruption [2].';
+    const out = normalizeFrozenDevelopments({ brief: { text, sources }, briefSkipped: null });
+    assert.equal(out.brief.text, text);
+    assert.deepEqual(out.brief.sources, sources);
+    assert.equal(out.briefSkipped, null);
+  });
+
   // Distinct hosts per wire: rows on one site are one publisher (#7748).
   const source = (n) => ({
     title: `Story ${n}`,
@@ -250,7 +287,7 @@ describe('normalizeFrozenDevelopments', () => {
     publishedAt: '2026-09-02T10:00:00.000Z',
   });
   const brief = (sources) => ({
-    text: 'SITUATION NOW\n**Bold** claim [1].\n\nWHAT THIS MEANS FOR SD\n• item',
+    text: 'SITUATION NOW\n**Story** develops [1].\n\nWHAT THIS MEANS FOR SD\n• item',
     model: 'm',
     generatedAt: '2026-09-02T12:00:00.000Z',
     sources,

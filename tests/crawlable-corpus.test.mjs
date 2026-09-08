@@ -5299,7 +5299,7 @@ describe('country recent developments', () => {
     publishedAt: '2026-09-02T10:00:00.000Z',
   };
   const BRIEF = {
-    text: 'SITUATION NOW\nConvoys move under escort [1].',
+    text: 'SITUATION NOW\nSudan aid convoys move under escort [1].',
     model: 'test-model',
     generatedAt: '2026-09-02T12:00:00.000Z',
     sources: [
@@ -5353,7 +5353,7 @@ describe('country recent developments', () => {
     // blob), generation line and grounding source count.
     assert.ok(html.includes('data-intel-brief'));
     assert.ok(html.includes('<h3>Situation now</h3>'));
-    assert.ok(html.includes('Convoys move under escort [1].'));
+    assert.ok(html.includes('Sudan aid convoys move under escort [1].'));
     assert.ok(html.includes('<time datetime="2026-09-02T12:00:00.000Z">'));
     assert.ok(html.includes('from 2 grounding sources'));
     // Timeline event with summary, domain and source link.
@@ -5370,14 +5370,14 @@ describe('country recent developments', () => {
         ...DEVELOPMENTS,
         brief: {
           ...BRIEF,
-          text: '**INTELLIGENCE BRIEF: GE (GEORGIA)**\n**CLASSIFICATION:** CONFIDENTIAL\n\n**SITUATION NOW**\nEnergy inflection point [1].',
+          text: '**INTELLIGENCE BRIEF: GE (GEORGIA)**\n**CLASSIFICATION:** CONFIDENTIAL\n\n**SITUATION NOW**\nSudan faces an energy inflection point [1].',
         },
       },
     });
     assert.ok(!html.includes('CONFIDENTIAL'));
     assert.ok(!html.includes('INTELLIGENCE BRIEF'));
     assert.ok(html.includes('<h3>Situation now</h3>'));
-    assert.ok(html.includes('<p>Energy inflection point [1].</p>'));
+    assert.ok(html.includes('<p>Sudan faces an energy inflection point [1].</p>'));
   });
 
   it('withholds a brief grounded on a single source but keeps the dated headline', () => {
@@ -5437,17 +5437,21 @@ describe('country recent developments', () => {
       .filter(([, developments]) => developments && typeof developments === 'object');
     assert.ok(rows.length > 0, 'the fixture snapshot carries developments');
     let briefs = 0;
+    let withheld = 0;
     for (const [code, developments] of rows) {
       if (developments.brief) {
         briefs += 1;
         assert.ok(developments.brief.sources.length >= 2, `${code} publishes a brief off ${developments.brief.sources.length} source`);
         assert.ok(!developments.brief.text.includes('**'), `${code} brief still carries markdown`);
         assert.ok(!/^WHAT THIS MEANS FOR [A-Z]{2}\s*$/m.test(developments.brief.text), `${code} brief still carries the ISO code heading`);
+      } else if (developments.briefSkipped === 'unsupported-citation') {
+        withheld += 1;
+        assert.ok(developments.headlines.length >= 1);
       } else if (developments.briefSkipped === 'thin-grounding') {
         assert.ok(developments.headlines.length >= 1, `${code} withheld a brief but kept no headline`);
       }
     }
-    assert.ok(briefs > 0, 'the fixture snapshot carries publishable briefs');
+    assert.ok(briefs + withheld > 0, 'the fixture must exercise published or withheld briefs');
   });
 
   it('rejects literal markdown emphasis and ISO brief-heading leaks (#7738)', () => {
@@ -5504,21 +5508,24 @@ describe('country recent developments', () => {
             'Norway’s sovereign wealth fund proposed cutting U.S. Treasury holdings [1].',
             '',
             'WHAT THIS MEANS FOR NO',
-            '• **Norges Bank Investment Management (NBIM)**: Proposed slashing of U.S. Treasury holdings [1].',
-            '• **Russian ship seizure**: Sparks diplomatic retaliation from Moscow.',
+            '• **Norges Bank Investment Management (NBIM)**: could adjust U.S. Treasury holdings [1].',
+            '• **Russian ship seizure**: sparks diplomatic retaliation from Moscow.',
             '',
             'KEY RISKS',
-            '• **Retaliatory Russian actions**: maritime restrictions.',
+            '• **Russian actions**: maritime restrictions.',
             '',
             'OUTLOOK',
-            'NEXT 24H: Officials respond.',
+            'NEXT 24H: The officials respond.',
             '',
             'WATCH ITEMS',
             'NBIM asset allocation announcement · Russian maritime declarations',
           ].join('\n'),
           model: 'test-model',
           generatedAt: '2026-09-02T08:16:38.074Z',
-          sources: [HEADLINE, { ...HEADLINE, source: 'Reuters', url: 'https://example.test/second' }],
+          sources: [
+            { ...HEADLINE, title: 'Norway fund: Norges Bank Investment Management (NBIM) considers U.S. Treasury holdings' },
+            { ...HEADLINE, title: 'Russian ship seizure: Moscow weighs Russian actions', source: 'Reuters', url: 'https://example.test/second' },
+          ],
         },
         timeline: [],
         briefSkipped: null,
@@ -5535,7 +5542,7 @@ describe('country recent developments', () => {
       developments: {
         headlines: [],
         brief: {
-          text: '### **WHAT THIS MEANS FOR NO**\nNamed infrastructure impact [1].',
+          text: '### **WHAT THIS MEANS FOR NO**\nSudan infrastructure impact [1].',
           model: 'test-model',
           generatedAt: '2026-09-02T08:16:38.074Z',
           sources: [HEADLINE, { ...HEADLINE, source: 'Reuters', url: 'https://example.test/second' }],
@@ -5557,6 +5564,17 @@ describe('country recent developments', () => {
     const headlineCount = (html.match(/https:\/\/news\.un\.org\/feed\/view\/en\/story\/2026\/09\/1168270/g) || []).length;
     assert.equal(harvestCount, 1, 'a brief-cited URL beyond the headlines renders once');
     assert.equal(headlineCount, 1, 'a URL in both headlines and brief sources renders once');
+  });
+
+  it('rejects unsupported names added after normalization in the rendered brief (#7865)', () => {
+    const html = renderCountryDevelopments({ countryName: 'Sudan', developments: DEVELOPMENTS });
+    const input = { pagePath: '/countries/sudan/', html, sources: BRIEF.sources };
+    assertCountryBriefPresentation(input);
+    assert.throws(() => assertCountryBriefPresentation({
+      ...input,
+      html: html.replace('Sudan aid convoys move under escort [1].', 'Tamar faces disruption [1].'),
+    }), /unsupported citation/);
+    assert.throws(() => assertCountryBriefPresentation({ ...input, sources: [] }), /missing source titles/);
   });
 
   it('renders nothing when zero items were captured', () => {
@@ -5680,7 +5698,7 @@ describe('country recent developments', () => {
       countryName: 'Sudan"><img src=x onerror=alert(1)>',
       developments: {
         headlines: [{ ...HEADLINE, source: 'Wire</small><script>alert(2)</script>' }],
-        brief: { ...BRIEF, text: 'Lead <b>bold</b> claim [1]', model: 'm"x' },
+        brief: { ...BRIEF, text: 'Sudan <b>bold</b> claim [1]', model: 'm"x' },
         timeline: [{ ...TIMELINE[0], summary: 'Done <iframe src="x"></iframe>', domain: 'd"e' }],
         briefSkipped: null,
         capturedAt: '2026-09-03T00:00:00.000Z',
@@ -5753,7 +5771,7 @@ describe('country recent developments', () => {
     assert.throws(
       () => assertCountryDevelopmentsRendered({
         pagePath: '/countries/sudan/',
-        html: html.replaceAll('Convoys move under escort [1].', ''),
+        html: html.replaceAll('Sudan aid convoys move under escort [1].', ''),
         developments: DEVELOPMENTS,
       }),
       /dropped its frozen intel brief/,
@@ -6063,16 +6081,24 @@ describe('country recent developments', () => {
     const data = await loadCorpusData({ rootDir: repoRoot });
     const names = new Map(data.countries.map((entry) => [entry.code, entry.name]));
     let briefCount = 0;
+    let withheldCount = 0;
     for (const [code, row] of Object.entries(data.livePulse?.countries || {})) {
       const developments = row?.developments;
+      if (developments?.briefSkipped === 'unsupported-citation') {
+        withheldCount += 1;
+        const html = renderCountryDevelopments({ countryName: names.get(code), developments });
+        assert.ok(!html.includes('data-intel-brief'));
+        const dataset = JSON.parse(countryDatasetDownload(data.countries.find((entry) => entry.code === code), { developments }));
+        assert.equal(dataset.developments.brief, null);
+      }
       if (!developments?.brief?.text) continue;
       briefCount += 1;
       const name = names.get(code);
       assert.ok(name, `pulse country ${code} must resolve to a display name`);
       const html = renderCountryDevelopments({ countryName: name, developments });
-      assertCountryBriefPresentation({ pagePath: `/countries/${code}/`, html });
+      assertCountryBriefPresentation({ pagePath: `/countries/${code}/`, html, sources: developments.brief.sources });
     }
-    assert.ok(briefCount >= 10, `expected frozen briefs to sweep, got ${briefCount}`);
+    assert.ok(briefCount + withheldCount >= 10, 'the sweep must inspect published and withdrawn briefs');
   });
 });
 describe('GEO residue #7616 (U2b changelog lastmod)', () => {

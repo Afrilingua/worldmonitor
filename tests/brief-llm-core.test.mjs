@@ -518,6 +518,13 @@ describe('validateNoHallucinatedProperNouns — May 19 regression + class', () =
     assert.equal(r.ok, true);
   });
 
+  it('fails closed on missing evidence when used for public citations', () => {
+    for (const headline of [null, undefined, '', '   ', 42]) {
+      assert.equal(validateNoHallucinatedProperNouns('Tamar closed.', headline, { failClosed: true }).ok, false);
+      assert.equal(validateNoHallucinatedProperNouns('Tamar closed.', headline).ok, true);
+    }
+  });
+
   it('headline has "Trump", summary adds "Mar-a-Lago" not in headline → flagged', () => {
     const headline = "FBI raids Trump residence in Florida";
     const summary = "FBI agents conducted a raid on Mar-a-Lago today.";

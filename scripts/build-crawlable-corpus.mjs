@@ -58,6 +58,7 @@ import {
   withheldTransitCountSentence,
 } from './crawlable-live-tools.mjs';
 import {
+  briefCitationGroundingGap,
   COUNTRY_INDEX_ORIGIN,
   developmentsHasDatedItem,
   normalizeFrozenDevelopments,
@@ -144,7 +145,7 @@ export const COMPARISON_PAGE_LASTMOD_PATHS = Object.freeze([
 // families take the later of this version and their own committed source date,
 // so template changes are reflected without pretending every deploy is fresh.
 export const CORPUS_GENERATOR_CONTENT_VERSION = '2026-09-01';
-export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-06';
+export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-08';
 export const CII_COUNTRY_PAGE_CONTENT_VERSION = '2026-09-03';
 // Exported so the #7533 guard test can recompute every family clock without
 // re-implementing the version constants themselves.
@@ -3384,12 +3385,21 @@ function intelBriefHtml(html) {
 // still plain text rather than <h*> tags.
 const MEANS_FOR_ISO_RE = /\bwhat this means for [a-z]{2}\b/i;
 
-export function assertCountryBriefPresentation({ pagePath, html }) {
+export function assertCountryBriefPresentation({ pagePath, html, sources }) {
   const main = corpusMainHtml(html);
   if (main.includes('**')) {
     throw new Error(`${pagePath} renders literal markdown emphasis in <main>`);
   }
   const brief = intelBriefHtml(html);
+  if (brief && sources !== undefined) {
+    // Check the rendered claim blocks as well as the input. A later formatter
+    // must not add an entity or change a citation after publish-time validation.
+    const claims = [...brief.matchAll(/<(p|li)\b([^>]*)>([\s\S]*?)<\/\1>/gi)]
+      .filter((match) => !/\bclass="source"/.test(match[2]))
+      .map((match) => corpusVisibleText(match[3]));
+    const gap = briefCitationGroundingGap({ text: claims.join('\n'), sources });
+    if (gap) throw new Error(`${pagePath} brief has unsupported citation: ${gap}`);
+  }
   const headingSource = brief ?? main;
   const headingHits = [...headingSource.matchAll(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
   for (const hit of headingHits) {
@@ -3724,7 +3734,7 @@ ${analysis.readingGuide ? `      <h2>How to use this evidence</h2>
     scriptSrcs: ['/tools/live-tools.js'],
   });
   assertCountryDevelopmentsRendered({ pagePath: path, html, developments, countryCode: country.code, countryName: country.name });
-  assertCountryBriefPresentation({ pagePath: path, html });
+  assertCountryBriefPresentation({ pagePath: path, html, sources: developments?.brief?.sources || [] });
   return html;
 }
 
