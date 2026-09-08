@@ -781,18 +781,37 @@ jobs:
           done
           sudo dpkg --configure -a || true
           npx playwright install --with-deps chromium
-      # Keep the current smoke partition while retaining PR #7718 diagnostics.
+      # Capture outside outputDir: Playwright clears it at startup. Collect
+      # stderr once at the parent, since DEBUG_FILE is truncated by each worker.
       - name: Run ci-smoke with browser-loss diagnostics
         env:
           DEBUG: 'pw:browser'
-          DEBUG_FILE: test-results/pw-browser-debug.log
+          DEBUG_COLORS: '0'
         run: |
           set -euo pipefail
-          mkdir -p test-results
-          ( while :; do { date -u +%FT%T.%3NZ; free -m; echo; } >> test-results/memory-samples.log; sleep 5; done ) &
+          unset DEBUG_FILE
+          DIAGNOSTICS_DIR=$(mktemp -d)
+          sample_memory() {
+            date -u +%FT%TZ
+            free -m
+            if [ -r /sys/fs/cgroup/memory.events ]; then
+              cat /sys/fs/cgroup/memory.events
+            fi
+          }
+          sample_memory > "$DIAGNOSTICS_DIR/memory-samples.log"
+          ( while sleep 5; do sample_memory; done ) >> "$DIAGNOSTICS_DIR/memory-samples.log" 2>&1 &
           MEM_SAMPLER_PID=$!
-          trap 'kill "$MEM_SAMPLER_PID" 2>/dev/null || true' EXIT
-          npm run test:e2e:ci-smoke:${{ matrix.shard }}
+          collect_diagnostics() {
+            SMOKE_STATUS=$?
+            kill "$MEM_SAMPLER_PID" 2>/dev/null || true
+            wait "$MEM_SAMPLER_PID" 2>/dev/null || true
+            sample_memory >> "$DIAGNOSTICS_DIR/memory-samples.log"
+            mkdir -p test-results/browser-loss
+            cp "$DIAGNOSTICS_DIR/"*.log test-results/browser-loss/
+            return "$SMOKE_STATUS"
+          }
+          trap collect_diagnostics EXIT
+          npm run test:e2e:ci-smoke:${{ matrix.shard }} 2>&1 | tee "$DIAGNOSTICS_DIR/playwright.log"
 
       - name: Upload ci-smoke Playwright artifacts
         if: ${{ !cancelled() }}
