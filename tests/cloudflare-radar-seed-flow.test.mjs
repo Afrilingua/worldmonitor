@@ -42,6 +42,7 @@ async function seedProcess(initial, now, mode) {
   Date.now = () => now;
   const store = new Map(initial);
   const calls = [];
+  const ttlExtensions = [];
 
   const redisCommand = (command) => {
     const [name, key, value] = command;
@@ -68,6 +69,12 @@ async function seedProcess(initial, now, mode) {
         }
         for (const entry of command) redisCommand(entry);
         return Response.json(command.map(() => ({ result: 'OK' })));
+      }
+      if (url.pathname === '/pipeline') {
+        for (const entry of command) {
+          if (entry[0] === 'EXPIRE') ttlExtensions.push([entry[1], entry[2]]);
+        }
+        return Response.json(command.map((entry) => ({ result: redisCommand(entry) })));
       }
       return Response.json({ result: redisCommand(command) });
     }
@@ -109,7 +116,7 @@ async function seedProcess(initial, now, mode) {
   };
 
   process.on('exit', () => {
-    console.log(`FIXTURE_RESULT=${JSON.stringify({ calls, store: [...store] })}`);
+    console.log(`FIXTURE_RESULT=${JSON.stringify({ calls, store: [...store], ttlExtensions })}`);
   });
   await import(process.env.TEST_SEED_URL);
 }
@@ -126,6 +133,17 @@ function initialLastGood() {
 
 function radarCallCounts(calls) {
   return calls.filter((path) => path.startsWith('/client/v4/radar/')).sort();
+}
+
+function assertCompanionTtlRetention(result, label) {
+  const companions = result.ttlExtensions
+    .filter(([key]) => key === DDoS_KEY || key === TRAFFIC_KEY)
+    .sort(([left], [right]) => left.localeCompare(right));
+  assert.deepEqual(
+    companions,
+    [[DDoS_KEY, 10_800], [TRAFFIC_KEY, 3_600]],
+    `${label}: failed runs must preserve each companion at its declared TTL`,
+  );
 }
 
 async function readCompanionsThroughRpc(store) {
@@ -206,6 +224,7 @@ test('HTTP-200 invalid envelopes retain last-good companion payloads and success
       assert.equal(store.get(key), before.get(key), `${mode}: ${key} must retain its last-good value`);
     }
     assert.equal(radarCallCounts(result.calls).length, 5, `${mode}: sources must not replay after settlement`);
+    assertCompanionTtlRetention(result, mode);
   }
 });
 
@@ -234,6 +253,7 @@ test('annotations and one companion can fail without discarding a healthy compan
     assert.equal(radarCallCounts(result.calls).length, 5, `${mode}: sources must not replay after settlement`);
     assert.notEqual(store.get(updatedKey), before.get(updatedKey), `${mode}: healthy companion must publish`);
     if (preservedKey) assert.equal(store.get(preservedKey), before.get(preservedKey), `${mode}: failed companion must retain last-good data`);
+    assertCompanionTtlRetention(result, mode);
   }
 });
 
@@ -259,6 +279,7 @@ test('an atomic companion write failure leaves its payload and success clock unc
   assert.equal(store.get(TRAFFIC_META_KEY), before.get(TRAFFIC_META_KEY));
   assert.notEqual(store.get(DDoS_KEY), before.get(DDoS_KEY), 'the healthy DDoS companion must still publish');
   assert.equal(radarCallCounts(result.calls).length, 5, 'a cache write failure must not replay provider requests');
+  assertCompanionTtlRetention(result, 'traffic-write-fail');
 });
 
 test('a total Radar failure keeps all companion last-good values', () => {
@@ -271,4 +292,5 @@ test('a total Radar failure keeps all companion last-good values', () => {
     assert.equal(store.get(key), before.get(key), `${key} must survive total source failure`);
   }
   assert.equal(radarCallCounts(result.calls).length, 5, 'total failure must make one bounded provider pass');
+  assertCompanionTtlRetention(result, 'total-failure');
 });

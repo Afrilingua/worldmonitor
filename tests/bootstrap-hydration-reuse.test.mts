@@ -422,6 +422,26 @@ describe('bootstrap hydration reuse (#7048)', () => {
     );
   });
 
+  it('malformed live DDoS and traffic responses use their fallbacks', async () => {
+    const requests = bootstrapStub({}, (url) => {
+      if (url.includes('list-internet-ddos-attacks')) {
+        return { protocol: [], vector: [], dateRangeStart: '', dateRangeEnd: '', topTargetLocations: null };
+      }
+      if (url.includes('list-internet-traffic-anomalies')) return { anomalies: [], totalCount: '0' };
+      return { anomalies: [], totalCount: 0 };
+    });
+    await harness.fetchBootstrapData();
+
+    const [firstDdos, firstTraffic] = await Promise.all([
+      harness.fetchDdosAttacks(),
+      harness.fetchTrafficAnomalies(),
+    ]);
+
+    assert.deepEqual(firstDdos, { protocol: [], vector: [], dateRangeStart: '', dateRangeEnd: '', topTargetLocations: [] });
+    assert.deepEqual(firstTraffic, { anomalies: [], totalCount: 0 });
+    assert.equal(rpcUrlCount(requests), 2, 'each malformed live response must reach its runtime guard');
+  });
+
   it('malformed DDoS and traffic hydration falls through instead of warming the global cache', async () => {
     const requests = bootstrapStub({
       ddosAttacks: { protocol: [], vector: [], dateRangeStart: '', dateRangeEnd: '' },

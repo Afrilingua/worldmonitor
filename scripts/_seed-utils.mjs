@@ -1181,13 +1181,8 @@ export async function writeExtraKeyWithMetaAtomically({
       signal: AbortSignal.timeout(5_000),
     });
     if (!resp.ok) {
-      const err = new Error(`Atomic extra-key publish failed: HTTP ${resp.status}`);
-      if (PERMANENT_4XX_STATUSES.has(resp.status)) {
-        err.nonRetryable = true;
-      } else if (resp.status === 429) {
-        const retryAfterMs = parseRetryAfterMs(getResponseHeader(resp.headers, 'Retry-After'));
-        if (retryAfterMs != null) err.retryAfterMs = retryAfterMs;
-      }
+      const err = httpRetryError(resp);
+      err.message = `Atomic extra-key publish failed: HTTP ${resp.status}`;
       err.httpStatus = resp.status;
       throw err;
     }

@@ -204,12 +204,12 @@ test('writeExtraKeyWithMetaAtomically: retries a transient transaction failure w
   assert.deepEqual(transactions[1], transactions[0], 'every attempt sends the complete atomic pair');
 });
 
-test('writeExtraKeyWithMetaAtomically: permanent transaction failures do not retry', async () => {
+test('writeExtraKeyWithMetaAtomically: every permanent transaction failure does not retry', async () => {
   let calls = 0;
   globalThis.fetch = async (url) => {
     calls += 1;
     assert.match(String(url), /\/multi-exec$/);
-    return new Response('forbidden', { status: 403 });
+    return new Response('method not allowed', { status: 405 });
   };
 
   await assert.rejects(
@@ -221,7 +221,7 @@ test('writeExtraKeyWithMetaAtomically: permanent transaction failures do not ret
       metaKey: 'seed-meta:conflict:humanitarian',
       metaTtlSeconds: 259_200,
     }),
-    /HTTP 403/,
+    /HTTP 405/,
   );
   assert.equal(calls, 1, 'a permanent Redis client error must fail fast');
 });
