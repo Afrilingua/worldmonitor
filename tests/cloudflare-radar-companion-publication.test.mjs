@@ -24,7 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
 import { __testing__ as health } from '../api/health.js';
-import { SEED_META_MIN_TTL_SECONDS } from '../scripts/_seed-utils.mjs';
+import { resolveSeedMetaTtl, SEED_META_MIN_TTL_SECONDS } from '../scripts/_seed-utils.mjs';
 
 const OUTAGES_KEY = 'infra:outages:v1';
 const DDOS_KEY = 'cf:radar:ddos:v1';
@@ -481,10 +481,15 @@ test('retention keeps the alarm alive: a failed companion extends its clock key 
   // Extending the payload alone would make it immortal under a sustained outage
   // while the 7-day meta expired out from under it — and a present payload with
   // no meta classifies as plain OK, decaying a week-long failure back to green.
+  //
+  // Asserted through resolveSeedMetaTtl rather than against the bare floor: the
+  // marker is written at max(floor, dataTtl), so a companion whose data TTL ever
+  // exceeds 7 days would have its marker SHORTENED by a floor-valued EXPIRE.
+  // Deriving it here means this test keeps meaning the right thing if a TTL moves.
   assert.deepEqual(
     expireCommandsFor(run.redisCommands, TRAFFIC_META_KEY).map((command) => command[2]),
-    [SEED_META_MIN_TTL_SECONDS],
-    'the seed-meta key is extended at its own 7-day floor, never at the data TTL',
+    [resolveSeedMetaTtl(undefined, ANOMALIES_TTL)],
+    'the seed-meta key is extended at its own resolved TTL, never at the data TTL',
   );
   assert.equal(
     JSON.parse(run.store.get(TRAFFIC_META_KEY)).fetchedAt, NOW - 30 * 60_000,
@@ -519,8 +524,26 @@ test('runSeed retains both companion keys at their own TTLs when the fetch phase
   const ttlsFor = (key) => new Set(expireCommandsFor(run.redisCommands, key).map((command) => command[2]));
   assert.deepEqual(ttlsFor(DDOS_KEY), new Set([DDOS_TTL]), 'the DDoS key is never extended at the canonical TTL');
   assert.deepEqual(ttlsFor(TRAFFIC_KEY), new Set([ANOMALIES_TTL]), 'the anomalies key keeps its own 1h contract');
-  assert.deepEqual(ttlsFor(DDOS_META_KEY), new Set([SEED_META_MIN_TTL_SECONDS]));
-  assert.deepEqual(ttlsFor(TRAFFIC_META_KEY), new Set([SEED_META_MIN_TTL_SECONDS]));
+  assert.deepEqual(ttlsFor(DDOS_META_KEY), new Set([resolveSeedMetaTtl(undefined, DDOS_TTL)]));
+  assert.deepEqual(ttlsFor(TRAFFIC_META_KEY), new Set([resolveSeedMetaTtl(undefined, ANOMALIES_TTL)]));
+});
+
+test('a marker whose data TTL exceeds the floor is never re-armed below its own TTL', () => {
+  // The rule the two assertions above ride on, pinned directly: EXPIRE replaces
+  // rather than extends, and resolveSeedMetaTtl writes a marker at
+  // max(floor, dataTtl) — so a retention path that hardcodes the floor would
+  // SHORTEN the marker of any key whose data TTL is longer than seven days,
+  // recreating the alarm-before-data failure the retention exists to prevent.
+  const longDataTtl = SEED_META_MIN_TTL_SECONDS + 86400;
+  assert.equal(resolveSeedMetaTtl(undefined, longDataTtl), longDataTtl);
+  assert.ok(
+    resolveSeedMetaTtl(undefined, longDataTtl) > SEED_META_MIN_TTL_SECONDS,
+    'the floor is not always the longest TTL a marker is written with',
+  );
+  // Today's companions sit below the floor, so both resolve to it — this is what
+  // makes the derived assertions above equivalent to the old literal ones.
+  assert.equal(resolveSeedMetaTtl(undefined, DDOS_TTL), SEED_META_MIN_TTL_SECONDS);
+  assert.equal(resolveSeedMetaTtl(undefined, ANOMALIES_TTL), SEED_META_MIN_TTL_SECONDS);
 });
 
 test('a total Radar failure retains every companion payload and clock', () => {

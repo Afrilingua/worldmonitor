@@ -6,7 +6,7 @@ import {
   runSeed,
   extendExistingTtl,
   writeExtraKeyWithMeta,
-  SEED_META_MIN_TTL_SECONDS,
+  resolveSeedMetaTtl,
 } from './_seed-utils.mjs';
 
 loadEnvFile(import.meta.url);
@@ -353,8 +353,12 @@ function companionMetaKey(companion) {
  * alone would make it immortal under a sustained outage while the meta expired
  * out from under it — and a present payload with no meta reads as plain OK in
  * classifyKey, so a week-long failure would decay from STALE_SEED back to green
- * with a frozen payload behind it. EXPIRE at the meta floor never shortens a
- * meta key, since that floor is already the longest TTL it is ever written with.
+ * with a frozen payload behind it. The retention TTL is resolved through
+ * `resolveSeedMetaTtl`, the same function that computed the marker's TTL when it
+ * was written, rather than hardcoding the 7-day floor: for a data TTL longer
+ * than the floor the marker is written at the DATA TTL, and EXPIRE replaces
+ * rather than extends, so re-arming at the floor would SHORTEN such a marker and
+ * recreate the very alarm-before-data failure this retention exists to prevent.
  *
  * Never rejects: a companion's outcome is its own, and must not decide the
  * annotations leg's.
@@ -387,7 +391,7 @@ async function runCompanion(companion, token) {
     // and its meta must each be extended at their own value.
     const [dataRetained, metaRetained] = await Promise.all([
       extendExistingTtl([companion.key], companion.ttlSeconds),
-      extendExistingTtl([companionMetaKey(companion)], SEED_META_MIN_TTL_SECONDS),
+      extendExistingTtl([companionMetaKey(companion)], resolveSeedMetaTtl(undefined, companion.ttlSeconds)),
     ]);
     const retained = dataRetained && metaRetained;
     // Deliberately does not claim WHICH payload survives: writeExtraKeyWithMeta
@@ -455,12 +459,13 @@ runSeed('infra', 'outages', CANONICAL_KEY, fetchAll, {
   // extra-key phase, so runSeed does not know to retain them when the
   // annotations leg fails, times out or is SIGTERMed. Each is declared at its
   // OWN TTL — the canonical 3h would quietly triple the anomalies key's 1h
-  // contract, and the meta keys carry the 7-day floor, so an EXPIRE at a data
-  // TTL would shorten them. Meta is listed so a retained payload can never
-  // outlive the clock that reports on it (see runCompanion's retention note).
+  // contract, and each meta key resolves through the same `resolveSeedMetaTtl`
+  // that wrote it, so an EXPIRE can never shorten one. Meta is listed so a
+  // retained payload can never outlive the clock that reports on it (see
+  // runCompanion's retention note).
   preserveKeyTtls: [
     ...COMPANIONS.map((companion) => ({ key: companion.key, ttlSeconds: companion.ttlSeconds })),
-    ...COMPANIONS.map((companion) => ({ key: companionMetaKey(companion), ttlSeconds: SEED_META_MIN_TTL_SECONDS })),
+    ...COMPANIONS.map((companion) => ({ key: companionMetaKey(companion), ttlSeconds: resolveSeedMetaTtl(undefined, companion.ttlSeconds) })),
   ],
   // CF Radar curated outage annotations are sparse (~1-2/wk, clustered, with
   // multi-day gaps). Zero mappable outages is the NORMAL state, not a fetch
