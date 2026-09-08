@@ -2,6 +2,8 @@
 // This stays separate from the shared corpus generator so the large page-specific
 // template does not obscure the corpus orchestration and other page families.
 
+import { createHash } from 'node:crypto';
+
 import {
   catalogCoverageCountryOptions,
   catalogCountryOptions,
@@ -706,27 +708,61 @@ export function buildSourceCatalog(entries, { logicalProviders = [] } = {}) {
  * `numberOfItems` publishes a count of things a reader can go and look at.
  *
  * Keyed on `provider`, the catalog's own unique key, not on the display name.
- * Slugs are unique across the current catalog, but two provider keys could
- * still collide once punctuation is stripped (`a.b` and `a-b`), so a collision
- * takes a numeric suffix rather than silently pointing two entries at one card.
+ * Slugs are unique across the current catalog (748 keys, 748 bases), but two
+ * provider keys could still collide once punctuation is stripped (`a.b` and
+ * `a-b`), so a collided base is never handed out bare: every key claiming it
+ * takes a digest of its own key. An arrival-ordered counter would have been
+ * simpler and wrong — these fragments are published data now, cited from 748
+ * ListItem urls, and the catalog is sorted by displayName, so adding or
+ * renaming one provider would reshuffle which collider owned the bare id and
+ * silently repoint an already-indexed citation at a different source. Deriving
+ * the suffix from the key alone makes an anchor depend on nothing but its own
+ * provider. The `used` backstop below only fires on a digest collision, and
+ * exists so the "no two cards share an id" invariant holds unconditionally.
  *
  * The character class reduces every key to `[a-z0-9-]`, which is what lets the
  * caller interpolate the id into the card markup and the JSON-LD url without
- * escaping either.
+ * escaping either; tests/crawlable-corpus.test.mjs pins that class so a future
+ * relaxation cannot quietly remove the guarantee.
+ *
+ * An anchor that resolves is not yet an anchor a reader can see, which is why
+ * `.provider-card` carries `scroll-margin-top`. Two sticky bars sit above the
+ * grid — the page header (top: 0, 146px) and .catalog-controls (top: 68px,
+ * bottom 167px) — and a card is 180px tall, so without the offset a
+ * `#provider-*` fragment parks 167 of those 180px under chrome. Measured in
+ * Chromium against the generated page before the offset landed: the card
+ * arrived at viewport y = -0.06. Below 720px .catalog-controls goes static and
+ * only the header stickies, so 176px is generous there rather than wrong.
+ *
+ * The slug transform is spelled out here rather than imported from
+ * build-crawlable-corpus.mjs's exported `slugify`: that module imports THIS one,
+ * so the import would close a cycle. A local slug helper is also what the other
+ * generators in scripts/ do.
  */
 export function sourceCardAnchors(sourceCatalog) {
+  const slugBase = (key) => String(key ?? '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase() || 'source';
+
+  const claimants = new Map();
+  for (const provider of sourceCatalog) {
+    const base = slugBase(provider.provider);
+    claimants.set(base, (claimants.get(base) ?? 0) + 1);
+  }
+
   const anchors = new Map();
   const used = new Set();
   for (const provider of sourceCatalog) {
-    const base = String(provider.provider ?? '')
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/&/g, ' and ')
-      .replace(/[^a-zA-Z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .toLowerCase() || 'source';
-    let anchor = `provider-${base}`;
-    for (let suffix = 2; used.has(anchor); suffix += 1) anchor = `provider-${base}-${suffix}`;
+    const base = slugBase(provider.provider);
+    const preferred = claimants.get(base) === 1
+      ? `provider-${base}`
+      : `provider-${base}-${createHash('sha1').update(String(provider.provider ?? '')).digest('hex').slice(0, 6)}`;
+    let anchor = preferred;
+    for (let suffix = 2; used.has(anchor); suffix += 1) anchor = `${preferred}-${suffix}`;
     used.add(anchor);
     anchors.set(provider.provider, anchor);
   }
@@ -969,7 +1005,7 @@ ${providerCards}
       .catalog-meta a { font-size: 12px; }
       .catalog-country-note { margin: 0 2px 15px; color: var(--muted); font-size: 13px; line-height: 1.6; }
       .provider-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-left: 1px solid var(--line); border-top: 1px solid var(--line); }
-      .provider-card { min-width: 0; min-height: 180px; padding: 18px; display: flex; flex-direction: column; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: rgba(9,13,11,.48); }
+      .provider-card { min-width: 0; min-height: 180px; padding: 18px; scroll-margin-top: 176px; display: flex; flex-direction: column; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); background: rgba(9,13,11,.48); }
       .provider-card:hover { background: var(--panel-2); }
       .provider-domain { color: var(--accent); font: 8px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
       .provider-card h3 { margin: 8px 0 0; font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }

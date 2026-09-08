@@ -197,6 +197,16 @@ describe('issue #7377 GEO content credibility', () => {
       bySurface[reference].size,
       'PRESS_LINKS and the press lists must cite the same number of outlets',
     );
+    // Every count in this family — (c2)'s deepEqual and equality above, (c3)'s
+    // per-outlet loop — is relative to PRESS_LINKS. Empty it and the whole
+    // family degenerates to 0 === 0 and reports green on four surfaces that
+    // cite nobody. The floor is what stops that; `>=` so it never blocks a
+    // genuinely growing press list.
+    assert.ok(
+      PRESS_LINKS.length >= 8,
+      `PRESS_LINKS must keep the full press set (>= 8, got ${PRESS_LINKS.length});`
+        + ' a shrinking list makes every count assertion in this file vacuous',
+    );
   });
 
   it('(c3) names the outlets in the llms.txt press section, without leaving the first-party links (#7869)', () => {

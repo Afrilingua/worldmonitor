@@ -3606,12 +3606,32 @@ describe('crawlable corpus generator', () => {
         return url.hash.slice(1);
       });
       assert.equal(new Set(providerAnchors).size, providerAnchors.length, 'two entries must never share one anchor');
-      for (const anchor of providerAnchors) {
+      // Land each fragment on the card for THAT provider, not merely on some
+      // card: an anchor map that permuted its urls across the catalog would
+      // satisfy "every fragment resolves" while sending every citation to the
+      // wrong source. data-provider is the card's own copy of the catalog key.
+      // Decode rather than re-escape: the generator's escapeHtml also covers `'`
+      // (L'Orient Today), and a second copy of that table in the test would be
+      // one more thing to keep in step with the one that matters.
+      const unescapeAttribute = (value) => value
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+        .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+      const cardProviderByAnchor = new Map(
+        [...sourcesPage.matchAll(/<article class="provider-card" id="([^"]+)" data-provider="([^"]*)"/g)]
+          .map((match) => [match[1], unescapeAttribute(match[2])]),
+      );
+      providerAnchors.forEach((anchor, index) => {
+        const expected = corpusData.sourceCatalog[index].provider;
         assert.ok(
-          sourcesPage.includes(`<article class="provider-card" id="${anchor}"`),
+          cardProviderByAnchor.has(anchor),
           `${anchor} must name a card in the rendered page, or the ListItem url is a dead fragment`,
         );
-      }
+        assert.equal(
+          cardProviderByAnchor.get(anchor),
+          expected,
+          `the ListItem for ${expected} must point at that provider's own card`,
+        );
+      });
       const catalog = sourceNodes.find((node) => node['@type'] === 'DataCatalog');
       assert.equal(catalog.dataset.length, corpusData.crises.length + 1);
       for (const dataset of catalog.dataset) {
@@ -6220,7 +6240,7 @@ describe('GEO residue #7869 (sources ItemList)', () => {
         breadcrumbLd: () => '',
         dataCatalogLd,
         escapeHtml,
-        pageDocument: ({ jsonLd, body }) => JSON.stringify({ jsonLd, body }),
+        pageDocument: ({ jsonLd, body, extraStyles }) => JSON.stringify({ jsonLd, body, extraStyles }),
         withUtmSource: (url, source) => `${url}?utm_source=${source}`,
       },
     }));
@@ -6228,6 +6248,81 @@ describe('GEO residue #7869 (sources ItemList)', () => {
 
   const itemListOf = (jsonLd) => (Array.isArray(jsonLd) ? jsonLd : [jsonLd])
     .find((node) => node?.mainEntity?.['@type'] === 'ItemList')?.mainEntity;
+
+  it('keeps every anchor inside the character class that makes the unescaped id safe', async () => {
+    // The card markup interpolates the anchor into id="..." without escapeHtml,
+    // unlike every sibling attribute on that element. What makes that safe is
+    // the slug's character class, not the caller — so pin the class here. A
+    // future relaxation (preserving dots for readability, say) would otherwise
+    // remove the escaping guarantee with nothing going red.
+    const { sourceCardAnchors } = await import('../scripts/crawlable-sources-page.mjs');
+    const anchors = sourceCardAnchors([
+      { provider: 'finance.yahoo.com' },
+      { provider: 'Reuters & Co' },
+      { provider: 'El Pa\u00eds' },
+      { provider: '"><script>alert(1)</script>' },
+      { provider: '\u4e2d\u6587\u30cb\u30e5\u30fc\u30b9' },
+    ]);
+    for (const anchor of anchors.values()) {
+      assert.match(anchor, /^provider-[a-z0-9-]+$/, `${anchor} must not carry a character that can break out of an id attribute`);
+    }
+  });
+
+  it('offsets the cards past the sticky chrome so a fragment actually reveals one', async () => {
+    // A fragment that resolves is not the same as a card the reader can see.
+    // The page header (sticky, top: 0, 146px) and .catalog-controls (sticky,
+    // top: 68px, bottom 167px) sit above the grid, and a card is 180px tall —
+    // so without a scroll offset, following #provider-x parks 167 of those
+    // 180px under chrome. Measured in Chromium against the generated page
+    // before the offset landed: the card arrived at viewport y = -0.06.
+    const { jsonLd, extraStyles } = await renderCatalog(CATALOG);
+    assert.ok(itemListOf(jsonLd).itemListElement.every((element) => element.url.includes('#provider-')));
+    const rule = extraStyles.match(/\.provider-card \{([^}]*)\}/);
+    assert.ok(rule, 'the page must still ship a .provider-card rule');
+    const offset = rule[1].match(/scroll-margin-top:\s*(\d+)px/);
+    assert.ok(offset, '.provider-card must set scroll-margin-top or every ListItem url lands under the sticky bars');
+    assert.ok(
+      Number(offset[1]) >= 167,
+      `scroll-margin-top must clear the sticky bars' 167px, got ${offset[1]}px`,
+    );
+  });
+
+  it('disambiguates a slug collision by key identity, not by catalog order', async () => {
+    // The branch is unreachable through the real 748-entry catalog (748 keys,
+    // 748 distinct bases), so it is tested on the exported helper directly.
+    // What it must guarantee is not merely uniqueness but ORDER-INDEPENDENCE:
+    // these fragments are published in 748 ListItem urls, and the catalog is
+    // sorted by displayName, so an arrival-ordered counter would let a rename
+    // elsewhere hand one provider's already-indexed anchor to another.
+    const { sourceCardAnchors } = await import('../scripts/crawlable-sources-page.mjs');
+    const colliders = [{ provider: 'a.b' }, { provider: 'a-b' }, { provider: 'a b' }];
+    const forward = sourceCardAnchors(colliders);
+    const reversed = sourceCardAnchors([...colliders].reverse());
+    assert.equal(new Set(forward.values()).size, colliders.length, 'colliding keys must not collapse onto one anchor');
+    for (const { provider } of colliders) {
+      assert.equal(
+        reversed.get(provider),
+        forward.get(provider),
+        `${provider} must keep its anchor when the catalog is reordered`,
+      );
+      assert.match(forward.get(provider), /^provider-a-b-[0-9a-f]{6}$/, 'a collided base is never handed out bare');
+    }
+
+    // A key with nothing left after slugging shares the 'source' base, so it
+    // goes down the same path rather than getting a bare fallback anchor.
+    const empty = sourceCardAnchors([{ provider: '---' }, { provider: '!!!' }]);
+    assert.equal(new Set(empty.values()).size, 2, 'two unsluggable keys must still get distinct anchors');
+    for (const anchor of empty.values()) assert.match(anchor, /^provider-source-[0-9a-f]{6}$/);
+
+    // A base only one key claims stays bare — the common case, and what keeps
+    // 748 of 748 anchors readable.
+    assert.deepEqual([...sourceCardAnchors([{ provider: 'finance.yahoo.com' }]).values()], ['provider-finance-yahoo-com']);
+    assert.equal(
+      sourceCardAnchors([{ provider: 'x' }, { provider: 'x' }]).size,
+      1,
+      'the map is keyed on the catalog key, so a duplicate key can only ever yield one anchor',
+    );
+  });
 
   it('wraps every catalog entry in a ListItem carrying a position and a resolvable url', async () => {
     const { jsonLd } = await renderCatalog(CATALOG);
