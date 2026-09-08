@@ -844,8 +844,9 @@ function normalizeSequence(sequence) {
 export function validateNoHallucinatedProperNouns(summary, headline, { failClosed = false } = {}) {
   // Preserve the legacy default; citation publication must opt into rejection.
   const unavailable = () => failClosed ? { ok: false, hallucinated: [] } : { ok: true };
-  if (typeof summary !== 'string' || summary.trim().length === 0) return unavailable();
-  if (typeof headline !== 'string' || headline.trim().length === 0) return unavailable();
+  if (typeof summary !== 'string' || summary.length === 0) return unavailable();
+  if (typeof headline !== 'string' || headline.length === 0) return unavailable();
+  if (failClosed && (!summary.trim() || !headline.trim())) return unavailable();
 
   let summaryEntries, headlineSequences, headlineTokens;
   try {

@@ -521,7 +521,7 @@ describe('validateNoHallucinatedProperNouns — May 19 regression + class', () =
   it('fails closed on missing evidence when used for public citations', () => {
     for (const headline of [null, undefined, '', '   ', 42]) {
       assert.equal(validateNoHallucinatedProperNouns('Tamar closed.', headline, { failClosed: true }).ok, false);
-      assert.equal(validateNoHallucinatedProperNouns('Tamar closed.', headline).ok, true);
+      assert.equal(validateNoHallucinatedProperNouns('Tamar closed.', headline).ok, headline !== '   ');
     }
   });
 
