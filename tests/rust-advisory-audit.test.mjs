@@ -20,6 +20,9 @@ const report = (list = []) => ({
   warnings: {},
 });
 const decision = {
+  status: 'approved',
+  approvedBy: 'synthetic fixture reviewer',
+  approvedAt: '2026-09-01',
   id: 'RUSTSEC-2026-0001',
   owner: '#5935',
   reason: 'Fixture API does not receive untrusted data',
@@ -38,7 +41,7 @@ test('decisions require owner, reason, expiry and unique IDs', () => {
   assert.throws(() => classifyRustAudit(report(), [decision, decision], now));
 });
 test('a decision expires at its boundary and cannot silently become stale', () => {
-  assert.equal(classifyRustAudit(report([finding()]), [decision], now).accepted.length, 1);
+  assert.equal(classifyRustAudit(report([finding()]), [decision], now).approved.length, 1);
   const expired = classifyRustAudit(report([finding([])]), [decision], Date.parse(decision.expiresAt));
   assert.equal(expired.status, 'failed');
   assert.match(expired.decisionErrors[0], /expired/);
@@ -163,7 +166,7 @@ test('fixable unsoundness warnings block; no-fix unsoundness stays explicit', ()
   assert.equal(classifyRustAudit(input, [], now).status, 'failed');
   input.warnings.unsound = [finding([])];
   assert.equal(classifyRustAudit(input, [], now).noFix.length, 1);
-  assert.equal(classifyRustAudit(input, [decision], now).accepted.length, 1);
+  assert.equal(classifyRustAudit(input, [decision], now).approved.length, 1);
 });
 
 test('CLI writes a failed verdict for findings and bad decisions through real subprocesses', () => {
@@ -198,4 +201,28 @@ test('CLI writes a failed verdict for findings and bad decisions through real su
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('expired decisions fail before a database outage can soften the result', () => {
+  assert.throws(
+    () =>
+      runRustAudit({
+        lockfile: 'src-tauri/Cargo.lock',
+        decisions: [decision],
+        now: Date.parse(decision.expiresAt),
+        run: () => assert.fail('must reject the expired decision before fetching'),
+      }),
+    /decisions expired/,
+  );
+});
+
+test('a proposed exception cannot suppress a fixable advisory', () => {
+  const proposed = { ...decision, status: 'proposed' };
+  const result = classifyRustAudit(report([finding()]), [proposed], now);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.blocking.length, 1);
+  assert.equal(result.approved.length, 0);
+  assert.equal(result.proposed.length, 1);
+  assert.throws(() => classifyRustAudit(report([finding()]), [{ ...decision, approvedBy: '' }], now));
+  assert.throws(() => classifyRustAudit(report([finding()]), [{ ...decision, approvedAt: null }], now));
 });

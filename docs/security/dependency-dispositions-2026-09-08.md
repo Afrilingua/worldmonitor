@@ -100,7 +100,16 @@ advisory gate, not a crates.io yanking check.
 - RUSTSEC-2024-0429: glib 0.18.5 remains. Its patched 0.20 line is not a
   compatible substitute for Tauri/Wry's GTK 0.18 API. The proposed temporary
   decision is recorded in `.github/rust-advisory-decisions.json`, with owner,
-  limiting caller evidence, explicit Linux runtime uncertainty and October 8 expiry.
+  limiting caller evidence, mitigation, explicit Linux runtime uncertainty and October 8 expiry.
+  Its status is **proposed**: it does not suppress the blocking advisory. The desktop
+  owner must authorize a temporary exception or select a GTK migration/backport.
+  Approval is not granted by this document or by the no-patched-version policy.
+  `cargo tree --locked --target x86_64-unknown-linux-gnu -i glib` confirms
+  Tauri 2.11.5 / tauri-runtime-wry 2.11.4 / Wry 0.55.1 → GTK 0.18.2 →
+  glib 0.18.5 (with sibling GIO/WebKit paths). GTK declares glib `0.18`;
+  Wry declares GTK `0.18`. Fresh dry runs of `cargo update -p glib` and
+  `cargo update -p gtk -p wry -p tauri` both selected zero compatible updates.
+  No speculative fork or major override was introduced.
 - Six unmaintained-crate notices remain: proc-macro-error 1.0.4, and
   unic-char-property, unic-char-range, unic-common, unic-ucd-ident and
   unic-ucd-version 0.9.0. They stay visible as maintenance warnings owned by
@@ -112,9 +121,10 @@ check continues to prevent regression of explicit minimum-version decisions.
 
 | Result | PR gate | Daily sweep |
 | --- | --- | --- |
-| Fixable advisory without a live recorded decision | Fail | Fail |
+| Fixable advisory without a live approved decision | Fail | Fail |
 | No patched version | Explicit warning, distinct from clean | Explicit warning |
-| Live recorded decision | Visible warning with owner/reason/expiry | Visible warning |
+| Proposed exception | Fail for a fixable advisory; proposal remains visible | Fail |
+| Approved decision with approver/date | Visible warning with owner/reason/expiry | Visible warning |
 | Expired, malformed, duplicated or stale decision | Fail | Fail |
 | RustSec database fetch unavailable | Explicitly unaudited warning | Fail |
 | Missing/malformed input, tool or report | Fail | Fail |

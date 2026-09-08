@@ -16,7 +16,10 @@ function validateRustDecisions(decisions) {
       d.reason.trim().length < 20 ||
       typeof d.owner !== 'string' ||
       !d.owner.trim() ||
-      !Number.isFinite(Date.parse(d.expiresAt))
+      !Number.isFinite(Date.parse(d.expiresAt)) ||
+      !['proposed', 'approved'].includes(d.status) ||
+      (d.status === 'approved' &&
+        (typeof d.approvedBy !== 'string' || !d.approvedBy.trim() || !Number.isFinite(Date.parse(d.approvedAt))))
     )
       throw new Error('Invalid Rust advisory decision');
     seen.add(d.id);
@@ -37,7 +40,15 @@ export function classifyRustAudit(report, decisions, now = Date.now()) {
   )
     throw new Error('Invalid or filtered cargo-audit report');
   validateRustDecisions(decisions);
-  const result = { status: 'clean', blocking: [], noFix: [], accepted: [], warnings: [], decisionErrors: [] };
+  const result = {
+    status: 'clean',
+    blocking: [],
+    noFix: [],
+    approved: [],
+    proposed: [],
+    warnings: [],
+    decisionErrors: [],
+  };
   if (!report.warnings || typeof report.warnings !== 'object' || Array.isArray(report.warnings))
     throw new Error('Invalid Rust warnings');
   const findings = [...report.vulnerabilities.list];
@@ -72,7 +83,9 @@ export function classifyRustAudit(report, decisions, now = Date.now()) {
       patched: item.versions.patched,
     };
     const decision = decisions.find((d) => d.id === entry.id);
-    if (decision && Date.parse(decision.expiresAt) > now) result.accepted.push({ ...entry, decision });
+    if (decision?.status === 'proposed') result.proposed.push({ ...entry, decision });
+    if (decision?.status === 'approved' && Date.parse(decision.expiresAt) > now)
+      result.approved.push({ ...entry, decision });
     else if (entry.patched.length) result.blocking.push(entry);
     else result.noFix.push(entry);
   }
@@ -82,13 +95,15 @@ export function classifyRustAudit(report, decisions, now = Date.now()) {
     if (!findings.some((f) => f.advisory.id === d.id)) result.decisionErrors.push(`${d.id}: stale decision; remove it`);
   }
   if (result.blocking.length || result.decisionErrors.length) result.status = 'failed';
-  else if (result.noFix.length || result.accepted.length || result.warnings.length) result.status = 'warning';
+  else if (result.noFix.length || result.approved.length || result.warnings.length) result.status = 'warning';
   return result;
 }
 
 export function runRustAudit({ lockfile, decisions, failOnOutage = false, run = spawnSync, now = Date.now() }) {
   // A fresh database and neutral cwd prevent local cargo ignore/config state or a stale cache from producing a clean result.
   validateRustDecisions(decisions);
+  const expired = decisions.filter((d) => Date.parse(d.expiresAt) <= now);
+  if (expired.length) throw new Error(`Rust advisory decisions expired: ${expired.map((d) => d.id).join(', ')}`);
   const dir = mkdtempSync(join(tmpdir(), 'worldmonitor-rust-audit-'));
   try {
     readFileSync(lockfile); // Missing input is actor-fixable, never an upstream outage.
@@ -102,7 +117,7 @@ export function runRustAudit({ lockfile, decisions, failOnOutage = false, run = 
     if (fetched.status !== 0)
       return {
         status: 'unavailable',
-        failed: failOnOutage || decisions.some((d) => Date.parse(d.expiresAt) <= now),
+        failed: failOnOutage,
         reason: `RustSec database could not be fetched: ${fetched.stderr || fetched.error?.message || fetched.status}`,
       };
     const audited = run(
