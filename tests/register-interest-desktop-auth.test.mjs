@@ -163,6 +163,7 @@ describe('LeadsService.registerInterest desktop auth', () => {
     const redis = installRedis({});
     process.env.CONVEX_SITE_URL = 'https://fake-convex.site';
     process.env.CONVEX_SERVER_SHARED_SECRET = 'convex-test-secret';
+    process.env.RESEND_API_KEY = 'fake-resend-key';
 
     const req = desktopReq({ email: 'bridge@example.com' });
     const timestamp = String(Date.now());
@@ -172,6 +173,7 @@ describe('LeadsService.registerInterest desktop auth', () => {
       req,
     );
     let captured;
+    let confirmation;
     globalThis.fetch = async (input, init) => {
       const url = typeof input === 'string' ? input : input.url;
       if (url.startsWith('https://redis.example')) {
@@ -182,6 +184,10 @@ describe('LeadsService.registerInterest desktop auth', () => {
           status: 200,
           headers: { 'Content-Type': 'application/dns-json' },
         });
+      }
+      if (url === 'https://api.resend.com/emails') {
+        confirmation = JSON.parse(init.body);
+        return new Response('{}', { status: 200 });
       }
       captured = { url, init };
       return new Response(JSON.stringify({
@@ -200,9 +206,9 @@ describe('LeadsService.registerInterest desktop auth', () => {
 
     assert.deepEqual(result, {
       status: 'registered',
-      referralCode: 'ref123',
+      referralCode: '',
       referralCount: 0,
-      position: 7,
+      position: 0,
       emailSuppressed: false,
     });
     assert.equal(captured.url, 'https://fake-convex.site/api/internal-register-interest');
@@ -213,6 +219,7 @@ describe('LeadsService.registerInterest desktop auth', () => {
       source: 'desktop-settings',
       appVersion: '2.8.0',
     });
+    assert.ok(confirmation.html.includes('https://worldmonitor.app/pro?ref=ref123'));
   });
 
   it('hides existing-address membership and referral metadata on retries', async () => {

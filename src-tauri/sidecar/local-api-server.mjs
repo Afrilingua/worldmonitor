@@ -1629,10 +1629,10 @@ async function dispatch(requestUrl, req, routes, context) {
       } catch {
         return json({ error: 'Registration failed' }, 502);
       }
-      if (result.status === 'already_registered') {
-        return json({ status: 'registered', referralCode: '', referralCount: 0, position: 0, emailSuppressed: false });
+      if (!result || (result.status !== 'registered' && result.status !== 'already_registered')) {
+        return json({ error: 'Registration failed' }, 502);
       }
-      return json(result.value || result);
+      return json({ status: 'registered', referralCode: '', referralCount: 0, position: 0, emailSuppressed: false });
     } catch (e) {
       context.logger.error(`[register-interest] error: ${e.message}`);
       return json({ error: 'Registration service unreachable' }, 502);

@@ -402,19 +402,6 @@ export async function registerInterest(
   }
   const result = resultBody;
 
-  // The caller has passed the bot/email gates, but that does not prove control
-  // of an address already in the waitlist. Do not turn a retry into an email
-  // membership oracle or disclose the existing row's referral metadata.
-  if (result.status === 'already_registered') {
-    return {
-      status: 'registered',
-      referralCode: '',
-      referralCount: 0,
-      position: 0,
-      emailSuppressed: false,
-    };
-  }
-
   if (result.status === 'registered' && result.referralCode) {
     if (!result.emailSuppressed) {
       await sendConfirmationEmail(email, result.referralCode);
@@ -423,11 +410,13 @@ export async function registerInterest(
     }
   }
 
+  // Bot verification does not prove address ownership. Keep both outcomes
+  // identical; referral details belong in the confirmation email above.
   return {
-    status: result.status,
-    referralCode: result.referralCode,
-    referralCount: result.referralCount,
-    position: result.position ?? 0,
-    emailSuppressed: result.emailSuppressed ?? false,
+    status: 'registered',
+    referralCode: '',
+    referralCount: 0,
+    position: 0,
+    emailSuppressed: false,
   };
 }
