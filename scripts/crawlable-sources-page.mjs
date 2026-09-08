@@ -707,18 +707,23 @@ export function buildSourceCatalog(entries, { logicalProviders = [] } = {}) {
  * `ListItem` a url pointing at it — which is also what makes the count
  * `numberOfItems` publishes a count of things a reader can go and look at.
  *
- * Keyed on `provider`, the catalog's own unique key, not on the display name.
- * Slugs are unique across the current catalog (748 keys, 748 bases), but two
- * provider keys could still collide once punctuation is stripped (`a.b` and
- * `a-b`), so a collided base is never handed out bare: every key claiming it
- * takes a digest of its own key. An arrival-ordered counter would have been
- * simpler and wrong — these fragments are published data now, cited from 748
- * ListItem urls, and the catalog is sorted by displayName, so adding or
- * renaming one provider would reshuffle which collider owned the bare id and
- * silently repoint an already-indexed citation at a different source. Deriving
- * the suffix from the key alone makes an anchor depend on nothing but its own
- * provider. The `used` backstop below only fires on a digest collision, and
- * exists so the "no two cards share an id" invariant holds unconditionally.
+ * Keyed on `provider`, the catalog's own unique key, not on the display name,
+ * and every anchor carries a digest of that key. The digest is unconditional on
+ * purpose. Two earlier shapes were tried and both leak the rest of the catalog
+ * into an individual anchor:
+ *
+ *   - An arrival-ordered counter (`-2`, `-3`) depends on iteration order, and
+ *     the catalog is sorted by displayName, so renaming any provider could
+ *     reshuffle which collider owned the bare id.
+ *   - Suffixing only when a base has more than one claimant still depends on
+ *     catalog membership: publish `a.b` alone and it gets the bare
+ *     `provider-a-b`; add `a-b` later and the first one's anchor changes.
+ *
+ * Both silently repoint a citation that has already been crawled and stored.
+ * These fragments are published data — one per ListItem url — so an anchor has
+ * to be a pure function of its own provider key and nothing else. Paying seven
+ * characters on every anchor buys exactly that. The `used` backstop below fires
+ * only on a digest collision, so "no two cards share an id" holds regardless.
  *
  * The character class reduces every key to `[a-z0-9-]`, which is what lets the
  * caller interpolate the id into the card markup and the JSON-LD url without
@@ -748,19 +753,11 @@ export function sourceCardAnchors(sourceCatalog) {
     .replace(/^-+|-+$/g, '')
     .toLowerCase() || 'source';
 
-  const claimants = new Map();
-  for (const provider of sourceCatalog) {
-    const base = slugBase(provider.provider);
-    claimants.set(base, (claimants.get(base) ?? 0) + 1);
-  }
-
   const anchors = new Map();
   const used = new Set();
   for (const provider of sourceCatalog) {
-    const base = slugBase(provider.provider);
-    const preferred = claimants.get(base) === 1
-      ? `provider-${base}`
-      : `provider-${base}-${createHash('sha1').update(String(provider.provider ?? '')).digest('hex').slice(0, 6)}`;
+    const key = String(provider.provider ?? '');
+    const preferred = `provider-${slugBase(key)}-${createHash('sha1').update(key).digest('hex').slice(0, 6)}`;
     let anchor = preferred;
     for (let suffix = 2; used.has(anchor); suffix += 1) anchor = `${preferred}-${suffix}`;
     used.add(anchor);

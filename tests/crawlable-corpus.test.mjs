@@ -6287,36 +6287,52 @@ describe('GEO residue #7869 (sources ItemList)', () => {
     );
   });
 
-  it('disambiguates a slug collision by key identity, not by catalog order', async () => {
-    // The branch is unreachable through the real 748-entry catalog (748 keys,
-    // 748 distinct bases), so it is tested on the exported helper directly.
-    // What it must guarantee is not merely uniqueness but ORDER-INDEPENDENCE:
-    // these fragments are published in 748 ListItem urls, and the catalog is
-    // sorted by displayName, so an arrival-ordered counter would let a rename
-    // elsewhere hand one provider's already-indexed anchor to another.
+  it('derives every anchor from its own provider key alone', async () => {
+    // An anchor is published data — one per ListItem url — so it must be a pure
+    // function of its own key. Two weaker shapes were tried and both leak the
+    // rest of the catalog into an individual anchor: an arrival-ordered counter
+    // (order-dependent, and the catalog sorts by displayName), and suffixing
+    // only a base with more than one claimant (membership-dependent). Each
+    // assertion below pins one way the anchor must NOT move.
     const { sourceCardAnchors } = await import('../scripts/crawlable-sources-page.mjs');
     const colliders = [{ provider: 'a.b' }, { provider: 'a-b' }, { provider: 'a b' }];
+
+    // (1) Colliding keys stay distinct.
     const forward = sourceCardAnchors(colliders);
-    const reversed = sourceCardAnchors([...colliders].reverse());
     assert.equal(new Set(forward.values()).size, colliders.length, 'colliding keys must not collapse onto one anchor');
     for (const { provider } of colliders) {
-      assert.equal(
-        reversed.get(provider),
-        forward.get(provider),
-        `${provider} must keep its anchor when the catalog is reordered`,
-      );
-      assert.match(forward.get(provider), /^provider-a-b-[0-9a-f]{6}$/, 'a collided base is never handed out bare');
+      assert.match(forward.get(provider), /^provider-a-b-[0-9a-f]{6}$/, 'a collided base must carry its key digest');
     }
 
-    // A key with nothing left after slugging shares the 'source' base, so it
-    // goes down the same path rather than getting a bare fallback anchor.
+    // (2) Reordering the catalog moves nothing.
+    const reversed = sourceCardAnchors([...colliders].reverse());
+    for (const { provider } of colliders) {
+      assert.equal(reversed.get(provider), forward.get(provider), `${provider} must keep its anchor when the catalog is reordered`);
+    }
+
+    // (3) Adding a LATER collider moves nothing either — the case a
+    // claimant-count conditional gets wrong. Publish `a.b` alone, add `a-b`
+    // afterwards, and the citation already indexed for `a.b` must still resolve.
+    const alone = sourceCardAnchors([{ provider: 'a.b' }]);
+    assert.equal(
+      forward.get('a.b'),
+      alone.get('a.b'),
+      'adding a colliding provider must not change an anchor that was already published',
+    );
+
+    // (4) An anchor does not depend on the catalog at all: the same key alone
+    // and among 748 neighbours yields the same string.
+    assert.equal(
+      sourceCardAnchors([{ provider: 'finance.yahoo.com' }]).get('finance.yahoo.com'),
+      sourceCardAnchors([{ provider: 'zzz' }, { provider: 'finance.yahoo.com' }, { provider: 'aaa' }]).get('finance.yahoo.com'),
+      'an anchor must not depend on which other providers are present',
+    );
+
+    // (5) A key with nothing left after slugging still gets a distinct anchor.
     const empty = sourceCardAnchors([{ provider: '---' }, { provider: '!!!' }]);
     assert.equal(new Set(empty.values()).size, 2, 'two unsluggable keys must still get distinct anchors');
     for (const anchor of empty.values()) assert.match(anchor, /^provider-source-[0-9a-f]{6}$/);
 
-    // A base only one key claims stays bare — the common case, and what keeps
-    // 748 of 748 anchors readable.
-    assert.deepEqual([...sourceCardAnchors([{ provider: 'finance.yahoo.com' }]).values()], ['provider-finance-yahoo-com']);
     assert.equal(
       sourceCardAnchors([{ provider: 'x' }, { provider: 'x' }]).size,
       1,
