@@ -6,14 +6,15 @@ interface SentryBuildMetadata {
   initialScope?: {
     tags: {
       build_sha: string;
+      app_version: string;
     };
   };
 }
 
 /**
- * Keep the semver release stable while making each Vercel deployment
- * attributable. Sentry's `dist` is the build within a release; the explicit
- * tag keeps the SHA available in issue/event searches and exports.
+ * Match the Edge release and GitHub commit identity. A stable semver release
+ * cannot advance past a commit-based resolution when the app version stays
+ * unchanged. Keep the app version as a tag for cross-deployment searches.
  */
 export function getSentryBuildMetadata(
   appVersion: string,
@@ -24,11 +25,12 @@ export function getSentryBuildMetadata(
   if (!VERCEL_COMMIT_SHA.test(normalizedBuildHash)) return { release };
 
   return {
-    release,
+    release: normalizedBuildHash,
     dist: normalizedBuildHash,
     initialScope: {
       tags: {
         build_sha: normalizedBuildHash,
+        app_version: appVersion,
       },
     },
   };

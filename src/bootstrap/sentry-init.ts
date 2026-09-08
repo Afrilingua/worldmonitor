@@ -8,7 +8,7 @@
 
 import { isIosLikeUserAgent } from './platform-ua';
 import { SENTRY_ALLOW_URLS } from './sentry-allow-urls';
-import { getSentryBuildMetadata } from './sentry-build-metadata';
+import { getSentryBuildMetadata } from '../../shared/sentry-build-metadata';
 
 type SentryNs = typeof import('@sentry/browser');
 

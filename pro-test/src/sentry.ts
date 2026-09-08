@@ -1,4 +1,5 @@
 import * as Sentry from '@sentry/react';
+import { getSentryBuildMetadata } from '../../shared/sentry-build-metadata';
 
 import { SENTRY_ALLOW_URLS } from './sentry-allow-urls';
 import {
@@ -23,6 +24,7 @@ export function initSentry(): void {
 
   Sentry.init({
     dsn: sentryDsn || undefined,
+    ...getSentryBuildMetadata(__APP_VERSION__, __BUILD_HASH__),
     environment: (location.hostname === 'worldmonitor.app' || location.hostname.endsWith('.worldmonitor.app')) ? 'production'
       : location.hostname.includes('vercel.app') ? 'preview'
       : 'development',
