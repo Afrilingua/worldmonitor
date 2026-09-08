@@ -60,6 +60,7 @@ import {
   renderCountryPage,
   resolveChokepointObservation,
   resolveLatestLivePulseSnapshotPath,
+  resolveLatestResilienceSnapshotPath,
   SOURCE_CATALOG_LASTMOD_PATHS,
   sourcePageLastmod,
   TOOLS_PAGE_CONTENT_VERSION,
@@ -148,10 +149,14 @@ function assertPulseRecordFields(record, fields, path, optionalFields = {}) {
 function assertPulseCountryRecords(countries) {
   assert.ok(countries && typeof countries === 'object' && !Array.isArray(countries));
   assert.ok(Object.keys(countries).length > 0, 'country section must not be empty');
+  const resilience = JSON.parse(read(repoRoot, resolveLatestResilienceSnapshotPath(repoRoot)));
+  const supportedCodes = new Set([...resilience.items, ...resilience.greyedOut]
+    .map((country) => String(country.countryCode || '').toUpperCase()));
   // Membership, nullable observations, and array lengths vary between freezes.
   // Check every record so a valid sibling cannot hide a missing nested field.
   const articleFields = { title: 'string', source: 'string', url: 'string', publishedAt: 'string' };
   for (const [code, country] of Object.entries(countries)) {
+    assert.ok(/^[A-Z]{2}$/.test(code) && supportedCodes.has(code), `unsupported country key: ${code}`);
     const path = `countries.${code}`;
     assertPulseRecordFields(country, {
       partial: 'boolean', score: 'string|null', band: 'string|null', trend: 'string|null',
@@ -5151,6 +5156,18 @@ describe('live-pulse snapshot injection (#7533)', () => {
     live.countries.TO.developments.brief = null;
     live.countries.TO.developments.headlines = [];
     assert.doesNotThrow(() => assertPulseFixtureShape(fixture, live));
+  });
+
+  it('rejects malformed and unsupported country keys, including partial records', () => {
+    const fixture = JSON.parse(readFileSync(join(repoRoot, FIXTURE_RELATIVE_PATH), 'utf8'));
+    for (const code of ['us', 'USA', 'ZZ']) {
+      for (const partial of [false, true]) {
+        const live = structuredClone(fixture);
+        live.countries[code] = { ...structuredClone(live.countries.US), partial };
+        assert.throws(() => assertPulseFixtureShape(fixture, live), /unsupported country key/);
+        assert.throws(() => assertPulseFixtureShape(live, fixture), /unsupported country key/);
+      }
+    }
   });
 
   it('rejects malformed country records even when a valid sibling has the expected fields', () => {
