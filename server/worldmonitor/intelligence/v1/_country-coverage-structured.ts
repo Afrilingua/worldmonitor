@@ -447,7 +447,7 @@ async function collectMilitaryFlights(
     const settled = settle(source, incidents, { status: 'hit', fetchedAtMs: 0 }, req.now, flights.length > 0);
     // One bounded, one-directional divergence from the panel, stated rather
     // than hidden: the browser enriches flights with Wingbits aircraft details
-    // after the RPC (military-flights.ts fetchFlightsWithWingbits), and a
+    // after the RPC (military-flights.ts enrichFlightsWithWingbits), and a
     // confirmed military branch flips isInteresting false -> true, lifting
     // severity low -> high. That branch is derived from browser-only config, so
     // this surface reads the unenriched value. Severity here can therefore be
