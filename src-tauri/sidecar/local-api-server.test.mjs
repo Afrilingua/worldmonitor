@@ -892,7 +892,7 @@ test('does not forward the sidecar transport token through Docker cloud proxy ro
   }
 });
 
-test('preserves Request body when handler uses fetch(Request)', async () => {
+for (const inputKind of ['Request', 'URL']) test(`preserves body when handler uses fetch(${inputKind})`, async () => {
   // Use a DISTINCT upstream server (not the sidecar itself) so this test
   // exercises real "handler proxies to external host" semantics. The upstream
   // is on 127.0.0.1, so it must be opted into the SSRF allowlist via
@@ -919,7 +919,7 @@ test('preserves Request body when handler uses fetch(Request)', async () => {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ secret: 'keep-body' }),
         });
-        const upstream = await fetch(request);
+        const upstream = await fetch(${inputKind === 'Request' ? 'request' : 'new URL(request.url), { method: request.method, headers: request.headers, body: await request.text() }'});
         const payload = await upstream.text();
         return new Response(payload, {
           status: upstream.status,
@@ -1008,7 +1008,7 @@ test('returns local handler error when fetch(Request) uses a consumed body', asy
   }
 });
 
-test('blocks handler global fetches to private network targets (#3549)', async () => {
+for (const inputKind of ['string', 'URL', 'Request']) test(`blocks handler ${inputKind} fetches to private network targets (#3549, #7892)`, async () => {
   let upstreamHits = 0;
 
   const upstream = createServer((_req, res) => {
@@ -1022,7 +1022,7 @@ test('blocks handler global fetches to private network targets (#3549)', async (
   const localApi = await setupApiDir({
     'private-proxy.js': `
       export default async function handler() {
-        const upstream = await fetch(process.env.WM_TEST_UPSTREAM);
+        const upstream = await fetch(${inputKind === 'string' ? 'process.env.WM_TEST_UPSTREAM' : `new ${inputKind}(process.env.WM_TEST_UPSTREAM)`});
         const payload = await upstream.text();
         return new Response(payload, {
           status: upstream.status,
