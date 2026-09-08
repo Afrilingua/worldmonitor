@@ -694,9 +694,49 @@ export function buildSourceCatalog(entries, { logicalProviders = [] } = {}) {
   return catalog.sort((left, right) => left.displayName.localeCompare(right.displayName, 'en', { sensitivity: 'base' }));
 }
 
+/**
+ * Stable per-provider fragment ids for the catalog cards (#7869).
+ *
+ * Round 7 of the GEO audit found the page's `ItemList` announcing 748 elements
+ * as bare strings, 43 of the names repeated. The repeats are not duplicates:
+ * they are one publisher reached through several hosts (Yahoo Finance through
+ * three, Euronews through eight language editions), each its own catalog entry.
+ * A name alone cannot tell them apart, so every card gets an id and every
+ * `ListItem` a url pointing at it — which is also what makes the count
+ * `numberOfItems` publishes a count of things a reader can go and look at.
+ *
+ * Keyed on `provider`, the catalog's own unique key, not on the display name.
+ * Slugs are unique across the current catalog, but two provider keys could
+ * still collide once punctuation is stripped (`a.b` and `a-b`), so a collision
+ * takes a numeric suffix rather than silently pointing two entries at one card.
+ *
+ * The character class reduces every key to `[a-z0-9-]`, which is what lets the
+ * caller interpolate the id into the card markup and the JSON-LD url without
+ * escaping either.
+ */
+export function sourceCardAnchors(sourceCatalog) {
+  const anchors = new Map();
+  const used = new Set();
+  for (const provider of sourceCatalog) {
+    const base = String(provider.provider ?? '')
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/&/g, ' and ')
+      .replace(/[^a-zA-Z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .toLowerCase() || 'source';
+    let anchor = `provider-${base}`;
+    for (let suffix = 2; used.has(anchor); suffix += 1) anchor = `provider-${base}-${suffix}`;
+    used.add(anchor);
+    anchors.set(provider.provider, anchor);
+  }
+  return anchors;
+}
+
 export function renderSourcesIndex({ sourceStats, sourceCatalog, catalogDatasets = [], baseUrl, lastmod, helpers }) {
   const { absoluteUrl, breadcrumbLd, dataCatalogLd, escapeHtml, pageDocument, withUtmSource } = helpers;
   const path = '/sources/';
+  const pageUrl = absoluteUrl(baseUrl, path);
   const description = `Explore ${sourceStats.providerCount} active providers and ${sourceStats.activeHosts} source hosts across World Monitor's global intelligence, markets, energy, cyber, aviation, climate and news coverage.`;
   // Query precedes the fragment — withUtmSource() would append after the
   // anchor and push the query into the fragment, so build these by hand.
@@ -723,6 +763,7 @@ export function renderSourcesIndex({ sourceStats, sourceCatalog, catalogDatasets
         </article>`).join('\n');
   const countryOptions = catalogCountryOptions(sourceCatalog);
   const coverageOptions = catalogCoverageCountryOptions(sourceCatalog);
+  const cardAnchors = sourceCardAnchors(sourceCatalog);
   const providerCards = sourceCatalog.map((provider) => {
     const domain = domainById.get(provider.domainId);
     const countryLabel = sourceOriginLabel(provider.originCountry);
@@ -736,7 +777,7 @@ export function renderSourcesIndex({ sourceStats, sourceCatalog, catalogDatasets
     const kindBadges = provider.kinds.map((kind) => (
       `<span class="kind-badge">${escapeHtml(kindLabels[kind] || kind)}</span>`
     )).join('');
-    return `        <article class="provider-card" data-provider="${escapeHtml(provider.provider)}" data-provider-name="${escapeHtml(provider.displayName)}" data-source-domain="${provider.domainId}" data-source-kind="${provider.kinds.join(' ')}" data-source-country="${countryFilter}" data-source-coverage="${escapeHtml(coverageFilter)}">
+    return `        <article class="provider-card" id="${cardAnchors.get(provider.provider)}" data-provider="${escapeHtml(provider.provider)}" data-provider-name="${escapeHtml(provider.displayName)}" data-source-domain="${provider.domainId}" data-source-kind="${provider.kinds.join(' ')}" data-source-country="${countryFilter}" data-source-coverage="${escapeHtml(coverageFilter)}">
           <div class="provider-heading">
             <span class="provider-domain">${escapeHtml(domain.name)}</span>
             <h3>${escapeHtml(provider.displayName)}</h3>
@@ -1036,13 +1077,18 @@ ${providerCards}
         '@type': 'CollectionPage',
         name: 'World Monitor data source catalog',
         description,
-        url: absoluteUrl(baseUrl, path),
+        url: pageUrl,
         inLanguage: 'en-US',
         mainEntity: {
           '@type': 'ItemList',
           numberOfItems: sourceCatalog.length,
           itemListOrder: 'https://schema.org/ItemListUnordered',
-          itemListElement: sourceCatalog.map((provider) => provider.displayName),
+          itemListElement: sourceCatalog.map((provider, index) => ({
+            '@type': 'ListItem',
+            position: index + 1,
+            name: provider.displayName,
+            url: `${pageUrl}#${cardAnchors.get(provider.provider)}`,
+          })),
         },
       },
       catalogLd,
