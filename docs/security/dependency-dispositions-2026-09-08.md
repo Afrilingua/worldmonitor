@@ -98,12 +98,16 @@ advisory gate, not a crates.io yanking check.
 - RUSTSEC-2026-0190: anyhow 1.0.102 → 1.0.103.
 - RUSTSEC-2026-0221: event-listener 5.4.1 → 5.4.2.
 - RUSTSEC-2024-0429: glib 0.18.5 remains. Its patched 0.20 line is not a
-  compatible substitute for Tauri/Wry's GTK 0.18 API. The proposed temporary
+  compatible substitute for Tauri/Wry's GTK 0.18 API. The user-approved temporary
   decision is recorded in `.github/rust-advisory-decisions.json`, with owner,
   limiting caller evidence, mitigation, explicit Linux runtime uncertainty and October 8 expiry.
-  Its status is **proposed**: it does not suppress the blocking advisory. The desktop
-  owner must authorize a temporary exception or select a GTK migration/backport.
-  Approval is not granted by this document or by the no-patched-version policy.
+  The user explicitly approved this exception on **2026-09-08**, after being told
+  it permits CI to pass while the advisory remains unresolved and runtime
+  non-reachability is unproven. Its status is **approved**: the gate reports a
+  visible warning for this advisory until **2026-10-08 00:00 UTC**, when the
+  existing expiry check fails. The approval applies only to this temporary glib
+  exception, not other risk, merge or deployment. Desktop maintainers must
+  re-review the mitigation and coordinated GTK migration/backport before expiry.
   `cargo tree --locked --target x86_64-unknown-linux-gnu -i glib` confirms
   Tauri 2.11.5 / tauri-runtime-wry 2.11.4 / Wry 0.55.1 → GTK 0.18.2 →
   glib 0.18.5 (with sibling GIO/WebKit paths). GTK declares glib `0.18`;
