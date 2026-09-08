@@ -436,18 +436,22 @@ http.route({
     if (!msg) return new Response("OK", { status: 200 });
 
     if (msg.chat?.type !== "private") return new Response("OK", { status: 200 });
-
-    if (!msg.date || Math.abs(Date.now() / 1000 - msg.date) > 900) {
+    if (typeof msg.chat.id !== "number" || !Number.isSafeInteger(msg.chat.id) || msg.chat.id <= 0) {
       return new Response("OK", { status: 200 });
     }
 
-    const text = msg.text?.trim() ?? "";
+    if (typeof msg.date !== "number" || !Number.isSafeInteger(msg.date) || Math.abs(Date.now() / 1000 - msg.date) > 900) {
+      return new Response("OK", { status: 200 });
+    }
+
+    if (typeof msg.text !== "string") return new Response("OK", { status: 200 });
+    const text = msg.text.trim();
     const chatId = String(msg.chat.id);
 
     const match = text.match(/^\/start\s+([A-Za-z0-9_-]{40,50})$/);
-    if (!match) return new Response("OK", { status: 200 });
+    if (!match?.[1]) return new Response("OK", { status: 200 });
 
-    const claimed = await ctx.runMutation(anyApi.notificationChannels!.claimPairingToken as any, {
+    const claimed = await ctx.runMutation(internal.notificationChannels.claimPairingToken, {
       token: match[1],
       chatId,
     });
