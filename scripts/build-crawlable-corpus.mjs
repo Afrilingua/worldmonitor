@@ -537,8 +537,9 @@ export function sourcePageLastmod({
 export function comparisonPageLastmod({
   contentVersion = COMPARISONS_CONTENT_VERSION,
   pathLastmods = [],
+  snapshotDate,
 } = {}) {
-  return laterDate(contentVersion, ...pathLastmods);
+  return laterDate(contentVersion, ...pathLastmods, snapshotDate);
 }
 
 function normalizeBaseUrl(baseUrl) {
@@ -1743,6 +1744,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
   const comparisonsLastmod = comparisonPageLastmod({
     contentVersion: COMPARISONS_CONTENT_VERSION,
     pathLastmods: COMPARISON_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(rootDir, path)),
+    snapshotDate: livePulse.capturedAt,
   });
   const attributionManifest = readJson(rootDir, SOURCE_ATTRIBUTION_MANIFEST_PATH);
   // Production generators share the validated attribution predicate and stats.
@@ -5292,6 +5294,7 @@ export async function buildCorpus({
     outDir,
     baseUrl,
     lastmod: data.lastmod.comparisons,
+    snapshotDate: data.livePulse.capturedAt,
     tpl: { escapeHtml, absoluteUrl, breadcrumbLd, withUtmSource, pageDocument },
   });
 
