@@ -60,6 +60,7 @@ import {
   renderCountryPage,
   resolveChokepointObservation,
   resolveLatestLivePulseSnapshotPath,
+  resolveLatestResilienceSnapshotPath,
   SOURCE_CATALOG_LASTMOD_PATHS,
   sourcePageLastmod,
   TOOLS_PAGE_CONTENT_VERSION,
@@ -92,6 +93,7 @@ import { USE_CASES_CONTENT_VERSION } from '../scripts/build-use-cases.mjs';
 import { COMPARISONS_CONTENT_VERSION } from '../scripts/build-comparison-pages.mjs';
 import { shiftLivePulseDates } from './helpers/shift-live-pulse-dates.mjs';
 import { rawCatalogProviderNames, rawManifestActiveEntries } from './helpers/raw-catalog-providers.mjs';
+import { validate as validateJsonSchema } from './helpers/json-schema-mini.mjs';
 
 const repoRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
@@ -133,15 +135,86 @@ function pulseSectionShape(value) {
   return [...shapes].sort();
 }
 
+function assertPulseRecordFields(record, fields, path, optionalFields = {}) {
+  const schema = {
+    type: 'object',
+    required: Object.keys(fields),
+    additionalProperties: false,
+    properties: Object.fromEntries(Object.entries({ ...fields, ...optionalFields })
+      .map(([key, types]) => [key, { type: types.split('|') }])),
+  };
+  assert.deepEqual(validateJsonSchema(schema, record, path), [], `fixture nested shape at ${path}`);
+}
+
+function assertPulseCountryRecords(countries) {
+  assert.ok(countries && typeof countries === 'object' && !Array.isArray(countries));
+  assert.ok(Object.keys(countries).length > 0, 'country section must not be empty');
+  const resilience = JSON.parse(read(repoRoot, resolveLatestResilienceSnapshotPath(repoRoot)));
+  const supportedCodes = new Set([...resilience.items, ...resilience.greyedOut]
+    .map((country) => String(country.countryCode || '').toUpperCase()));
+  // Membership, nullable observations, and array lengths vary between freezes.
+  // Check every record so a valid sibling cannot hide a missing nested field.
+  const articleFields = { title: 'string', source: 'string', url: 'string', publishedAt: 'string' };
+  for (const [code, country] of Object.entries(countries)) {
+    assert.ok(/^[A-Z]{2}$/.test(code) && supportedCodes.has(code), `unsupported country key: ${code}`);
+    const path = `countries.${code}`;
+    assertPulseRecordFields(country, {
+      partial: 'boolean', score: 'string|null', band: 'string|null', trend: 'string|null',
+      advisory: 'string', sanctions: 'string', asOf: 'string|null', retrievedAt: 'string',
+      methodologyVersion: 'string', geoConvergence: 'number|null', developments: 'object',
+    }, path);
+    const developments = country.developments;
+    assertPulseRecordFields(developments, {
+      headlines: 'array', brief: 'object|null', timeline: 'array|null',
+      timelineStatus: 'string', briefSkipped: 'string|null', capturedAt: 'string',
+    }, `${path}.developments`);
+    for (const [index, headline] of developments.headlines.entries()) {
+      assertPulseRecordFields(headline, articleFields, `${path}.developments.headlines[${index}]`, { origin: 'string' });
+    }
+    if (developments.brief !== null) {
+      assertPulseRecordFields(developments.brief, {
+        text: 'string', model: 'string', generatedAt: 'string', sources: 'array',
+      }, `${path}.developments.brief`);
+      for (const [index, source] of developments.brief.sources.entries()) {
+        assertPulseRecordFields(source, articleFields, `${path}.developments.brief.sources[${index}]`, { origin: 'string' });
+      }
+    }
+    for (const [index, event] of (developments.timeline ?? []).entries()) {
+      assertPulseRecordFields(event, {
+        title: 'string', summary: 'string', sourceUrl: 'string', occurredAt: 'string', domain: 'string',
+      }, `${path}.developments.timeline[${index}]`);
+    }
+  }
+}
+
 function assertPulseFixtureShape(fixture, live) {
   assert.deepEqual(Object.keys(fixture).sort(), Object.keys(live).sort());
   assert.equal(fixture.schemaVersion, live.schemaVersion);
   for (const section of LIVE_PULSE_SECTIONS) {
+    if (section === 'countries') {
+      assertPulseCountryRecords(fixture.countries);
+      assertPulseCountryRecords(live.countries);
+      continue;
+    }
     assert.deepEqual(
       Object.keys(fixture[section] ?? {}).sort(),
       Object.keys(live[section] ?? {}).sort(),
       `fixture section ${section} must carry the same keys as the committed snapshot`,
     );
+    if (section === 'chokepoints') {
+      for (const snapshot of [fixture, live]) {
+        for (const [id, record] of Object.entries(snapshot.chokepoints)) {
+          assertPulseRecordFields(record, {
+            disruptionScore: 'string', status: 'string', congestion: 'string|null',
+            navigationalWarnings: 'string|null', navigationalWarningsAvailable: 'boolean',
+            aisDisruptions: 'string|null', aisSnapshotAvailable: 'boolean', description: 'string|null',
+            todayTransits: 'string|null', todayCountsAvailable: 'boolean', weekMovement: 'string|null',
+            partial: 'boolean', asOf: 'string',
+          }, `chokepoints.${id}`);
+        }
+      }
+      continue;
+    }
     assert.deepEqual(
       pulseSectionShape(fixture[section]),
       pulseSectionShape(live[section]),
@@ -2577,7 +2650,7 @@ describe('crawlable corpus generator', () => {
         if (country.rank == null) {
           assert.match(countryHtml, /Nearest ranked comparators:/);
           assert.doesNotMatch(
-            countryHtml,
+            countryDocument.querySelector('[data-country-analysis]')?.textContent,
             /\b[A-Z]{2} · /,
             `${route} must not prefix unpublished copy with ISO scaffolding`,
           );
@@ -5059,6 +5132,103 @@ describe('live-pulse snapshot injection (#7533)', () => {
       () => assertPulseFixtureShape(drifted, fixture),
       /nested shape/,
     );
+  });
+
+  it('accepts additional countries and a permitted country capture shortfall', () => {
+    const fixture = JSON.parse(readFileSync(join(repoRoot, FIXTURE_RELATIVE_PATH), 'utf8'));
+    const live = structuredClone(fixture);
+    assert.ok(!Object.hasOwn(live.countries, 'TO'));
+    live.countries.TO = structuredClone(live.countries.US);
+    assert.doesNotThrow(() => assertPulseFixtureShape(fixture, live));
+    for (const code of Object.keys(live.countries).slice(0, 5)) delete live.countries[code];
+    assert.doesNotThrow(() => assertPulseFixtureShape(fixture, live));
+  });
+
+  it('accepts supported country record variants independently of country membership', () => {
+    const fixture = JSON.parse(readFileSync(join(repoRoot, FIXTURE_RELATIVE_PATH), 'utf8'));
+    const live = structuredClone(fixture);
+    const developments = live.countries.US.developments;
+    developments.headlines[0].origin = 'country-index';
+    developments.brief.sources[0].origin = 'country-index';
+    developments.timeline = null;
+    developments.timelineStatus = 'unavailable';
+    live.countries.TO = structuredClone(live.countries.US);
+    live.countries.TO.developments.brief = null;
+    live.countries.TO.developments.headlines = [];
+    assert.doesNotThrow(() => assertPulseFixtureShape(fixture, live));
+  });
+
+  it('rejects malformed and unsupported country keys, including partial records', () => {
+    const fixture = JSON.parse(readFileSync(join(repoRoot, FIXTURE_RELATIVE_PATH), 'utf8'));
+    for (const code of ['us', 'USA', 'ZZ']) {
+      for (const partial of [false, true]) {
+        const live = structuredClone(fixture);
+        live.countries[code] = { ...structuredClone(live.countries.US), partial };
+        assert.throws(() => assertPulseFixtureShape(fixture, live), /unsupported country key/);
+        assert.throws(() => assertPulseFixtureShape(live, fixture), /unsupported country key/);
+      }
+    }
+  });
+
+  it('rejects malformed country records even when a valid sibling has the expected fields', () => {
+    const fixture = JSON.parse(readFileSync(join(repoRoot, FIXTURE_RELATIVE_PATH), 'utf8'));
+    const mutations = [
+      (record) => { delete record.methodologyVersion; },
+      (record) => { record.score = 34; },
+      (record) => { record.developments = []; },
+      (record) => { delete record.developments.headlines[0].url; },
+      (record) => { record.developments.headlines.push(null); },
+      (record) => { record.developments.headlines[0].origin = 1; },
+      (record) => { record.developments.brief.sources[0].publishedAt = {}; },
+      (record) => { record.developments.brief.sources[0].extra = true; },
+      (record) => { delete record.developments.timeline[0].sourceUrl; },
+    ];
+    for (const mutate of mutations) {
+      const live = structuredClone(fixture);
+      live.countries.TO = structuredClone(live.countries.US);
+      live.countries.TO.developments.timeline = structuredClone(fixture.countries.UA.developments.timeline);
+      mutate(live.countries.TO);
+      assert.throws(() => assertPulseFixtureShape(fixture, live), /nested shape.*TO/);
+    }
+    for (const malformed of [null, [], 'country']) {
+      const live = structuredClone(fixture);
+      live.countries.TO = malformed;
+      assert.throws(() => assertPulseFixtureShape(fixture, live), /nested shape.*TO/);
+    }
+  });
+
+  it('preserves section, schema version, and fixed-set contracts', () => {
+    const fixture = JSON.parse(readFileSync(join(repoRoot, FIXTURE_RELATIVE_PATH), 'utf8'));
+    for (const mutate of [
+      (live) => { delete live.countries; },
+      (live) => { live.schemaVersion += 1; },
+      (live) => { live.countries = {}; },
+      (live) => { live.countries = []; },
+      ...['chokepoints', 'crises', 'signalConvergence'].map((section) => (live) => {
+        delete live[section][Object.keys(live[section])[0]];
+      }),
+      (live) => { Object.values(live.chokepoints)[0].disruptionScore = {}; },
+    ]) {
+      const live = structuredClone(fixture);
+      mutate(live);
+      assert.throws(() => assertPulseFixtureShape(fixture, live));
+    }
+  });
+
+  it('accepts unavailable chokepoint observations without changing the fixed set', () => {
+    const fixture = JSON.parse(readFileSync(join(repoRoot, FIXTURE_RELATIVE_PATH), 'utf8'));
+    const live = structuredClone(fixture);
+    const record = Object.values(live.chokepoints)[0];
+    for (const field of ['todayTransits', 'description', 'congestion', 'navigationalWarnings', 'aisDisruptions', 'weekMovement']) {
+      record[field] = null;
+    }
+    record.todayCountsAvailable = false;
+    record.navigationalWarningsAvailable = false;
+    record.aisSnapshotAvailable = false;
+    record.partial = true;
+    assert.doesNotThrow(() => assertPulseFixtureShape(fixture, live));
+    delete record.todayTransits;
+    assert.throws(() => assertPulseFixtureShape(fixture, live), /nested shape/);
   });
 
   it('derives every family lastmod from a pulse that dominates every other input', async () => {
