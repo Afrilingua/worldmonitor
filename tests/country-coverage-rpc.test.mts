@@ -893,7 +893,8 @@ describe('collectStructuredIncidents — producer status', () => {
       },
     } as Partial<StructuredDependencies>);
     assert.ok(calls <= 10, `cursor walk must be bounded, made ${calls} calls`);
-    assert.ok(find(results, 'structured:military-flights').incidents.length >= 1);
+    assert.equal(find(results, 'structured:military-flights').state, 'failed');
+    assert.deepEqual(find(results, 'structured:military-flights').incidents, []);
   });
 
   it('says plainly that flight severity is un-enriched', async () => {
@@ -946,6 +947,27 @@ describe('GetCountryCoverage — end to end over the real collector', () => {
       fetchCoverage: async () => coverageOverride ?? coverage(),
       collectStructured: collectStructuredIncidents,
       structuredDeps: leafDeps(structuredOverrides),
+    });
+  }
+
+  it('an enabled strike cache failure degrades the response', async () => {
+    const response = await run({ strikeTrackingEnabled: true });
+    assert.equal(response.sources.find(s => s.source === 'structured:strikes')?.state, 'failed');
+    assert.equal(response.degraded, true);
+  });
+
+  for (const complete of [false, true]) {
+    it(`a tenth flight page with complete=${complete} reports integrity`, async () => {
+      let pages = 0;
+      const response = await run({
+        listMilitaryFlights: async () => ({
+          flights: [], clusters: [],
+          pagination: { nextCursor: ++pages === 10 && complete ? '' : String(pages), totalCount: 0 },
+        }),
+      });
+      assert.equal(pages, 10);
+      assert.equal(response.sources.find(s => s.source === 'structured:military-flights')?.state, complete ? 'unknown' : 'failed');
+      assert.equal(response.degraded, !complete);
     });
   }
 

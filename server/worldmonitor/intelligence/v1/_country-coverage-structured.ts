@@ -266,6 +266,7 @@ export interface StructuredDependencies {
   listIranEvents: typeof listIranEvents;
   listMilitaryFlights: typeof listMilitaryFlights;
   readSeed: (key: string) => Promise<SeedRead>;
+  strikeTrackingEnabled?: boolean;
 }
 
 export const defaultStructuredDependencies: StructuredDependencies = {
@@ -275,6 +276,7 @@ export const defaultStructuredDependencies: StructuredDependencies = {
   listIranEvents,
   listMilitaryFlights,
   readSeed,
+  strikeTrackingEnabled: (process.env.IRAN_EVENTS_ENABLED ?? 'false').toLowerCase() === 'true',
 };
 
 export interface StructuredRequest {
@@ -425,8 +427,10 @@ async function collectMilitaryFlights(
       });
       flights.push(...response.flights);
       const next = response.pagination?.nextCursor ?? '';
-      // A cursor that does not advance would spin forever; stop instead.
-      if (!next || next === cursor) break;
+      if (!next) break;
+      if (next === cursor || page === MAX_FLIGHT_PAGES - 1) {
+        return failed(source, 'Military flight pagination was incomplete; this is not evidence of a quiet period.');
+      }
       cursor = next;
     }
     const incidents: CountryTimelineIncident[] = [];
@@ -470,11 +474,12 @@ async function collectStrikes(req: StructuredRequest, box: CountryBox | null): P
     const response = await deps.listIranEvents(req.ctx, {});
     // Both sides of this lane sit behind a default-off flag after the 2026-07
     // sunset: VITE_ENABLE_IRAN_ATTACKS in the browser, IRAN_EVENTS_ENABLED
-    // here. The disabled handler returns the `scrapedAt: '0'` sentinel, which
-    // is what distinguishes "retired" from "enabled but quiet" — an empty list
-    // alone means neither, and reading it as retired would mislabel a healthy
-    // quiet week.
+    // here. The zero sentinel also represents a missing or unreadable cache,
+    // so the enabled flag must distinguish an outage from retirement.
     if (response.scrapedAt === '0') {
+      if (deps.strikeTrackingEnabled) {
+        return failed(source, 'Strike tracking is enabled but its backing cache is missing or unreadable.');
+      }
       return unavailable(source, 'Middle East strike tracking is retired (IRAN_EVENTS_ENABLED off).');
     }
     // Unlike ACLED and the flights lane, this handler reports a real gather
