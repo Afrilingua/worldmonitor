@@ -258,6 +258,12 @@ Two different proof contracts over the same output, and neither substitutes for 
 
 A claim that output "stayed byte-identical" must name which contract it leans on; citing the isolation control for a non-regression claim is the standard overreach, because the exact defect class that worries the reader is the one the isolation control is blind to. Regenerating a baseline is itself a methodology event, never a way to make a failing test pass. See also: Vacuous Guard, Mutation Proof.
 
+### Sample Point
+
+The moment in a subject's lifecycle at which a budget or threshold guard takes its measurement — a free variable, independent of the threshold and of the assertion, that decides which artefact the number actually constrains. Two guards can share a ceiling, a metric, and a correct assertion and still guard different things, because one samples a page before it hydrates and the other after.
+
+The sample point is the usual price paid for determinism, and paying it is not a defect — sampling earlier narrows a wildly variable measurement into a stable one. The defect is leaving the trade undeclared, because the ceiling's *name* keeps describing the artefact it was derived from while the guard quietly moves onto a different one, and the resulting slack reads as headroom rather than as lost coverage. Three rules follow. A guard must state where it samples, since a threshold is meaningless without it and no reviewer can infer it from the assertion. A sample point may only be chosen from measurements taken in the environment the guard runs in — a developer machine and CI can differ in both directions on the same tree, so a bound calibrated locally is a guess. And when the trade is taken deliberately, the region that fell outside it should still be measured and *recorded* beside the assertion rather than dropped: a diagnostic that is emitted but never asserted keeps the unguarded gap visible without letting a slow run redden the gate. Counter-intuitively the later, more meaningful sample is not always the noisier one — waiting on a real readiness signal can be steadier than sampling early at an arbitrary instant — so determinism should be measured rather than assumed when deciding. See also: Vacuous Guard, Mutation Proof, Isolation Control vs Golden Baseline.
+
 ## News Story Tracking & Trend Detection
 
 ### Feed Digest
@@ -315,6 +321,18 @@ A rolling, per-country index of GDELT GKG articles the bulk materializer keeps a
 ### Enrichment Tail
 
 The indexed country pages that carry no dated development in a given weekly capture. Its size is a property of the grounding pool — how many countries the week's digest and the Country Article Index actually name — not of whether the enrichment ran, and it is recorded as a count in the capture's coverage rather than gated to zero, because no article pool names every country every week. A capture whose freeze attempted the index — whatever the index answered — is held to a higher coverage floor at build time than one frozen before the index existed, so a tail the size of the digest-only era cannot ship as a green build, and a gate that relaxed when the index failed would be no gate. A measured-but-lower week can still publish through an operator override on the weekly workflow rather than by editing the floor. See also: Recent Developments, Brief Grounding, Country Article Index.
+
+## Source Catalog
+
+### Catalog Provider
+
+One addressable entry in the published source inventory, identified by its own catalog key. It takes three shapes: usually a single upstream host; sometimes several hosts of one operator collapsed under one declared identity; and sometimes a publisher with no editorial host at all, grouped across the transport its feeds arrive through. It is *not* one organisation, and host count predicts provider count in neither direction — one operator's several hosts may be one entry or several, depending on whether the inventory declares a shared identity for them.
+
+The load-bearing consequence is that neither a display name nor a host can identify a provider. The same display name legitimately appears more than once, so the provider count exceeds the number of distinct names. Anything that keys on the inventory — a filter, a citation, a published enumeration of it — must key on the provider's own identifier, and anything that publishes a per-provider count is counting hosts-and-groupings rather than newsrooms. Contrast Publisher Family, which groups the *same* underlying outlets the opposite way: a family collapses every edition and regional feed of one newsroom into a single unit so that independence counts cannot be inflated. Both groupings are correct for their own purpose, and neither substitutes for the other. See also: Publisher Family, Logical Provider.
+
+### Logical Provider
+
+A Catalog Provider that has no editorial host of its own because its feeds are delivered entirely through a syndication transport. It is grouped under the publisher's name rather than under the transport's host, so the inventory credits the newsroom that wrote the content instead of the service that shipped it — without which every such publisher would collapse into a single misleading entry named for the transport. Duplicate names within this grouping are rejected upstream by the validation that admits sources to the catalog at all, which is what lets consumers treat a provider identifier as unique. See also: Catalog Provider, Publisher Family.
 
 ## Prediction Markets
 
@@ -749,6 +767,19 @@ which is the difference between the two. That badge is only a signal while the
 platform will run the seeder again: a standalone seeder whose newest build has
 failed is ticking its previous Active Deployment, and there the same non-zero
 exit ends its schedule outright.
+
+Because the skip's whole alarm rests on freshness monitoring rather than on the
+exit status, extending last-good has a second obligation that is easy to miss:
+the freshness marker must be kept alive alongside the data it reports on. Only
+the marker's *value* is untouchable — advancing a success clock on a failed run
+would claim a success that never happened — while its lifetime must be extended
+with the data's. A skip that re-arms the payload every tick makes that payload's
+effective lifetime unbounded; if the marker keeps its own fixed lifetime it
+expires first, and a present payload with no marker is indistinguishable from a
+healthy one, so a sustained failure decays from warn back to green with frozen
+data behind it. The general form: whichever of the two expires first decides
+what is reported, so the reporting signal must outlive the value it reports on.
+See also: Seed-Owned Key, Content Clock.
 
 ### Starved Tick
 

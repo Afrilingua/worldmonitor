@@ -727,6 +727,19 @@ describe('crawlable content corpus deployment contracts', () => {
     }
   });
 
+  it('marks stock workspaces and their markdown twins noindex without breaking deep links (#7905)', () => {
+    for (const path of ['/stocks', '/stocks/', '/stocks.md', '/stocks/AAPL', '/stocks/ZZZZFAKE',
+      '/stocks/aapl/', '/stocks/BRK.B', '/stocks/7203.T', '/stocks/AAPL.md', '/stocks/ZZZZFAKE.md']) {
+      assert.equal(effectiveHeader(path, 'X-Robots-Tag'), 'noindex, follow', path);
+    }
+    for (const path of ['/dashboard', '/stocksmith', '/countries/united-states']) {
+      assert.equal(effectiveHeader(path, 'X-Robots-Tag'), null, path);
+    }
+    for (const symbol of ['AAPL', 'ZZZZFAKE', 'BRK.B', '7203.T']) {
+      assert.equal(firstRewriteFor({ host: 'www.worldmonitor.app', path: `/stocks/${symbol}` })?.destination, DASHBOARD_HTML_DESTINATION);
+    }
+  });
+
   it('serves no SPA fallback for generated corpus paths while keeping real client deep links', () => {
     // #6575: unknown paths must fall through to the filesystem (404), so the
     // only dashboard-serving rewrites left are the explicit client History
@@ -891,17 +904,27 @@ describe('crawlable content corpus deployment contracts', () => {
       assert.equal(effectiveHeader(route, 'Vercel-CDN-Cache-Control'), null, `${route} is not a document and must not carry a Vercel cache policy`);
     }
 
+    // The sitemaps joined AGENT_TEXT_FILES in #7869 and keep the stricter
+    // browser policy they have always had — the crawler that re-fetches a
+    // sitemap wants a revalidation, and the shared edge TTL is unaffected.
+    const SITEMAPS = new Set(['sitemap.xml', 'sitemap-main.xml']);
     for (const file of AGENT_TEXT_FILES) {
       const route = `/${file}`;
       assert.equal(effectiveHeader(route, 'CDN-Cache-Control'), HTML_ENTRY_EDGE_CACHE, `${route} must advertise the 600s Cloudflare TTL`);
       assert.equal(effectiveHeader(route, 'Vercel-CDN-Cache-Control'), HTML_ENTRY_EDGE_CACHE, `${route} must advertise the 600s Vercel TTL`);
-      assert.equal(effectiveCacheControl(route), 'public, max-age=3600', `${route} must keep its browser policy`);
+      assert.equal(
+        effectiveCacheControl(route),
+        SITEMAPS.has(file) ? 'public, max-age=3600, must-revalidate' : 'public, max-age=3600',
+        `${route} must keep its browser policy`,
+      );
       assert.ok(existsSync(resolve(__dirname, '../public', file)), `${route} must be a static file in public/`);
     }
     // /index.md reaches the origin under its own name and is rewritten to
-    // /home.md there; robots.txt and the sitemaps are left to the zone bypass on
-    // purpose; the nested llms.txt twins are not root files.
-    for (const route of ['/index.md', '/robots.txt', '/sitemap.xml', '/sitemap-main.xml', '/schemamap.xml', '/api/download.md', '/developers/llms.txt']) {
+    // /home.md there; robots.txt is left to the zone bypass on purpose (it is
+    // re-fetched rarely and cheap to serve); the nested llms.txt twins are not
+    // root files. /schemamap.xml is not in the sitemap index and no crawler is
+    // pointed at it.
+    for (const route of ['/index.md', '/robots.txt', '/schemamap.xml', '/api/download.md', '/developers/llms.txt']) {
       assert.equal(effectiveHeader(route, 'CDN-Cache-Control'), null, `${route} must not advertise the document TTL`);
     }
   });
@@ -912,11 +935,17 @@ describe('crawlable content corpus deployment contracts', () => {
     assert.match(robotsSource, /^Sitemap: https:\/\/www\.worldmonitor\.app\/docs\/sitemap\.xml$/m);
   });
 
-  it('caches root sitemaps at Vercel without changing the Cloudflare bypass (#7749)', () => {
+  // #7749 gave the sitemaps the Vercel half of the pair and deliberately left
+  // the Cloudflare bypass alone. Round 7 then measured both still DYNAMIC under
+  // a GET while every other corpus route hit, which is what the half-pair
+  // predicts: the bypass rule names /sitemap.xml and .xml is outside
+  // Cloudflare's default-cacheable extensions. #7869 completes the pair — the
+  // claim lives in scripts/cloudflare-cache-rule.mjs (AGENT_TEXT_FILES).
+  it('caches root sitemaps at both shared caches (#7869, supersedes #7749)', () => {
     for (const route of ['/sitemap.xml', '/sitemap-main.xml']) {
       assert.equal(effectiveCacheControl(route), 'public, max-age=3600, must-revalidate');
       assert.equal(effectiveHeader(route, 'Vercel-CDN-Cache-Control'), HTML_ENTRY_EDGE_CACHE);
-      assert.equal(effectiveHeader(route, 'CDN-Cache-Control'), null);
+      assert.equal(effectiveHeader(route, 'CDN-Cache-Control'), HTML_ENTRY_EDGE_CACHE);
     }
   });
 
@@ -3729,6 +3758,30 @@ describe('agent readiness: generic markdown URL-fallback rewrite', () => {
     assert.equal(sourceToRegExp(SPA_HTML_CACHE_SOURCE).test('/dashboard.md'), false);
     assert.equal(sourceToRegExp(SPA_HTML_CACHE_SOURCE).test('/dashboard'), true);
   });
+
+  it('never declares a static canonical over the unbounded generated .md space', () => {
+    // The curated twins (pricing.md, developers.md, …) are standalone documents
+    // with no HTML sibling, so their literal self-canonical header rules are
+    // correct. The generated space is unbounded — /countries/iran.md and an
+    // invented /countries/does-not-exist-xyz.md both land on /api/md-twin — so a
+    // canonical rule that reached them would mint a self-canonical soft-404 that
+    // no handler change can retract (#7860). Only the handler may set a
+    // canonical there, and it points at the sibling HTML page.
+    const generatedTwins = ['/countries/iran.md', '/countries/does-not-exist-xyz.md', '/stocks/AAPL.md'];
+    for (const rule of vercelConfig.headers ?? []) {
+      const declaresCanonical = (rule.headers ?? []).some(
+        (h) => h.key?.toLowerCase() === 'link' && /rel="?canonical"?/.test(h.value ?? ''),
+      );
+      if (!declaresCanonical) continue;
+      for (const path of generatedTwins) {
+        assert.equal(
+          sourceToRegExp(rule.source).test(path),
+          false,
+          `header rule "${rule.source}" declares a canonical over generated twin ${path}`,
+        );
+      }
+    }
+  });
 });
 
 describe('agent readiness: remaining markdown twins', () => {
@@ -5360,5 +5413,54 @@ describe('variant-host canonicalization (#6833–#6836)', () => {
     assert.ok(SPA_HTML_CACHE_SOURCE.includes('|src|'), 'HTML cache catch-all must exclude /src');
     assert.ok(SPA_HTML_CACHE_SOURCE.includes('|tmp|'), 'HTML cache catch-all must exclude /tmp');
     assert.ok(SPA_HTML_CACHE_SOURCE.includes('|server|'), 'HTML cache catch-all must exclude /server');
+  });
+});
+
+describe('cold-load metric evidence reaches the CI artifact (#7837)', () => {
+  const mapBudgetE2eSource = readFileSync(
+    resolve(__dirname, '../e2e/map-overlay-marker-budget.spec.ts'),
+    'utf-8',
+  );
+
+  // The failure this pins is SILENT. `testInfo.attach({ body })` keeps the
+  // bytes in memory for a reporter to persist, and the `list` reporter this
+  // project runs persists nothing — so the spec passed while its cold-load
+  // metrics never reached the uploaded artifact (shard-1 of run 34144452921
+  // contained zero files for this spec). Nothing goes red when that regresses;
+  // the evidence simply stops existing, which is how #7837's own acceptance
+  // criteria became unanswerable.
+  it('attaches the cold-load metrics by path, never by body', () => {
+    assert.match(mapBudgetE2eSource, /testInfo\.outputPath\('cold-dashboard-metrics\.json'\)/);
+    assert.match(mapBudgetE2eSource, /await writeFile\(path, payload, 'utf8'\)/);
+    assert.match(
+      mapBudgetE2eSource,
+      /testInfo\.attach\('cold-dashboard-metrics\.json', \{ path, contentType: 'application\/json' \}\)/,
+    );
+    assert.doesNotMatch(
+      mapBudgetE2eSource,
+      /attach\('cold-dashboard-metrics\.json', \{[\s\S]{0,80}?body:/,
+      'a body attachment is dropped by the list reporter and never reaches test-results/',
+    );
+    // A path attachment only survives a PASSING test because output is kept.
+    assert.match(playwrightConfigSource, /preserveOutput:\s*'always'/);
+    // ...and test-results/ is what the smoke job uploads.
+    assert.match(testWorkflowSource, /path: test-results\//);
+  });
+
+  // #7848 moved the readiness gate to first paint; #7837 added a settled
+  // sample beside it that is deliberately NOT asserted, because a slow runner
+  // must never redden this required job. Folding the settled sample into the
+  // budget assertion would reintroduce exactly the flake both issues exist to
+  // remove — visibly, but only after a live CI run.
+  it('asserts the dashboard budgets against the first-paint sample only', () => {
+    assert.match(
+      mapBudgetE2eSource,
+      /assertDashboardMetricBudgets\(samples\.map\(\(sample\) => sample\.firstPaint\.postGc\)\)/,
+    );
+    assert.doesNotMatch(
+      mapBudgetE2eSource,
+      /assertDashboardMetricBudgets\(samples\.map\(\(sample\) => sample\.quiescence/,
+      'the settled sample is recorded, never asserted (#7837)',
+    );
   });
 });

@@ -58,8 +58,10 @@ import {
   withheldTransitCountSentence,
 } from './crawlable-live-tools.mjs';
 import {
+  briefCitationGroundingGap,
   COUNTRY_INDEX_ORIGIN,
   developmentsHasDatedItem,
+  isBriefSectionHeader,
   normalizeFrozenDevelopments,
 } from './crawlable-developments.mjs';
 
@@ -144,7 +146,7 @@ export const COMPARISON_PAGE_LASTMOD_PATHS = Object.freeze([
 // families take the later of this version and their own committed source date,
 // so template changes are reflected without pretending every deploy is fresh.
 export const CORPUS_GENERATOR_CONTENT_VERSION = '2026-09-01';
-export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-06';
+export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-08';
 export const CII_COUNTRY_PAGE_CONTENT_VERSION = '2026-09-03';
 // Exported so the #7533 guard test can recompute every family clock without
 // re-implementing the version constants themselves.
@@ -537,8 +539,9 @@ export function sourcePageLastmod({
 export function comparisonPageLastmod({
   contentVersion = COMPARISONS_CONTENT_VERSION,
   pathLastmods = [],
+  snapshotDate,
 } = {}) {
-  return laterDate(contentVersion, ...pathLastmods);
+  return laterDate(contentVersion, ...pathLastmods, snapshotDate);
 }
 
 function normalizeBaseUrl(baseUrl) {
@@ -1743,6 +1746,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
   const comparisonsLastmod = comparisonPageLastmod({
     contentVersion: COMPARISONS_CONTENT_VERSION,
     pathLastmods: COMPARISON_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(rootDir, path)),
+    snapshotDate: livePulse.capturedAt,
   });
   const attributionManifest = readJson(rootDir, SOURCE_ATTRIBUTION_MANIFEST_PATH);
   // Production generators share the validated attribution predicate and stats.
@@ -3044,8 +3048,6 @@ ${faqs.map((faq) => `        <details data-country-faq><summary>${escapeHtml(faq
 // numbers moved in the same window the reporting was captured. Asserting that
 // a headline *drove* a score move would be fabrication — only an analyst (or
 // the brief, which cites its sources) may draw that link.
-const INTEL_BRIEF_SECTION_RE = /^(SITUATION NOW|WHAT THIS MEANS FOR\b.*|KEY RISKS|OUTLOOK|WATCH ITEMS)\s*$/i;
-
 function unwrapBriefEmphasisLine(line) {
   let current = String(line || '').trim();
   for (let i = 0; i < 4; i++) {
@@ -3092,29 +3094,12 @@ export function formatCrawlableIntelBrief(text, countryName) {
       closeList();
       continue;
     }
-    if (/^WHAT THIS MEANS FOR\b/i.test(trimmed)) {
+    if (isBriefSectionHeader(trimmed, { countryName: name })) {
       closeList();
-      out.push(`          <h3>What this means for ${escapeHtml(name)}</h3>`);
-      continue;
-    }
-    if (/^SITUATION NOW\b/i.test(trimmed)) {
-      closeList();
-      out.push('          <h3>Situation now</h3>');
-      continue;
-    }
-    if (/^KEY RISKS\b/i.test(trimmed)) {
-      closeList();
-      out.push('          <h3>Key risks</h3>');
-      continue;
-    }
-    if (/^OUTLOOK\b/i.test(trimmed)) {
-      closeList();
-      out.push('          <h3>Outlook</h3>');
-      continue;
-    }
-    if (/^WATCH ITEMS\b/i.test(trimmed)) {
-      closeList();
-      out.push('          <h3>Watch items</h3>');
+      const heading = /^WHAT THIS MEANS FOR\b/i.test(trimmed)
+        ? `What this means for ${name}`
+        : trimmed.replace(/:\s*$/, '').toLowerCase().replace(/^./, (letter) => letter.toUpperCase());
+      out.push(`          <h3>${escapeHtml(heading)}</h3>`);
       continue;
     }
     if (/^(?:[•\-]\s*|\*\s+)/.test(trimmed)) {
@@ -3330,7 +3315,7 @@ export function assertCountryDevelopmentsRendered({
     const contentLines = rows.brief.text.trim().split('\n')
       .map((line) => unwrapBriefEmphasisLine(line.trim()))
       .filter(Boolean)
-      .filter((line) => !INTEL_BRIEF_SECTION_RE.test(line))
+      .filter((line) => !isBriefSectionHeader(line, { countryCode, countryName }))
       .map((line) => line.replace(/^(?:[•\-]\s*|\*\s+)/, '').replace(/\*\*/g, ''));
     const anchors = [contentLines[0], contentLines.at(-1)]
       .filter((line, index, all) => line && all.indexOf(line) === index)
@@ -3382,12 +3367,21 @@ function intelBriefHtml(html) {
 // still plain text rather than <h*> tags.
 const MEANS_FOR_ISO_RE = /\bwhat this means for [a-z]{2}\b/i;
 
-export function assertCountryBriefPresentation({ pagePath, html }) {
+export function assertCountryBriefPresentation({ pagePath, html, sources }) {
   const main = corpusMainHtml(html);
   if (main.includes('**')) {
     throw new Error(`${pagePath} renders literal markdown emphasis in <main>`);
   }
   const brief = intelBriefHtml(html);
+  if (brief && sources !== undefined) {
+    // Check the rendered claim blocks as well as the input. A later formatter
+    // must not add an entity or change a citation after publish-time validation.
+    const claims = [...brief.matchAll(/<(p|li)\b([^>]*)>([\s\S]*?)<\/\1>/gi)]
+      .filter((match) => !/\bclass="source"/.test(match[2]))
+      .map((match) => corpusVisibleText(match[3]));
+    const gap = briefCitationGroundingGap({ text: claims.join('\n'), sources });
+    if (gap) throw new Error(`${pagePath} brief has unsupported citation: ${gap}`);
+  }
   const headingSource = brief ?? main;
   const headingHits = [...headingSource.matchAll(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/gi)];
   for (const hit of headingHits) {
@@ -3722,7 +3716,7 @@ ${analysis.readingGuide ? `      <h2>How to use this evidence</h2>
     scriptSrcs: ['/tools/live-tools.js'],
   });
   assertCountryDevelopmentsRendered({ pagePath: path, html, developments, countryCode: country.code, countryName: country.name });
-  assertCountryBriefPresentation({ pagePath: path, html });
+  assertCountryBriefPresentation({ pagePath: path, html, sources: developments?.brief?.sources || [] });
   return html;
 }
 
@@ -5292,6 +5286,7 @@ export async function buildCorpus({
     outDir,
     baseUrl,
     lastmod: data.lastmod.comparisons,
+    snapshotDate: data.livePulse.capturedAt,
     tpl: { escapeHtml, absoluteUrl, breadcrumbLd, withUtmSource, pageDocument },
   });
 

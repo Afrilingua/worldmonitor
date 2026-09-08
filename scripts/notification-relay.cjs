@@ -259,7 +259,10 @@ async function drainHeldForUser(userId, variant, allowedChannelTypes) {
   }
 
   const verifiedChannels = channels.filter(c =>
-    c.verified && (allowedChannelTypes == null || allowedChannelTypes.includes(c.channelType)),
+    c.verified &&
+    (c.channelType !== 'email' || c.emailOwnership === 'verified_account') &&
+    (c.channelType !== 'telegram' || c.telegramOwnership === 'verified_callback') &&
+    (allowedChannelTypes == null || allowedChannelTypes.includes(c.channelType)),
   );
   let anyDelivered = false;
   for (const ch of verifiedChannels) {
@@ -949,7 +952,7 @@ async function processWelcome(event) {
 
   const ch = channels.find(c =>
     c.channelType === channelType &&
-    c.verified &&
+    c.verified && (c.channelType !== 'email' || c.emailOwnership === 'verified_account') &&
     // Events created before connection-scoped welcome IDs remain compatible.
     // New events must still target the exact channel document that scheduled
     // them, so a delayed retry cannot welcome a replacement connection.
@@ -1251,7 +1254,11 @@ async function processEvent(event) {
       channels = [];
     }
 
-    const verifiedChannels = channels.filter(c => c.verified && rule.channels.includes(c.channelType));
+    const verifiedChannels = channels.filter(c =>
+      c.verified &&
+      (c.channelType !== 'email' || c.emailOwnership === 'verified_account') &&
+      (c.channelType !== 'telegram' || c.telegramOwnership === 'verified_callback') &&
+      rule.channels.includes(c.channelType));
     if (verifiedChannels.length === 0) continue;
 
     let deliveryText = text;
@@ -1366,6 +1373,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  processEvent,
   sendTelegram,
   checkDedup,
   upstashDedupSetNx,

@@ -141,6 +141,7 @@ export default defineSchema({
         channelType: v.literal("telegram"),
         chatId: v.string(),
         verified: v.boolean(),
+        telegramOwnership: v.optional(v.literal("verified_callback")),
         linkedAt: v.number(),
       }),
       v.object({
@@ -157,6 +158,7 @@ export default defineSchema({
         userId: v.string(),
         channelType: v.literal("email"),
         email: v.string(),
+        emailOwnership: v.optional(v.literal("verified_account")),
         verified: v.boolean(),
         linkedAt: v.number(),
       }),
