@@ -256,6 +256,10 @@ describe('normalizeFrozenDevelopments', () => {
       'El Guri faces disruption [1].',
       'Électricité de France faces disruption [1].',
       'The iPhone faces disruption [1].',
+      'Ørsted faces disruption [1].',
+      'Łódź faces disruption [1].',
+      'ΔΕΗ faces disruption [1].',
+      'The øBrand faces disruption [1].',
     ]) {
       const row = { headlines: sources, brief: { text, sources }, timeline: [], briefSkipped: null };
       const out = normalizeFrozenDevelopments(row);
@@ -277,6 +281,18 @@ describe('normalizeFrozenDevelopments', () => {
     assert.equal(out.brief.text, text);
     assert.deepEqual(out.brief.sources, sources);
     assert.equal(out.briefSkipped, null);
+  });
+
+  it('retains Unicode names when the cited title supports them', () => {
+    for (const name of ['Ørsted', 'Łódź', 'ΔΕΗ', 'øBrand']) {
+      const sources = [
+        { title: `${name} resumes operations`, source: 'Reuters', url: 'https://reuters.com/a' },
+        { title: 'Talks resume', source: 'BBC', url: 'https://bbc.com/b' },
+      ];
+      const text = `${name} faces disruption [1].`;
+      const out = normalizeFrozenDevelopments({ brief: { text, sources } });
+      assert.equal(out.brief?.text, text, name);
+    }
   });
 
   // Distinct hosts per wire: rows on one site are one publisher (#7748).

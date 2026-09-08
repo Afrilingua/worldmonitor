@@ -508,6 +508,14 @@ describe('validateNoHallucinatedProperNouns — May 19 regression + class', () =
     assert.equal(r.ok, true);
   });
 
+  it('recognizes Unicode capitals, including non-decomposing Latin initials', () => {
+    for (const name of ['Ørsted', 'Łódź', 'ΔΕΗ', 'Роскосмос']) {
+      assert.deepEqual(extractProperNounSequences(`${name} resumes operations.`), [[name.toLowerCase()]]);
+      assert.equal(validateNoHallucinatedProperNouns(`${name} faces disruption.`, 'Talks resume.').ok, false);
+      assert.equal(validateNoHallucinatedProperNouns(`${name} faces disruption.`, `${name} resumes operations.`).ok, true);
+    }
+  });
+
   it('out-of-scope: headline already contains a wrong name → validator does NOT fact-check', () => {
     // Source-level errors are explicitly out of scope (see plan Scope Boundaries).
     // The validator catches LLM invention only — if the headline ships the

@@ -202,9 +202,9 @@ export function briefCitationGroundingGap(brief) {
     return 'missing source titles';
   }
   // Fold Latin accents and capitalize mixed-case brands (iPhone, eBay) for
-  // the shared English extractor, on both sides of the comparison.
+  // the shared extractor, on both sides of the comparison.
   const comparable = (text) => text.normalize('NFKD').replace(/\p{M}/gu, '')
-    .replace(/\b\p{Ll}(?=\p{Ll}*\p{Lu})/gu, (letter) => letter.toUpperCase());
+    .replace(/(?<![\p{L}\p{N}_])\p{Ll}(?=\p{Ll}*\p{Lu})/gu, (letter) => letter.toUpperCase());
   const titles = brief.sources.map((source) => comparable(stripMarkdownMarkers(source.title)));
   let citationCount = 0;
   for (const rawLine of normalizeBriefText(brief.text).split('\n')) {

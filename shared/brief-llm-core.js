@@ -524,7 +524,7 @@ function normalizeDottedAcronyms(text) {
 }
 
 function properNounTokenValue(token) {
-  if (typeof token !== 'string' || token.length < 2 || !/^[A-Z]/.test(token)) return null;
+  if (typeof token !== 'string' || token.length < 2 || !/^[\p{Lu}\p{Lt}]/u.test(token)) return null;
   const stripped = token.replace(/[.,;:'’]+$/g, '').replace(/['’]s$/i, '');
   return (stripped || token).toLowerCase();
 }
@@ -614,8 +614,8 @@ function extractProperNounSequencesWithMeta(text) {
       // and J."), middle initials in names, or "I" (the pronoun, already
       // handled by SENTENCE_START_AMBIGUOUS). None should register as
       // a standalone proper noun.
-      const isCapitalized = token.length >= 2 && /^[A-Z]/.test(token);
-      const isAllCapsAcronym = /^[A-Z]{2,6}$/.test(token);
+      const isCapitalized = token.length >= 2 && /^[\p{Lu}\p{Lt}]/u.test(token);
+      const isAllCapsAcronym = /^\p{Lu}{2,6}$/u.test(token);
       const isAmbiguousSentenceStart = firstToken
         && !isAllCapsAcronym
         && SENTENCE_START_AMBIGUOUS.has(token.toLowerCase());
