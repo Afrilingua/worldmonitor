@@ -104,6 +104,7 @@ const REQUIRED_NON_TEST_GATE_CHECKS = [
 // exemption is valid only while the required aggregate directly needs it.
 const GATE_CHECK_EXEMPTIONS: Record<string, { workflow: string; coveredBy: string }> = {
   'audit-lockfile': { workflow: 'Security Audit', coveredBy: 'security-audit' },
+  'audit-rust': { workflow: 'Security Audit', coveredBy: 'security-audit' },
   'unit-shards': { workflow: 'Test', coveredBy: 'unit' },
   'variant-smoke-shards': { workflow: 'Test', coveredBy: 'variant-smoke-full' },
   'variant-smoke-pro-webmcp': { workflow: 'Test', coveredBy: 'variant-smoke-full' },
