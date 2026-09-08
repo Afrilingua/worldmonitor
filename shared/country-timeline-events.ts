@@ -1,4 +1,4 @@
-import { clusterTexts, isSameStory } from '../../shared/story-identity.js';
+import { clusterTexts, isSameStory } from './story-identity.js';
 
 export type CountryTimelineLane = 'protest' | 'conflict' | 'natural' | 'military';
 export type CountryTimelineSeverity = 'low' | 'medium' | 'high' | 'critical';
