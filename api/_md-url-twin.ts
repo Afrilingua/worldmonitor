@@ -9,9 +9,9 @@
  * back as Vercel's own markdown conversion instead of a scrape of its HTML.
  * Same-origin redirects are followed (every content URL here 308s /x to /x/)
  * and the twin inherits the final target's status, so an invented path is a
- * 404 rather than an indexable stub. The canonical always names the final
- * HTML page, never the .md twin, and only a response that carries the real
- * document is left indexable.
+ * 404 rather than an indexable stub. The canonical names the final HTML page,
+ * never the .md twin and never an /api/ endpoint, and only a response that
+ * carries the real document is left indexable.
  *
  * Loop-prevention: sibling fetches send x-wm-md-twin so a .md handler never
  * fetches another .md handler, and a redirect onto a .md path is not followed.
@@ -25,6 +25,9 @@ export const MD_TWIN_LOOP_HEADER = 'x-wm-md-twin';
 const MAX_TWIN_CHARS = 512_000;
 export const MAX_TWIN_BYTES = 512_000;
 const MAX_SIBLING_REDIRECTS = 3;
+// Every response that is not the sibling's own document carries these: a
+// stub must never be cached as if it were the page, nor indexed as one.
+const NOT_A_DOCUMENT = { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' } as const;
 const SIBLING_FETCH_TIMEOUT_MS = 8_000;
 const SIBLING_USER_AGENT = 'WorldMonitor-MarkdownTwin/1.0';
 const FORWARDED_RESPONSE_HEADERS = [
@@ -141,7 +144,10 @@ export function htmlToMarkdown(html: string, fallbackTitle: string): string {
 function jsonToMarkdown(raw: string, heading: string): string {
   let pretty = raw.trim();
   try {
-    pretty = JSON.stringify(JSON.parse(raw) as unknown, null, 2);
+    const reserialised = JSON.stringify(JSON.parse(raw) as unknown, null, 2);
+    // Indenting can multiply a body that is already at the cap, so keep the
+    // expanded form only when it fits and otherwise fence the raw text.
+    if (reserialised.length <= MAX_TWIN_CHARS) pretty = reserialised;
   } catch {
     // Keep the original text when the body is not JSON.
   }
@@ -149,27 +155,58 @@ function jsonToMarkdown(raw: string, heading: string): string {
 }
 
 const FRONT_MATTER = /^---\n([\s\S]*?)\n---(?:\n|$)/;
+const FRONT_MATTER_KEY = /^([A-Za-z0-9_.-]+):(?:\s|$)/;
+
+/**
+ * `---` opens a thematic break as well as a front-matter block, so a document
+ * that merely starts with a horizontal rule must not have its prose spliced
+ * into metadata. Require the captured block to read as a flat YAML mapping.
+ */
+function frontMatterOf(markdown: string): { block: string; lines: string[] } | null {
+  const match = markdown.match(FRONT_MATTER);
+  if (!match) return null;
+  const lines = (match[1] ?? '').split('\n');
+  const isMapping =
+    lines.some((line) => FRONT_MATTER_KEY.test(line)) &&
+    lines.every((line) => line.trim() === '' || line.startsWith(' ') || FRONT_MATTER_KEY.test(line));
+  return isMapping ? { block: match[0], lines } : null;
+}
+
+/**
+ * Re-emit `key: value` with the value quoted. Vercel's generated front-matter
+ * leaves values bare, and its descriptions routinely contain ": " (live
+ * 2026-09-08 on /dashboard and /chokepoints/strait-of-hormuz/), which a plain
+ * YAML scalar cannot hold — so copying the block through unchanged would ship
+ * a metadata block no consumer can parse, canonical included.
+ */
+function quoteFrontMatterValue(line: string): string {
+  const entry = line.match(/^([A-Za-z0-9_.-]+):\s*(.*)$/);
+  if (!entry) return line;
+  const [, key, value = ''] = entry;
+  if (value === '' || /^(["']).*\1$/.test(value)) return line;
+  return `${key}: ${JSON.stringify(value)}`;
+}
 
 function withHeading(markdown: string, heading: string): string {
   if (/^# /m.test(markdown)) return markdown;
   // Asking the sibling for markdown makes a front-matter-led body the common
   // case, and a heading prepended above the opening `---` would swallow the
   // whole block into the document text.
-  const block = markdown.match(FRONT_MATTER)?.[0];
+  const block = frontMatterOf(markdown)?.block;
   return block
     ? `${block}\n# ${heading}\n\n${markdown.slice(block.length)}`
     : `# ${heading}\n\n${markdown}`;
 }
 
 function withMarkdownMetadata(markdown: string, canonical: string | null, fallbackTitle: string): string {
-  const frontMatter = markdown.match(FRONT_MATTER);
+  const frontMatter = frontMatterOf(markdown);
   if (frontMatter) {
     if (!canonical) return markdown;
-    // Vercel's own front-matter carries title/description/image but no
-    // canonical; keep its lines byte-for-byte and append ours.
-    const lines = (frontMatter[1] ?? '').split('\n').filter((line) => !line.startsWith('canonical:'));
+    const lines = frontMatter.lines
+      .filter((line) => !line.startsWith('canonical:'))
+      .map(quoteFrontMatterValue);
     lines.push(`canonical: ${JSON.stringify(canonical)}`);
-    return `---\n${lines.join('\n')}\n---\n${markdown.slice(frontMatter[0].length)}`;
+    return `---\n${lines.join('\n')}\n---\n${markdown.slice(frontMatter.block.length)}`;
   }
   const title = markdown.match(/^# (.+)$/m)?.[1] ?? fallbackTitle;
   const canonicalLine = canonical ? `\ncanonical: ${JSON.stringify(canonical)}` : '';
@@ -275,7 +312,7 @@ export async function buildMarkdownTwinResponse(
   if (req.headers.get(MD_TWIN_LOOP_HEADER) === '1') {
     return new Response('# Not found\n', {
       status: 404,
-      headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
+      headers: markdownHeaders(null, { ...NOT_A_DOCUMENT }),
     });
   }
 
@@ -283,7 +320,7 @@ export async function buildMarkdownTwinResponse(
   if (!sibling) {
     return new Response('# Not found\n', {
       status: 404,
-      headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
+      headers: markdownHeaders(null, { ...NOT_A_DOCUMENT }),
     });
   }
 
@@ -302,6 +339,11 @@ export async function buildMarkdownTwinResponse(
   outbound.set(MD_TWIN_LOOP_HEADER, '1');
   outbound.set('accept', 'text/markdown, text/html;q=0.9, application/json;q=0.8, text/plain;q=0.7, */*;q=0.1');
 
+  // One deadline for the whole chain, not one per hop: a fresh signal each hop
+  // would multiply the budget by the hop count and overrun the edge runtime's
+  // execution ceiling before any of this handler's own error branches ran.
+  const deadline = AbortSignal.timeout(SIBLING_FETCH_TIMEOUT_MS);
+
   let siblingRes: Response;
   for (let hops = 0; ; hops += 1) {
     let redirectTarget: URL | null;
@@ -310,7 +352,7 @@ export async function buildMarkdownTwinResponse(
         method: req.method,
         headers: outbound,
         redirect: 'manual',
-        signal: AbortSignal.timeout(SIBLING_FETCH_TIMEOUT_MS),
+        signal: deadline,
       });
       const location = siblingRes.headers.get('location');
       redirectTarget =
@@ -318,7 +360,7 @@ export async function buildMarkdownTwinResponse(
     } catch {
       return new Response(`# ${heading}\n\nThe sibling page at \`${sibling}\` could not be fetched.\n`, {
         status: 502,
-        headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
+        headers: markdownHeaders(null, { ...NOT_A_DOCUMENT }),
       });
     }
     if (!redirectTarget) break;
@@ -336,7 +378,7 @@ export async function buildMarkdownTwinResponse(
     if (hops >= MAX_SIBLING_REDIRECTS || isMarkdownTwinPath(redirectTarget.pathname)) {
       return new Response('# Not found\n', {
         status: 404,
-        headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
+        headers: markdownHeaders(null, { ...NOT_A_DOCUMENT }),
       });
     }
     siblingUrl = redirectTarget;
@@ -348,9 +390,16 @@ export async function buildMarkdownTwinResponse(
   // /countries/iran/?foo=1 canonicalises to /countries/iran/. Carrying the
   // query here would chain one canonical into another and let query params
   // reopen the unbounded twin space this handler exists to close.
-  const canonical = isFailure ? null : `${siblingUrl.origin}${siblingUrl.pathname}`;
+  //
+  // An /api/ sibling gets none at all. Those endpoints are not canonical web
+  // pages, and many need their query to mean anything, so the query-less form
+  // would name a different, degenerate resource than the one served.
+  const canonical =
+    isFailure || siblingUrl.pathname.startsWith('/api/')
+      ? null
+      : `${siblingUrl.origin}${siblingUrl.pathname}`;
   const responseHeaders: Record<string, string> = {
-    ...(isFailure ? { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' } : {}),
+    ...(isFailure ? NOT_A_DOCUMENT : {}),
     ...forwardedResponseHeaders(siblingRes),
   };
 
@@ -389,7 +438,7 @@ export async function buildMarkdownTwinResponse(
   } catch {
     return new Response(`# ${heading}\n\nThe sibling page at \`${sibling}\` could not be read.\n`, {
       status: 502,
-      headers: markdownHeaders(null, { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }),
+      headers: markdownHeaders(null, { ...NOT_A_DOCUMENT }),
     });
   }
 

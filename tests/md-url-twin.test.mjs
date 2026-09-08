@@ -195,7 +195,7 @@ describe('api/md-twin.ts', () => {
   });
 
   it('stops following after the redirect hop limit', async () => {
-    const { fetchImpl } = siblingChain(
+    const { fetchImpl, seen } = siblingChain(
       ...Array.from({ length: 8 }, (_, hop) =>
         new Response(null, { status: 308, headers: { location: `/loop-${hop + 1}/` } }),
       ),
@@ -207,9 +207,39 @@ describe('api/md-twin.ts', () => {
       fetchImpl,
     );
 
+    // Pin the count, not just the eventual 404: asserting the status alone
+    // passes for any budget, so a change to MAX_SIBLING_REDIRECTS would slip
+    // through and multiply the worst-case latency unnoticed.
+    assert.deepEqual(
+      seen.map((hop) => hop.url.pathname),
+      ['/loop-0', '/loop-1/', '/loop-2/', '/loop-3/'],
+    );
     assert.equal(response.status, 404);
     assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.equal(response.headers.get('x-robots-tag'), 'noindex');
+  });
+
+  it('spends one deadline across the whole redirect chain', async () => {
+    const signals = [];
+    const { fetchImpl } = siblingChain(
+      new Response(null, { status: 308, headers: { location: '/countries/' } }),
+      new Response('# Countries\n', { status: 200, headers: { 'content-type': 'text/markdown' } }),
+    );
+
+    await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/countries.md'),
+      '/countries.md',
+      async (input, init) => {
+        signals.push(init?.signal);
+        return fetchImpl(input, init);
+      },
+    );
+
+    // A fresh AbortSignal.timeout per hop multiplies the budget by the hop
+    // count, and four hops at 8s each overruns the edge execution ceiling.
+    assert.equal(signals.length, 2);
+    assert.ok(signals[0], 'every hop must carry a deadline');
+    assert.equal(signals[0], signals[1], 'all hops must share one deadline');
   });
 
   it('serves a document larger than the retired 80 KB cap', async () => {
@@ -314,6 +344,139 @@ describe('api/md-twin.ts', () => {
     });
     assert.match(document, /^# example$/m, 'the twin stays heading-led below the front-matter');
     assert.match(document, /Body with no heading\./);
+  });
+
+  it('re-quotes pass-through front-matter so the canonical stays parseable', async () => {
+    // Live 2026-09-08, /dashboard and /chokepoints/strait-of-hormuz/ both emit
+    // `description: <text>: <more text>` unquoted. A plain YAML scalar cannot
+    // contain ": ", so copying the block byte-for-byte and appending our
+    // canonical produces a block no consumer can parse -- which defeats the
+    // point of appending the canonical at all.
+    const response = await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/dashboard.md'),
+      '/dashboard.md',
+      async () =>
+        new Response(
+          '---\ntitle: World Monitor - Real-Time Global Intelligence Dashboard\ndescription: Real-time global intelligence: conflicts, markets, military.\nimage: https://www.worldmonitor.app/favico/og-image.png\n---\n\n# Dashboard\n',
+          { status: 200, headers: { 'content-type': 'text/markdown; charset=utf-8' } },
+        ),
+    );
+
+    const block = (await response.text()).match(/^---\n([\s\S]*?)\n---\n/);
+    assert.ok(block);
+    const parsed = load(block[1]);
+    assert.equal(parsed.canonical, 'https://www.worldmonitor.app/dashboard');
+    assert.equal(parsed.description, 'Real-time global intelligence: conflicts, markets, military.');
+    assert.equal(parsed.image, 'https://www.worldmonitor.app/favico/og-image.png');
+  });
+
+  it('replaces a canonical the sibling front-matter already declared', async () => {
+    const response = await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/example.md'),
+      '/example.md',
+      async () =>
+        new Response('---\ntitle: Upstream\ncanonical: https://elsewhere.example/wrong\n---\n\n# Heading\n', {
+          status: 200,
+          headers: { 'content-type': 'text/markdown; charset=utf-8' },
+        }),
+    );
+
+    const block = (await response.text()).match(/^---\n([\s\S]*?)\n---\n/);
+    assert.deepEqual(load(block[1]), {
+      title: 'Upstream',
+      canonical: 'https://www.worldmonitor.app/example',
+    });
+  });
+
+  it('does not mistake a leading thematic break for front-matter', async () => {
+    const response = await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/example.md'),
+      '/example.md',
+      async () =>
+        new Response('---\n\nAn essay that opens with a horizontal rule.\n\n---\n\nAnd continues.\n', {
+          status: 200,
+          headers: { 'content-type': 'text/markdown; charset=utf-8' },
+        }),
+    );
+
+    const document = await response.text();
+    const block = document.match(/^---\n([\s\S]*?)\n---\n/);
+    assert.ok(block);
+    assert.deepEqual(load(block[1]), {
+      title: 'example',
+      canonical: 'https://www.worldmonitor.app/example',
+    });
+    assert.match(document, /An essay that opens with a horizontal rule\./);
+    assert.match(document, /And continues\./);
+  });
+
+  it('omits the canonical for an API sibling, which is not a canonical web page', async () => {
+    const response = await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/api/symbol-search.md?q=AAPL'),
+      '/api/symbol-search.md',
+      async () => new Response('{"results":[]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+
+    assert.equal(response.status, 200);
+    // A query-less canonical would name a different, degenerate resource: the
+    // bare endpoint returns nothing without its required q. Claim no canonical
+    // rather than the wrong one.
+    assert.doesNotMatch(response.headers.get('link') ?? '', /rel="canonical"/);
+    assert.doesNotMatch(await response.text(), /^canonical:/m);
+  });
+
+  it('refuses a redirect that targets another .md twin', async () => {
+    const { fetchImpl, seen } = siblingChain(
+      new Response(null, { status: 308, headers: { location: '/countries/iran.md' } }),
+    );
+
+    const response = await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/countries.md'),
+      '/countries.md',
+      fetchImpl,
+    );
+
+    assert.equal(seen.length, 1, 'the .md target must not be fetched');
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get('x-robots-tag'), 'noindex');
+  });
+
+  for (const location of ['//evil.example/x', 'https://user:pw@evil.example/x', 'http://www.worldmonitor.app/x']) {
+    it(`treats ${location} as off-origin and never fetches it`, async () => {
+      const { fetchImpl, seen } = siblingChain(new Response(null, { status: 302, headers: { location } }));
+
+      const response = await buildMarkdownTwinResponse(
+        new Request('https://www.worldmonitor.app/example.md'),
+        '/example.md',
+        fetchImpl,
+      );
+
+      assert.equal(seen.length, 1, 'an off-origin target must not be fetched');
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('x-robots-tag'), 'noindex');
+      assert.doesNotMatch(response.headers.get('link') ?? '', /rel="canonical"/);
+    });
+  }
+
+  it('carries the status and canonical across a redirect on HEAD', async () => {
+    const { fetchImpl, seen } = siblingChain(
+      new Response(null, { status: 308, headers: { location: '/countries/' } }),
+      new Response(null, { status: 200, headers: { 'content-type': 'text/markdown' } }),
+    );
+
+    const response = await buildMarkdownTwinResponse(
+      new Request('https://www.worldmonitor.app/countries.md', { method: 'HEAD' }),
+      '/countries.md',
+      fetchImpl,
+    );
+
+    assert.deepEqual(seen.map((hop) => hop.init?.method), ['HEAD', 'HEAD']);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), '');
+    assert.match(
+      response.headers.get('link') ?? '',
+      /<https:\/\/www\.worldmonitor\.app\/countries\/>; rel="canonical"/,
+    );
   });
 
   it('returns the deprecation policy Link on OPTIONS preflights', async () => {
