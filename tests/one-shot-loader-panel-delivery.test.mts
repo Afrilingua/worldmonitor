@@ -53,6 +53,57 @@ describe('pending panel-call queue', () => {
 
     assert.equal(calls, 1);
   });
+
+  // WORLDMONITOR-125 — the residual half of WORLDMONITOR-11N.
+  //
+  // #11N hardened the DIRECT dispatch path (`invokePanelMethod`, which attaches
+  // a `.catch` to the returned promise) but left the QUEUED path in this same
+  // file bare: `replayPendingCalls` did `if (result instanceof Promise) await
+  // result`, so a rejecting panel method rejected `replayPendingCalls` itself.
+  // Its only production caller (`panel-layout.ts` `lazyPanel().load`) does not
+  // catch, so the rejection escaped to `onunhandledrejection` with exactly the
+  // signature #11N describes: the insights loader's shared abort reason
+  // (`TimeoutError: signal timed out`) carrying that loader's async stack, even
+  // though the loader itself always catches.
+  //
+  // A late-mounting InsightsPanel is the live path — `loadNews` queues
+  // `updateInsights` when the panel has not mounted yet, and that method awaits
+  // `fetchServerInsights()`, whose shared abort fires on a slow connection.
+  it('reports a rejecting queued call instead of leaking an unhandled rejection', async () => {
+    clearAllPendingCalls();
+    const reported: Array<[string, string, unknown]> = [];
+    const boom = new Error('signal timed out');
+    const panel = { updateInsights: () => Promise.reject(boom) };
+
+    enqueuePanelCall('insights', 'updateInsights', [[]]);
+    await assert.doesNotReject(
+      () => replayPendingCalls('insights', panel, (key, method, error) => {
+        reported.push([key, method, error]);
+      }),
+      'a rejecting panel method must not reject the replay — that is the unhandled-rejection leak',
+    );
+
+    assert.deepEqual(reported, [['insights', 'updateInsights', boom]]);
+  });
+
+  // Same defect, second symptom: `await`ing the rejection inside the loop threw
+  // out of the `for`, so every method still queued for that panel was silently
+  // dropped. Map iteration is insertion-ordered, so `updateInsights` (queued
+  // first) precedes `refresh`.
+  it('still delivers the remaining queued methods after one of them rejects', async () => {
+    clearAllPendingCalls();
+    let refreshed = 0;
+    const panel = {
+      updateInsights: () => Promise.reject(new Error('signal timed out')),
+      refresh: () => { refreshed++; },
+    };
+
+    enqueuePanelCall('insights', 'updateInsights', [[]]);
+    enqueuePanelCall('insights', 'refresh', [[]]);
+    await replayPendingCalls('insights', panel, () => {});
+
+    assert.equal(refreshed, 1, 'a rejecting method must not abort the rest of the queue');
+  });
 });
 
 const DATA_LOADER = new URL('../src/app/data-loader.ts', import.meta.url);

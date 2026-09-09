@@ -65,15 +65,35 @@ export function enqueuePanelCall(key: string, method: string, args: unknown[]): 
 // Race-safe: panels[key] is set BEFORE replay starts (panel-layout.ts line 1147),
 // so any concurrent callPanel() during async replay takes the direct-call path
 // (not the queue). delete() before iteration prevents double-replay.
-export async function replayPendingCalls(key: string, panel: unknown): Promise<void> {
+//
+// Failures are reported per call rather than propagated (WORLDMONITOR-125 — the
+// residual half of WORLDMONITOR-11N, which hardened only `invokePanelMethod`
+// above). A bare `await result` here rejected `replayPendingCalls` itself, and
+// its sole production caller — `lazyPanel().load` in panel-layout.ts — does not
+// catch, so the rejection escaped to `onunhandledrejection` carrying the awaited
+// loader's async stack. It also threw out of the `for`, silently dropping every
+// method still queued for that panel. Both are fixed by catching per iteration.
+//
+// The `await` is deliberately KEPT: `lazyPanel().load` runs `setup(panel)` after
+// this resolves, so replaying fire-and-forget (the shape `invokePanelMethod`
+// uses) would reorder setup ahead of the queued update it depends on.
+export async function replayPendingCalls(
+  key: string,
+  panel: unknown,
+  report: PanelCallFailureReporter = reportPanelCallFailure,
+): Promise<void> {
   const methods = pendingCalls.get(key);
   if (!methods) return;
   pendingCalls.delete(key);
   for (const [method, args] of methods) {
     const fn = (panel as Record<string, unknown>)[method];
-    if (typeof fn === 'function') {
+    if (typeof fn !== 'function') continue;
+    try {
       const result = fn.apply(panel, args);
       if (result instanceof Promise) await result;
+    } catch (error) {
+      // A throwing reporter must not re-reject and recreate the leak.
+      try { report(key, method, error); } catch { /* reporting is best-effort */ }
     }
   }
 }
