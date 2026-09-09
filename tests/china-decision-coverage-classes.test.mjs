@@ -20,6 +20,7 @@ import { jsonResponse } from '../api/_json-response.js';
 import {
   chinaDecisionSignalGroupDiagnostics,
   declareChinaDecisionSignalRecords,
+  nextChinaDecisionCoverageFailure,
   summarizeChinaDecisionGroups,
 } from '../scripts/seed-china-decision-signals.mjs';
 
@@ -75,6 +76,15 @@ const healthyQuiet = {
   reason: 'healthy_quiet_window: Healthy exchange queries contained no qualifying disclosure events.',
   metadata: { unavailableCause: 'healthy_quiet_window' },
 };
+
+function provenCoverageMeta(fetchedAt) {
+  return {
+    fetchedAt,
+    recordCount: GROUP_IDS.length,
+    groupStates: Object.fromEntries(GROUP_IDS.map((id) => [id, 'available'])),
+    unavailableCauses: {},
+  };
+}
 
 // The exact 2026-08-02 14:40 UTC production snapshot.
 function auditSnapshot() {
@@ -252,6 +262,129 @@ describe('health decision-group classes (#6060)', () => {
     assert.equal(entry.decisionGroups.healthyQuiet, 1);
   });
 
+  it('projects only a complete producer-owned coverage-failure episode', () => {
+    const snapshotValue = auditSnapshot();
+    const base = decisionMeta(snapshotValue);
+    const failureKey = JSON.stringify([{
+      id: 'activity-nowcast',
+      unavailableCause: 'insufficient_data',
+    }]);
+    const failure = {
+      decisionCoverageFailureKey: failureKey,
+      consecutiveDecisionCoverageFailures: 2,
+      firstDecisionCoverageFailureAt: NOW - 10 * 60_000,
+      lastDecisionCoverageAttemptAt: NOW - 5 * 60_000,
+      lastDecisionCoverageSuccessAt: NOW - 20 * 60_000,
+    };
+    const entry = classifyDecisionSignals({ ...base, ...failure });
+
+    assert.deepEqual(entry.decisionGroups.coverageFailure, {
+      failureKey,
+      consecutiveFailures: 2,
+      firstFailureAt: NOW - 10 * 60_000,
+      lastAttemptAt: NOW - 5 * 60_000,
+      lastSuccessAt: NOW - 20 * 60_000,
+    });
+
+    const malformed = classifyDecisionSignals({
+      ...base,
+      ...failure,
+      lastDecisionCoverageSuccessAt: NOW,
+    });
+    assert.equal(malformed.decisionGroups.coverageFailure, undefined);
+    assert.equal(
+      malformed.decisionGroups.coverageFailureInvalidReason,
+      'FAILURE_TIMESTAMP_ORDER_INVALID',
+    );
+  });
+
+  it('projects the exact failure metadata emitted by the producer', () => {
+    const snapshotValue = auditSnapshot();
+    const priorSuccessAt = NOW - 20 * 60_000;
+    const failure = nextChinaDecisionCoverageFailure(
+      snapshotValue,
+      provenCoverageMeta(priorSuccessAt),
+    );
+    const entry = classifyDecisionSignals({
+      ...decisionMeta(snapshotValue),
+      ...failure,
+    });
+
+    assert.deepEqual(entry.decisionGroups.coverageFailure, {
+      failureKey: JSON.stringify([{
+        id: 'activity-nowcast',
+        unavailableCause: 'insufficient_data',
+      }]),
+      consecutiveFailures: 1,
+      firstFailureAt: Date.parse(snapshotValue.generatedAt),
+      lastAttemptAt: Date.parse(snapshotValue.generatedAt),
+      lastSuccessAt: priorSuccessAt,
+    });
+  });
+
+  it('accepts the producer recovery tuple without an invalid-evidence diagnostic', () => {
+    const recoveredSnapshot = snapshot(Object.fromEntries(
+      GROUP_IDS.map((id) => [id, { state: 'available', items: [item(`${id}-1`)] }]),
+    ));
+    const recovered = classifyDecisionSignals({
+      ...decisionMeta(recoveredSnapshot),
+      decisionCoverageFailureKey: null,
+      consecutiveDecisionCoverageFailures: 0,
+      firstDecisionCoverageFailureAt: null,
+      lastDecisionCoverageAttemptAt: NOW,
+      lastDecisionCoverageSuccessAt: NOW,
+    });
+    assert.equal(recovered.decisionGroups.coverageFailure, undefined);
+    assert.equal(recovered.decisionGroups.coverageFailureInvalidReason, undefined);
+  });
+
+  it('warns immediately when a covered group is stale', () => {
+    const staleSnapshot = snapshot(Object.fromEntries(
+      GROUP_IDS.map((id) => [id, { state: 'available', items: [item(`${id}-1`)] }]),
+    ));
+    staleSnapshot.groups = staleSnapshot.groups.map((group) => group.id === 'macro'
+      ? { ...group, state: 'stale', items: group.items.map((value) => ({ ...value, stale: true })) }
+      : group);
+    const priorSuccessAt = NOW - 20 * 60_000;
+    const failure = nextChinaDecisionCoverageFailure(
+      staleSnapshot,
+      provenCoverageMeta(priorSuccessAt),
+    );
+    const entry = classifyDecisionSignals({
+      ...decisionMeta(staleSnapshot),
+      ...failure,
+    });
+
+    assert.equal(entry.records, GROUP_IDS.length - 1);
+    assert.equal(entry.status, 'COVERAGE_PARTIAL');
+    assert.deepEqual(entry.decisionGroups.staleGroups, ['macro']);
+    assert.equal(entry.decisionGroups.coverageFailure.failureKey, JSON.stringify([{
+      id: 'macro',
+      unavailableCause: 'stale',
+    }]));
+    assert.equal(
+      __testing__.composeChinaDecisionSignalsStatus(entry, null, NOW).chinaCoveragePendingUntil,
+      undefined,
+    );
+  });
+
+  it('rejects a recovery tuple attached to partial current coverage', () => {
+    const partial = classifyDecisionSignals({
+      ...decisionMeta(auditSnapshot()),
+      decisionCoverageFailureKey: null,
+      consecutiveDecisionCoverageFailures: 0,
+      firstDecisionCoverageFailureAt: null,
+      lastDecisionCoverageAttemptAt: NOW,
+      lastDecisionCoverageSuccessAt: NOW,
+    });
+
+    assert.equal(partial.decisionGroups.coverageFailure, undefined);
+    assert.equal(
+      partial.decisionGroups.coverageFailureInvalidReason,
+      'RECOVERY_COVERAGE_MISMATCH',
+    );
+  });
+
   it('reports OK when the only unavailable group is a healthy quiet window', () => {
     const entry = classifyDecisionSignals(decisionMeta(snapshot({
       macro: { state: 'available', items: [item('macro-1')] },
@@ -305,7 +438,9 @@ describe('health decision-group classes (#6060)', () => {
   it('does not invent a group breakdown when the producer wrote no diagnostics', () => {
     const entry = classifyDecisionSignals({ fetchedAt: NOW - 5 * 60_000, recordCount: 4 });
     assert.equal(entry.status, 'COVERAGE_PARTIAL', 'the coverage floor still fails closed');
-    assert.equal(entry.decisionGroups, undefined);
+    assert.deepEqual(entry.decisionGroups, {
+      coverageFailureInvalidReason: 'GROUP_DIAGNOSTICS_INVALID',
+    });
   });
 
   // api/_json-response.js drops any key literally named `cause` (an
@@ -328,19 +463,14 @@ describe('health decision-group classes (#6060)', () => {
     );
   });
 
-  // seed-health's sibling projection withholds the whole breakdown on a
-  // malformed counts object; health must not publish a block of nulls instead.
-  it('withholds the breakdown when groupCounts is malformed', () => {
+  it('fails closed when groupCounts is malformed', () => {
     for (const counts of [undefined, null, 'not-an-object', 42, []]) {
       const entry = classifyDecisionSignals({
         ...decisionMeta(auditSnapshot()),
         groupCounts: counts,
       });
-      assert.equal(
-        entry.decisionGroups,
-        undefined,
-        `groupCounts=${JSON.stringify(counts) ?? 'undefined'} must not publish a null-filled block`,
-      );
+      assert.equal(entry.status, 'COVERAGE_PARTIAL');
+      assert.equal(entry.decisionGroups.coverageFailureInvalidReason, 'GROUP_DIAGNOSTICS_INVALID');
     }
   });
 
@@ -351,9 +481,29 @@ describe('health decision-group classes (#6060)', () => {
       unavailableCauses: { 'not-a-group': 'healthy_quiet_window' },
     });
     assert.equal(
-      entry.decisionGroups,
-      undefined,
-      'a partial state map cannot be published as a complete diagnostic contract',
+      entry.decisionGroups.coverageFailureInvalidReason,
+      'GROUP_DIAGNOSTICS_INVALID',
     );
+    assert.equal(entry.status, 'COVERAGE_PARTIAL');
+  });
+
+  it('fails closed when claimed counts contradict the canonical group states', () => {
+    const covered = snapshot(Object.fromEntries(
+      GROUP_IDS.map((id) => [id, { state: 'available', items: [item(`${id}-1`)] }]),
+    ));
+    const meta = decisionMeta(covered);
+    meta.groupStates.macro = 'unavailable';
+    meta.unavailableCauses.macro = 'upstream_unavailable';
+    const entry = classifyDecisionSignals({
+      ...meta,
+      decisionCoverageFailureKey: null,
+      consecutiveDecisionCoverageFailures: 0,
+      firstDecisionCoverageFailureAt: null,
+      lastDecisionCoverageAttemptAt: NOW,
+      lastDecisionCoverageSuccessAt: NOW,
+    });
+
+    assert.equal(entry.status, 'COVERAGE_PARTIAL');
+    assert.equal(entry.decisionGroups.coverageFailureInvalidReason, 'GROUP_DIAGNOSTICS_INVALID');
   });
 });

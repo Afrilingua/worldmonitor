@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import {
   loadEnvFile,
   readCanonicalValue,
+  readExistingSeedMeta,
   readSeedSnapshot,
   runSeed,
   writeExtraKey,
@@ -108,7 +109,8 @@ function unavailableCauseOf(group) {
 
 export function isChinaDecisionGroupOperationallyCovered(group) {
   if (!group) return false;
-  if (group.state !== 'unavailable') return true;
+  if (group.state === 'available' || group.state === 'partial') return true;
+  if (group.state !== 'unavailable') return false;
   return unavailableCauseOf(group) === CHINA_DECISION_SIGNAL_COVERED_UNAVAILABLE_CAUSE;
 }
 
@@ -156,6 +158,127 @@ export function chinaDecisionSignalGroupDiagnostics(snapshot) {
         .map((groupId) => [groupId, unavailableCauseOf(byId(groupId))]),
     ),
     groupCounts: summarizeChinaDecisionGroups(groups),
+  };
+}
+
+function positiveTimestamp(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function hasProvenFreshOperationalCoverage(meta) {
+  const states = meta?.groupStates;
+  const causes = meta?.unavailableCauses;
+  if (!states || typeof states !== 'object' || Array.isArray(states)) return false;
+  return CHINA_DECISION_SIGNAL_GROUP_IDS.every((groupId) => {
+    const state = states[groupId];
+    if (state === 'available' || state === 'partial') return true;
+    return state === 'unavailable'
+      && causes
+      && typeof causes === 'object'
+      && !Array.isArray(causes)
+      && causes[groupId] === CHINA_DECISION_SIGNAL_COVERED_UNAVAILABLE_CAUSE;
+  });
+}
+
+function decisionCoverageFailureKey(snapshot) {
+  const groups = Array.isArray(snapshot?.groups) ? snapshot.groups : [];
+  const failures = groups
+    .filter((group) => (
+      group?.state === 'stale' || !isChinaDecisionGroupOperationallyCovered(group)
+    ))
+    .map((group) => ({
+      id: typeof group?.id === 'string' ? group.id : 'unknown',
+      unavailableCause: group?.state === 'stale' ? 'stale' : unavailableCauseOf(group),
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return failures.length > 0 ? JSON.stringify(failures) : null;
+}
+
+/**
+ * Attempt-owned coverage state for the health reader. Health polls never
+ * advance this streak: only a newly published, validated six-group snapshot
+ * can do that. A changed failure identity resets the count but preserves the
+ * original unresolved episode deadline, so rotating upstream failures cannot
+ * extend validity forever.
+ */
+export function nextChinaDecisionCoverageFailure(snapshot, previousMeta, now = Date.now()) {
+  const generatedAt = Date.parse(snapshot?.generatedAt ?? '');
+  const attemptedAt = positiveTimestamp(generatedAt) && positiveTimestamp(now)
+    ? Math.min(generatedAt, now)
+    : NaN;
+  const failureKey = decisionCoverageFailureKey(snapshot);
+  const complete = failureKey === null
+    && declareChinaDecisionSignalRecords(snapshot) === CHINA_DECISION_SIGNAL_GROUP_IDS.length;
+  if (!positiveTimestamp(attemptedAt)) {
+    return {
+      decisionCoverageFailureKey: failureKey,
+      consecutiveDecisionCoverageFailures: failureKey ? 1 : 0,
+      firstDecisionCoverageFailureAt: null,
+      lastDecisionCoverageAttemptAt: null,
+      lastDecisionCoverageSuccessAt: null,
+    };
+  }
+  if (complete) {
+    return {
+      decisionCoverageFailureKey: null,
+      consecutiveDecisionCoverageFailures: 0,
+      firstDecisionCoverageFailureAt: null,
+      lastDecisionCoverageAttemptAt: attemptedAt,
+      lastDecisionCoverageSuccessAt: attemptedAt,
+    };
+  }
+
+  const priorKey = typeof previousMeta?.decisionCoverageFailureKey === 'string'
+    ? previousMeta.decisionCoverageFailureKey
+    : null;
+  const priorCount = Number.isInteger(previousMeta?.consecutiveDecisionCoverageFailures)
+    && previousMeta.consecutiveDecisionCoverageFailures >= 1
+    && previousMeta.consecutiveDecisionCoverageFailures <= 100
+      ? previousMeta.consecutiveDecisionCoverageFailures
+      : null;
+  const priorFirst = positiveTimestamp(previousMeta?.firstDecisionCoverageFailureAt)
+    ? previousMeta.firstDecisionCoverageFailureAt
+    : null;
+  const priorAttempt = positiveTimestamp(previousMeta?.lastDecisionCoverageAttemptAt)
+    ? previousMeta.lastDecisionCoverageAttemptAt
+    : null;
+  const explicitLastSuccess = positiveTimestamp(previousMeta?.lastDecisionCoverageSuccessAt)
+    ? previousMeta.lastDecisionCoverageSuccessAt
+    : null;
+  const legacyLastSuccess = hasProvenFreshOperationalCoverage(previousMeta)
+    && Number(previousMeta?.recordCount) === CHINA_DECISION_SIGNAL_GROUP_IDS.length
+    && positiveTimestamp(previousMeta?.fetchedAt)
+    && previousMeta.fetchedAt <= attemptedAt
+      ? previousMeta.fetchedAt
+      : null;
+  const priorLastSuccess = explicitLastSuccess ?? legacyLastSuccess;
+  const validPriorEpisode = priorKey !== null
+    && priorCount !== null
+    && priorFirst !== null
+    && priorAttempt !== null
+    && priorLastSuccess !== null
+    && priorLastSuccess <= priorFirst
+    && priorFirst <= priorAttempt
+    && priorAttempt <= attemptedAt;
+  const lastSuccessAt = validPriorEpisode ? priorLastSuccess : legacyLastSuccess;
+
+  if (validPriorEpisode && priorAttempt === attemptedAt && priorKey === failureKey) {
+    return {
+      decisionCoverageFailureKey: failureKey,
+      consecutiveDecisionCoverageFailures: priorCount,
+      firstDecisionCoverageFailureAt: priorFirst,
+      lastDecisionCoverageAttemptAt: priorAttempt,
+      lastDecisionCoverageSuccessAt: lastSuccessAt,
+    };
+  }
+  return {
+    decisionCoverageFailureKey: failureKey,
+    consecutiveDecisionCoverageFailures: validPriorEpisode && priorKey === failureKey
+      ? Math.min(priorCount + 1, 100)
+      : 1,
+    firstDecisionCoverageFailureAt: validPriorEpisode ? priorFirst : attemptedAt,
+    lastDecisionCoverageAttemptAt: attemptedAt,
+    lastDecisionCoverageSuccessAt: lastSuccessAt,
   };
 }
 
@@ -230,15 +353,25 @@ export function createChinaDecisionSignalSeedHooks({
   prepareAlerts = prepareChinaDecisionSignalAlertEvents,
   deliverAlerts = deliverChinaDecisionSignalAlertOutbox,
   diagnosticsFor = chinaDecisionSignalGroupDiagnostics,
+  readSeedMeta = () => readExistingSeedMeta('intelligence', 'china-decision-signals'),
   log = console.log,
 } = {}) {
   let preparedAlertEvents = [];
+  let coverageFailure = null;
   return {
     beforePublish: async (snapshot) => {
-      preparedAlertEvents = await prepareAlerts(snapshot);
+      const [alerts, previousMeta] = await Promise.all([
+        prepareAlerts(snapshot),
+        readSeedMeta().catch(() => null),
+      ]);
+      preparedAlertEvents = alerts;
+      coverageFailure = nextChinaDecisionCoverageFailure(snapshot, previousMeta);
     },
     afterPublish: async (snapshot) => {
-      const diagnostics = diagnosticsFor(snapshot);
+      const diagnostics = {
+        ...diagnosticsFor(snapshot),
+        ...(coverageFailure ?? nextChinaDecisionCoverageFailure(snapshot, null)),
+      };
       log(`[china-decision-signals] group diagnostics ${JSON.stringify(diagnostics)}`);
       return { freshnessMetaPatch: diagnostics };
     },
@@ -262,7 +395,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
       schemaVersion: 1,
       declareRecords: declareChinaDecisionSignalRecords,
       zeroIsValid: true,
-      maxStaleMin: 60,
+      maxStaleMin: 180,
       // Prepare against the previous canonical value without sending anything.
       // runSeed publishes the validated snapshot between this callback and
       // afterPublish, preventing phantom alerts for a state that never landed.

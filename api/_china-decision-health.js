@@ -62,6 +62,76 @@ export function projectChinaDecisionGroupDiagnostics(
     }
   }
 
+  const expectedCounts = {
+    populated: groupIds.filter((groupId) => groupStates[groupId] !== 'unavailable').length,
+    partial: partialGroups.length,
+    stale: staleGroups.length,
+    unavailable: quietGroups.length + unavailableGroups.length,
+    healthyQuiet: quietGroups.length,
+    operationallyCovered: groupIds.length - staleGroups.length - unavailableGroups.length,
+  };
+  if (Object.entries(expectedCounts).some(([key, value]) => counts[key] !== value)) return null;
+
+  const hasCoverageFailureFields = meta !== null
+    && typeof meta === 'object'
+    && [
+      'decisionCoverageFailureKey',
+      'consecutiveDecisionCoverageFailures',
+      'firstDecisionCoverageFailureAt',
+      'lastDecisionCoverageAttemptAt',
+      'lastDecisionCoverageSuccessAt',
+    ].some((key) => Object.hasOwn(meta, key));
+  const failureKey = typeof meta?.decisionCoverageFailureKey === 'string'
+    && meta.decisionCoverageFailureKey.length <= 1_000
+      ? meta.decisionCoverageFailureKey
+      : null;
+  const consecutiveFailures = Number.isInteger(meta?.consecutiveDecisionCoverageFailures)
+    && meta.consecutiveDecisionCoverageFailures >= 1
+    && meta.consecutiveDecisionCoverageFailures <= 100
+      ? meta.consecutiveDecisionCoverageFailures
+      : null;
+  const firstFailureAt = Number.isSafeInteger(meta?.firstDecisionCoverageFailureAt)
+    && meta.firstDecisionCoverageFailureAt > 0
+      ? meta.firstDecisionCoverageFailureAt
+      : null;
+  const lastAttemptAt = Number.isSafeInteger(meta?.lastDecisionCoverageAttemptAt)
+    && meta.lastDecisionCoverageAttemptAt > 0
+      ? meta.lastDecisionCoverageAttemptAt
+      : null;
+  const lastSuccessAt = Number.isSafeInteger(meta?.lastDecisionCoverageSuccessAt)
+    && meta.lastDecisionCoverageSuccessAt > 0
+      ? meta.lastDecisionCoverageSuccessAt
+      : null;
+  const coverageFailure = failureKey !== null
+    && consecutiveFailures !== null
+    && firstFailureAt !== null
+    && lastAttemptAt !== null
+    && lastSuccessAt !== null
+    && lastSuccessAt <= firstFailureAt
+    && firstFailureAt <= lastAttemptAt
+      ? { failureKey, consecutiveFailures, firstFailureAt, lastAttemptAt, lastSuccessAt }
+      : null;
+  const recoveryTuple = meta?.decisionCoverageFailureKey === null
+    && meta?.consecutiveDecisionCoverageFailures === 0
+    && meta?.firstDecisionCoverageFailureAt === null
+    && lastAttemptAt !== null
+    && lastSuccessAt === lastAttemptAt;
+  const recoveredCoverage = recoveryTuple
+    && expectedCounts.operationallyCovered === groupIds.length;
+  const coverageFailureInvalidReason = !hasCoverageFailureFields
+    || coverageFailure
+    || recoveredCoverage
+      ? null
+      : recoveryTuple
+        ? 'RECOVERY_COVERAGE_MISMATCH'
+        : failureKey === null
+          ? 'FAILURE_KEY_INVALID'
+        : consecutiveFailures === null
+          ? 'FAILURE_COUNT_INVALID'
+          : firstFailureAt === null || lastAttemptAt === null || lastSuccessAt === null
+            ? 'FAILURE_TIMESTAMP_MISSING'
+            : 'FAILURE_TIMESTAMP_ORDER_INVALID';
+
   return {
     groupStates,
     groupCounts: {
@@ -76,5 +146,7 @@ export function projectChinaDecisionGroupDiagnostics(
     partialGroups,
     staleGroups,
     unavailableGroups,
+    ...(coverageFailure ? { coverageFailure } : {}),
+    ...(coverageFailureInvalidReason ? { coverageFailureInvalidReason } : {}),
   };
 }

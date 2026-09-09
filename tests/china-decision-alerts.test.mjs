@@ -13,6 +13,7 @@ import {
   deliverChinaDecisionSignalAlertOutbox,
   declareChinaDecisionSignalRecords,
   fetchChinaDecisionSignals,
+  nextChinaDecisionCoverageFailure,
   prepareChinaDecisionSignalAlertEvents,
   publishChinaDecisionSignalAlerts,
   validateChinaDecisionSignalSnapshot,
@@ -60,6 +61,37 @@ function snapshot(overrides = {}) {
       pro: 'same_provenance_via_mcp',
       operator: 'source_health_only',
     },
+  };
+}
+
+function coveredSnapshot(generatedAt) {
+  const value = snapshot(Object.fromEntries(GROUP_IDS.map((id) => [id, {
+    state: 'available',
+    items: [item(`${id}-item`)],
+  }])));
+  value.generatedAt = new Date(generatedAt).toISOString();
+  return value;
+}
+
+function coverageFailureSnapshot(generatedAt, groupId = 'corporate-disclosures') {
+  const value = coveredSnapshot(generatedAt);
+  value.groups = value.groups.map((group) => group.id === groupId
+    ? {
+      ...group,
+      state: 'unavailable',
+      items: [],
+      metadata: { unavailableCause: 'upstream_unavailable' },
+    }
+    : group);
+  return value;
+}
+
+function provenCoverageMeta(fetchedAt) {
+  return {
+    fetchedAt,
+    recordCount: GROUP_IDS.length,
+    groupStates: Object.fromEntries(GROUP_IDS.map((id) => [id, 'available'])),
+    unavailableCauses: {},
   };
 }
 
@@ -262,7 +294,7 @@ describe('China decision-signal alert policy (#5580)', () => {
       // None of the three unavailable groups declares a cause, so none is a
       // proven healthy quiet window (#6060).
       healthyQuiet: 0,
-      operationallyCovered: 3,
+      operationallyCovered: 2,
     });
     assert.deepEqual(diagnostics.groupStates, {
       macro: 'available',
@@ -275,11 +307,155 @@ describe('China decision-signal alert policy (#5580)', () => {
     assert.doesNotMatch(JSON.stringify(diagnostics), /macro-item|policy-item|cross-strait-item/);
   });
 
+  it('counts three same-incident coverage failures against a proven last success', () => {
+    const successAt = Date.parse('2026-07-26T11:45:00.000Z');
+    const firstAt = Date.parse('2026-07-26T12:00:00.000Z');
+    const secondAt = Date.parse('2026-07-26T12:15:00.000Z');
+    const thirdAt = Date.parse('2026-07-26T12:30:00.000Z');
+    const first = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(firstAt),
+      provenCoverageMeta(successAt),
+    );
+    const second = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(secondAt),
+      { ...first, fetchedAt: firstAt, recordCount: GROUP_IDS.length - 1 },
+    );
+    const third = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(thirdAt),
+      { ...second, fetchedAt: secondAt, recordCount: GROUP_IDS.length - 1 },
+    );
+
+    assert.equal(first.consecutiveDecisionCoverageFailures, 1);
+    assert.equal(second.consecutiveDecisionCoverageFailures, 2);
+    assert.equal(third.consecutiveDecisionCoverageFailures, 3);
+    assert.equal(first.firstDecisionCoverageFailureAt, firstAt);
+    assert.equal(second.firstDecisionCoverageFailureAt, firstAt);
+    assert.equal(third.firstDecisionCoverageFailureAt, firstAt);
+    assert.equal(third.lastDecisionCoverageSuccessAt, successAt);
+    assert.equal(third.lastDecisionCoverageAttemptAt, thirdAt);
+    assert.equal(third.decisionCoverageFailureKey, first.decisionCoverageFailureKey);
+  });
+
+  it('does not let a changed coverage failure extend the incident deadline', () => {
+    const successAt = Date.parse('2026-07-26T11:45:00.000Z');
+    const firstAt = Date.parse('2026-07-26T12:00:00.000Z');
+    const changedAt = Date.parse('2026-07-26T12:15:00.000Z');
+    const first = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(firstAt),
+      provenCoverageMeta(successAt),
+    );
+    const changed = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(changedAt, 'activity-nowcast'),
+      { ...first, fetchedAt: firstAt, recordCount: GROUP_IDS.length - 1 },
+    );
+
+    assert.equal(changed.consecutiveDecisionCoverageFailures, 1);
+    assert.notEqual(changed.decisionCoverageFailureKey, first.decisionCoverageFailureKey);
+    assert.equal(changed.firstDecisionCoverageFailureAt, firstAt);
+    assert.equal(changed.lastDecisionCoverageSuccessAt, successAt);
+  });
+
+  it('clamps future snapshot clocks to the local attempt time', () => {
+    const now = Date.parse('2026-07-26T12:00:00.000Z');
+    const futureAt = now + 60 * 60_000;
+    const state = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(futureAt),
+      provenCoverageMeta(now - 15 * 60_000),
+      now,
+    );
+
+    assert.equal(state.firstDecisionCoverageFailureAt, now);
+    assert.equal(state.lastDecisionCoverageAttemptAt, now);
+    assert.equal(state.lastDecisionCoverageSuccessAt, now - 15 * 60_000);
+  });
+
+  it('does not increment the same producer attempt twice', () => {
+    const successAt = Date.parse('2026-07-26T11:45:00.000Z');
+    const attemptAt = Date.parse('2026-07-26T12:00:00.000Z');
+    const first = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(attemptAt),
+      provenCoverageMeta(successAt),
+    );
+    const replay = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(attemptAt),
+      { ...first, fetchedAt: attemptAt, recordCount: GROUP_IDS.length - 1 },
+    );
+
+    assert.deepEqual(replay, first);
+  });
+
+  it('resets the coverage-failure episode only after full operational recovery', () => {
+    const successAt = Date.parse('2026-07-26T11:45:00.000Z');
+    const failureAt = Date.parse('2026-07-26T12:00:00.000Z');
+    const recoveryAt = Date.parse('2026-07-26T12:15:00.000Z');
+    const failed = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(failureAt),
+      provenCoverageMeta(successAt),
+    );
+    const recovered = nextChinaDecisionCoverageFailure(
+      coveredSnapshot(recoveryAt),
+      { ...failed, fetchedAt: failureAt, recordCount: GROUP_IDS.length - 1 },
+    );
+
+    assert.deepEqual(recovered, {
+      decisionCoverageFailureKey: null,
+      consecutiveDecisionCoverageFailures: 0,
+      firstDecisionCoverageFailureAt: null,
+      lastDecisionCoverageAttemptAt: recoveryAt,
+      lastDecisionCoverageSuccessAt: recoveryAt,
+    });
+  });
+
+  it('does not invent a last success for legacy partial metadata', () => {
+    const failureAt = Date.parse('2026-07-26T12:00:00.000Z');
+    const state = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(failureAt),
+      { fetchedAt: failureAt - 15 * 60_000, recordCount: GROUP_IDS.length - 1 },
+    );
+
+    assert.equal(state.consecutiveDecisionCoverageFailures, 1);
+    assert.equal(state.lastDecisionCoverageSuccessAt, null);
+  });
+
+  it('does not treat a six-record legacy snapshot with stale coverage as a success', () => {
+    const failureAt = Date.parse('2026-07-26T12:00:00.000Z');
+    const previous = provenCoverageMeta(failureAt - 15 * 60_000);
+    previous.groupStates.macro = 'stale';
+    const state = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(failureAt),
+      previous,
+    );
+
+    assert.equal(state.consecutiveDecisionCoverageFailures, 1);
+    assert.equal(state.lastDecisionCoverageSuccessAt, null);
+  });
+
+  it('does not carry an explicit success through malformed failure history', () => {
+    const failureAt = Date.parse('2026-07-26T12:00:00.000Z');
+    const state = nextChinaDecisionCoverageFailure(
+      coverageFailureSnapshot(failureAt),
+      {
+        fetchedAt: failureAt - 15 * 60_000,
+        recordCount: GROUP_IDS.length - 1,
+        decisionCoverageFailureKey: '{malformed-history}',
+        consecutiveDecisionCoverageFailures: 2,
+        firstDecisionCoverageFailureAt: null,
+        lastDecisionCoverageAttemptAt: failureAt - 15 * 60_000,
+        lastDecisionCoverageSuccessAt: failureAt - 30 * 60_000,
+      },
+    );
+
+    assert.equal(state.lastDecisionCoverageSuccessAt, null);
+  });
+
   it('returns the diagnostics patch before a rejected durable alert delivery', async () => {
     const writes = [];
     const hooks = createChinaDecisionSignalSeedHooks({
       prepareAlerts: async () => [{ eventType: 'china_policy_decision_signal' }],
       diagnosticsFor: chinaDecisionSignalGroupDiagnostics,
+      readSeedMeta: async () => ({
+        ...provenCoverageMeta(Date.parse('2026-07-26T11:45:00.000Z')),
+      }),
       log: () => {},
       deliverAlerts: async () => {
         throw new Error('outbox unavailable');
@@ -296,7 +472,12 @@ describe('China decision-signal alert policy (#5580)', () => {
     writes.push(afterPublishResult.freshnessMetaPatch);
     await assert.rejects(hooks.afterFreshness(value), /outbox unavailable/);
 
-    assert.deepEqual(writes, [chinaDecisionSignalGroupDiagnostics(value)]);
+    assert.deepEqual(writes, [{
+      ...chinaDecisionSignalGroupDiagnostics(value),
+      ...nextChinaDecisionCoverageFailure(value, {
+        ...provenCoverageMeta(Date.parse('2026-07-26T11:45:00.000Z')),
+      }),
+    }]);
   });
 
   it('continues publishing after one alert publisher rejects', async () => {

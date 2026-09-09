@@ -303,11 +303,11 @@ test('seed-health publishes partial and stale China decision groups like /api/he
         'activity-nowcast': 'unavailable',
       },
       groupCounts: {
-        populated: 1,
+        populated: 3,
         partial: 1,
         stale: 1,
         unavailable: 3,
-        healthyQuiet: 0,
+        healthyQuiet: 1,
         operationallyCovered: 3,
       },
       unavailableCauses: {
@@ -315,6 +315,15 @@ test('seed-health publishes partial and stale China decision groups like /api/he
         'corridor-conditions': 'insufficient_data',
         'activity-nowcast': 'upstream_unavailable',
       },
+      decisionCoverageFailureKey: JSON.stringify([
+        { id: 'activity-nowcast', unavailableCause: 'upstream_unavailable' },
+        { id: 'corridor-conditions', unavailableCause: 'insufficient_data' },
+        { id: 'policy-enforcement', unavailableCause: 'stale' },
+      ]),
+      consecutiveDecisionCoverageFailures: 2,
+      firstDecisionCoverageFailureAt: TEST_NOW - 15 * 60_000,
+      lastDecisionCoverageAttemptAt: TEST_NOW,
+      lastDecisionCoverageSuccessAt: TEST_NOW - 30 * 60_000,
     },
   });
 
@@ -324,4 +333,15 @@ test('seed-health publishes partial and stale China decision groups like /api/he
   assert.deepEqual(entry.partialGroups, ['macro']);
   assert.deepEqual(entry.staleGroups, ['policy-enforcement']);
   assert.deepEqual(entry.quietGroups, ['corporate-disclosures']);
+  assert.deepEqual(entry.coverageFailure, {
+    failureKey: JSON.stringify([
+      { id: 'activity-nowcast', unavailableCause: 'upstream_unavailable' },
+      { id: 'corridor-conditions', unavailableCause: 'insufficient_data' },
+      { id: 'policy-enforcement', unavailableCause: 'stale' },
+    ]),
+    consecutiveFailures: 2,
+    firstFailureAt: TEST_NOW - 15 * 60_000,
+    lastAttemptAt: TEST_NOW,
+    lastSuccessAt: TEST_NOW - 30 * 60_000,
+  });
 });
