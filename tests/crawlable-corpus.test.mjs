@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, it } from 'node:test';
+import { brotliCompressSync, constants as zlibConstants } from 'node:zlib';
 
 import { Window } from 'happy-dom';
 import ts from 'typescript';
@@ -3665,6 +3666,21 @@ describe('crawlable corpus generator', () => {
       );
 
       const sourcesPage = read(outDir, 'sources/index.html');
+      // #7883: 2026-09-09 baseline: 761,255 raw bytes, 52,584 Brotli q11 bytes.
+      // Fixed ceilings allow ~18-24% catalog growth. Review rendering cost before
+      // raising them; do not derive the budget from the current catalog size.
+      const sourcesRawBytes = Buffer.byteLength(sourcesPage, 'utf8');
+      const sourcesBrotliBytes = brotliCompressSync(Buffer.from(sourcesPage, 'utf8'), {
+        params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 11 },
+      }).length;
+      assert.ok(
+        sourcesRawBytes <= 900_000,
+        `/sources/ raw size ${sourcesRawBytes} B exceeds the 900000 B parse budget`,
+      );
+      assert.ok(
+        sourcesBrotliBytes <= 65_000,
+        `/sources/ Brotli q11 size ${sourcesBrotliBytes} B exceeds the 65000 B delivery budget`,
+      );
       const sourceNodes = jsonLdObjects(sourcesPage);
       const providerList = sourceNodes.find((node) => node['@type'] === 'CollectionPage').mainEntity;
       assert.equal(providerList.itemListOrder, 'https://schema.org/ItemListUnordered');
