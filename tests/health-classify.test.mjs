@@ -2183,7 +2183,6 @@ test('overall: contained warnings stay HEALTHY through the exact 3% boundary', (
     292,
   );
   assert.equal(currentProductionShape.diagnosticOverall, 'WARNING');
-  assert.equal(currentProductionShape.availabilityOverall, 'HEALTHY');
   assert.equal(currentProductionShape.overall, 'HEALTHY');
   assert.equal(computeOverallStatus({ warn: 3, onDemandWarn: 0, containedWarn: 3, crit: 0 }, 100).overall, 'HEALTHY');
   assert.equal(computeOverallStatus({ warn: 4, onDemandWarn: 0, containedWarn: 4, crit: 0 }, 100).overall, 'WARNING');

@@ -3528,22 +3528,27 @@ function computeOverallStatus(counts, totalChecks) {
   const availabilityWarnCount = realWarnCount - containedWarnCount;
   const critCount = counts.crit;
 
-  // Critical severity is shared by both verdicts. The threshold scales with
-  // registry size so adding keys does not silently raise the page-out bar.
-  const criticalOverall = critCount / totalChecks <= 0.03 ? 'DEGRADED' : 'UNHEALTHY';
-  const diagnosticOverall = critCount > 0
-    ? criticalOverall
-    : realWarnCount > 0 ? 'WARNING' : 'HEALTHY';
-  const availabilityOverall = critCount > 0
-    ? criticalOverall
-    : availabilityWarnCount === 0 && containedWarnCount / totalChecks <= 0.03
-      ? 'HEALTHY'
-      : 'WARNING';
+  if (critCount > 0) {
+    // Critical severity is shared by both verdicts. The threshold scales with
+    // registry size so adding keys does not silently raise the page-out bar.
+    const overall = critCount / totalChecks <= 0.03 ? 'DEGRADED' : 'UNHEALTHY';
+    return {
+      overall,
+      diagnosticOverall: overall,
+      realWarnCount,
+      critCount,
+    };
+  }
+
+  const diagnosticOverall = realWarnCount > 0 ? 'WARNING' : 'HEALTHY';
+  const overall = availabilityWarnCount === 0
+    && containedWarnCount / totalChecks <= 0.03
+    ? 'HEALTHY'
+    : 'WARNING';
 
   return {
-    overall: availabilityOverall,
+    overall,
     diagnosticOverall,
-    availabilityOverall,
     realWarnCount,
     critCount,
   };
@@ -3568,16 +3573,20 @@ function collectFailureLogProblems(checks, now = Date.now()) {
 }
 
 function buildFailureLogPersistencePlan({
-  availabilityOverall,
-  diagnosticOverall,
-  critCount,
-  warnCount,
+  verdict,
+  diagnostics,
   containedWarnCount,
-  problemKeys,
-  sigKeys,
   previousSignature,
   now,
 }) {
+  const {
+    overall: availabilityOverall,
+    diagnosticOverall,
+    critCount,
+    realWarnCount: warnCount,
+  } = verdict;
+  const { problemKeys, sigKeys } = diagnostics;
+
   if (problemKeys.length === 0) {
     // A later recurrence of the same problem set is a new incident only after
     // a diagnostic recovery, independent of the public availability verdict.
@@ -4135,26 +4144,28 @@ export async function handleHealth(req, ctx, options = {}) {
   // Incident history follows actionable diagnostics, not the public
   // availability verdict. A contained defect may intentionally leave uptime
   // HEALTHY, but it must remain visible to operators and strict monitors.
-  const { problemKeys, sigKeys } = collectFailureLogProblems(checks, evaluationNow);
-  let prevSig = '';
+  const diagnostics = collectFailureLogProblems(checks, evaluationNow);
+  const { problemKeys } = diagnostics;
   if (problemKeys.length > 0) {
     console.log('[health] %s problems=[%s]', diagnosticOverall, problemKeys.join(', '));
-    const prevSigResult = await redisPipeline([['GET', 'health:failure-log-sig']], 4_000).catch(() => null);
-    prevSig = prevSigResult?.[0]?.result ?? '';
   }
-  const persistencePlan = buildFailureLogPersistencePlan({
-    availabilityOverall: overall,
-    diagnosticOverall,
-    critCount,
-    warnCount: realWarnCount,
-    containedWarnCount: counts.containedWarn,
-    problemKeys,
-    sigKeys,
-    previousSignature: prevSig,
-    now: evaluationNow,
-  });
-  const persist = redisPipeline(persistencePlan.commands, 4_000).catch(() => {});
-  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(persist);
+  const persistFailureLog = async () => {
+    let previousSignature = '';
+    if (problemKeys.length > 0) {
+      const result = await redisPipeline([['GET', 'health:failure-log-sig']], 4_000).catch(() => null);
+      previousSignature = result?.[0]?.result ?? '';
+    }
+    const persistencePlan = buildFailureLogPersistencePlan({
+      verdict: { overall, diagnosticOverall, realWarnCount, critCount },
+      diagnostics,
+      containedWarnCount: counts.containedWarn,
+      previousSignature,
+      now: evaluationNow,
+    });
+    await redisPipeline(persistencePlan.commands, 4_000).catch(() => {});
+  };
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(persistFailureLog());
+  else await persistFailureLog();
 
   const verdictSnapshot = {
     status: overall,

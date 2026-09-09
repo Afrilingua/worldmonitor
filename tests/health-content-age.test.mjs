@@ -408,7 +408,6 @@ test('just-over-budget content stays diagnostically stale without making health 
   assert.deepEqual(computeOverallStatus(counts, 1), {
     overall: 'HEALTHY',
     diagnosticOverall: 'HEALTHY',
-    availabilityOverall: 'HEALTHY',
     realWarnCount: 0,
     critCount: 0,
   });

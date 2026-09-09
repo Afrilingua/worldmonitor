@@ -21,16 +21,23 @@ const { __testing__ } = await import('../api/health.js?failure-history-plan');
 const NOW = Date.parse('2026-09-09T08:00:00.000Z');
 
 function persistencePlan(overrides = {}) {
-  return __testing__.buildFailureLogPersistencePlan({
-    availabilityOverall: 'HEALTHY',
-    diagnosticOverall: 'WARNING',
-    critCount: 0,
-    warnCount: 1,
+  const defaults = {
+    verdict: {
+      overall: 'HEALTHY',
+      diagnosticOverall: 'WARNING',
+      critCount: 0,
+      realWarnCount: 1,
+    },
+    diagnostics: {
+      problemKeys: ['diseaseOutbreaks:STALE_CONTENT(181min)'],
+      sigKeys: ['diseaseOutbreaks:STALE_CONTENT'],
+    },
     containedWarnCount: 1,
-    problemKeys: ['diseaseOutbreaks:STALE_CONTENT(181min)'],
-    sigKeys: ['diseaseOutbreaks:STALE_CONTENT'],
     previousSignature: '',
     now: NOW,
+  };
+  return __testing__.buildFailureLogPersistencePlan({
+    ...defaults,
     ...overrides,
   });
 }
@@ -76,17 +83,25 @@ describe('api/health diagnostic incident persistence', () => {
   it('appends transitions and keeps broad-impact WARNING as the public verdict', () => {
     const transitioned = persistencePlan({
       previousSignature: 'WARNING|diseaseOutbreaks:STALE_CONTENT',
-      problemKeys: ['portwatchPortActivity:COVERAGE_PARTIAL'],
-      sigKeys: ['portwatchPortActivity:COVERAGE_PARTIAL'],
+      diagnostics: {
+        problemKeys: ['portwatchPortActivity:COVERAGE_PARTIAL'],
+        sigKeys: ['portwatchPortActivity:COVERAGE_PARTIAL'],
+      },
     });
     assert.equal(transitioned.appendIncident, true);
 
     const broad = persistencePlan({
-      availabilityOverall: 'WARNING',
+      verdict: {
+        overall: 'WARNING',
+        diagnosticOverall: 'WARNING',
+        critCount: 0,
+        realWarnCount: 10,
+      },
       containedWarnCount: 10,
-      warnCount: 10,
-      problemKeys: ['manySources:COVERAGE_PARTIAL'],
-      sigKeys: ['manySources:COVERAGE_PARTIAL'],
+      diagnostics: {
+        problemKeys: ['manySources:COVERAGE_PARTIAL'],
+        sigKeys: ['manySources:COVERAGE_PARTIAL'],
+      },
     });
     assert.equal(broad.entry.status, 'WARNING');
     assert.equal(Object.hasOwn(broad.entry, 'availabilityStatus'), false);
@@ -95,12 +110,14 @@ describe('api/health diagnostic incident persistence', () => {
 
   it('clears only after recovery, then appends the same incident when it recurs', () => {
     const recovered = persistencePlan({
-      availabilityOverall: 'HEALTHY',
-      diagnosticOverall: 'HEALTHY',
-      warnCount: 0,
+      verdict: {
+        overall: 'HEALTHY',
+        diagnosticOverall: 'HEALTHY',
+        critCount: 0,
+        realWarnCount: 0,
+      },
       containedWarnCount: 0,
-      problemKeys: [],
-      sigKeys: [],
+      diagnostics: { problemKeys: [], sigKeys: [] },
       previousSignature: 'WARNING|diseaseOutbreaks:STALE_CONTENT',
     });
     assert.deepEqual(recovered, {
@@ -124,7 +141,7 @@ describe('api/health diagnostic incident persistence', () => {
 
     assert.deepEqual(problemKeys, []);
     assert.deepEqual(sigKeys, []);
-    assert.equal(persistencePlan({ problemKeys, sigKeys }).action, 'clear');
+    assert.equal(persistencePlan({ diagnostics: { problemKeys, sigKeys } }).action, 'clear');
   });
 });
 
