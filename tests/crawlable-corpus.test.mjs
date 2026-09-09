@@ -7155,11 +7155,12 @@ it('retains API country-name aliases through the final country page renderer', a
   const { renderSourceBoundCountryBrief } = await import('../server/worldmonitor/intelligence/v1/get-country-intel-brief.ts');
   const { displayNameForIso2 } = await import('../server/_shared/country-normalize.ts');
   const data = await loadCorpusData({ rootDir: repoRoot });
+  const capturedAt = new Date(data.livePulse.capturedAt).toISOString();
   for (const [code, name] of [['HK', 'Hong Kong'], ['CD', 'DR Congo']]) {
     const country = data.countries.find((entry) => entry.code === code);
     const sources = [
-      { title: `${name} announces new trade rules`, source: 'Reuters', url: 'https://www.reuters.com/world/trade', publishedAt: '2026-09-09T04:00:00.000Z' },
-      { title: `${name} reviews trade rules`, source: 'BBC News', url: 'https://www.bbc.com/news/trade', publishedAt: '2026-09-09T05:00:00.000Z' },
+      { title: `${name} announces new trade rules`, source: 'Reuters', url: 'https://www.reuters.com/world/trade', publishedAt: capturedAt },
+      { title: `${name} reviews trade rules`, source: 'BBC News', url: 'https://www.bbc.com/news/trade', publishedAt: capturedAt },
     ];
     const text = renderSourceBoundCountryBrief(JSON.stringify({
       situation: [{ text: `${name} announces new trade rules.`, source: 1 }],
@@ -7167,7 +7168,7 @@ it('retains API country-name aliases through the final country page renderer', a
     }), sources, displayNameForIso2(code));
     assert.ok(text);
     const livePulse = structuredClone(data.livePulse);
-    livePulse.countries[code].developments = { headlines: sources, brief: { text, sources, model: 'fixture', generatedAt: '2026-09-09T06:00:00.000Z' }, timeline: [] };
+    livePulse.countries[code].developments = { headlines: sources, brief: { text, sources, model: 'fixture', generatedAt: capturedAt }, timeline: [] };
     const html = renderCountryPage({
       country, baseUrl: 'https://www.worldmonitor.app', capturedAt: data.resilience.capturedAt,
       lastmod: data.lastmod.countries, methodologyFormula: data.resilience.methodologyFormula,
@@ -7177,7 +7178,7 @@ it('retains API country-name aliases through the final country page renderer', a
       ciiEntry: data.ciiRanking.byCode.get(code),
     });
     assert.ok(html.includes('data-intel-brief'), `${code} must retain the API brief`);
-    assert.ok(html.includes(`<h4>What this means for ${name}</h4>`), `${code} must use the page name`);
+    assert.ok(html.includes(`<h3>What this means for ${name}</h3>`), `${code} must use the page name`);
     assert.ok(html.includes(`${name} announces new trade rules. [1]`));
   }
 });

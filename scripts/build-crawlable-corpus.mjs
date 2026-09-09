@@ -3373,7 +3373,7 @@ function intelBriefHtml(html) {
 // crawlers saw literal `**` and `WHAT THIS MEANS FOR NO`. Fail the build
 // when either artifact reaches <main>, including section titles that are
 // still plain text rather than <h*> tags.
-const MEANS_FOR_ISO_RE = /\bwhat this means for [a-z]{2}\b/i;
+const MEANS_FOR_ISO_RE = /^\s*what this means for [a-z]{2}\s*:?\s*$/im;
 
 export function assertCountryBriefPresentation({ pagePath, html, sources }) {
   const main = corpusMainHtml(html);
@@ -3399,7 +3399,10 @@ export function assertCountryBriefPresentation({ pagePath, html, sources }) {
       throw new Error(`${pagePath} heading leaks ISO code: ${text}`);
     }
   }
-  if (MEANS_FOR_ISO_RE.test(corpusVisibleText(brief ?? html))) {
+  const briefLines = corpusMainHtml(brief ?? html)
+    .replace(/<br\b[^>]*>|<\/(?:p|h[1-6]|li|div)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  if (MEANS_FOR_ISO_RE.test(briefLines)) {
     throw new Error(`${pagePath} brief heading leaks an ISO-3166 alpha-2 code`);
   }
 }
