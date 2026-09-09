@@ -742,6 +742,15 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ steps.playwright-version.outputs.version }}
+      - name: Use Ubuntu repositories for browser OS libraries
+        # Playwright needs Ubuntu libraries. Unrelated Chrome repository index
+        # failures must not prevent their installation on this disposable runner.
+        run: |
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          printf '%s\n' \
+            'Dir::Etc::sourcelist "/etc/apt/sources.list.d/ubuntu.sources";' \
+            'Dir::Etc::sourceparts "-";' \
+            | sudo tee /etc/apt/apt.conf.d/99-playwright-sources
       - run: npx playwright install --with-deps chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
       # The cache restores only browser binaries (~/.cache/ms-playwright), not
@@ -846,6 +855,15 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ steps.playwright-version.outputs.version }}
+      - name: Use Ubuntu repositories for browser OS libraries
+        # Playwright needs Ubuntu libraries. Unrelated Chrome repository index
+        # failures must not prevent their installation on this disposable runner.
+        run: |
+          test -s /etc/apt/sources.list.d/ubuntu.sources
+          printf '%s\n' \
+            'Dir::Etc::sourcelist "/etc/apt/sources.list.d/ubuntu.sources";' \
+            'Dir::Etc::sourceparts "-";' \
+            | sudo tee /etc/apt/apt.conf.d/99-playwright-sources
       - run: npx playwright install --with-deps chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
       # The cache restores only browser binaries (~/.cache/ms-playwright), not
