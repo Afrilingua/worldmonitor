@@ -54,22 +54,7 @@ describe('pending panel-call queue', () => {
     assert.equal(calls, 1);
   });
 
-  // WORLDMONITOR-125 — the residual half of WORLDMONITOR-11N.
-  //
-  // #11N hardened the DIRECT dispatch path (`invokePanelMethod`, which attaches
-  // a `.catch` to the returned promise) but left the QUEUED path in this same
-  // file bare: `replayPendingCalls` did `if (result instanceof Promise) await
-  // result`, so a rejecting panel method rejected `replayPendingCalls` itself.
-  // Its only production caller (`panel-layout.ts` `lazyPanel().load`) does not
-  // catch, so the rejection escaped to `onunhandledrejection` with exactly the
-  // signature #11N describes: the insights loader's shared abort reason
-  // (`TimeoutError: signal timed out`) carrying that loader's async stack, even
-  // though the loader itself always catches.
-  //
-  // A late-mounting InsightsPanel is the live path — `loadNews` queues
-  // `updateInsights` when the panel has not mounted yet, and that method awaits
-  // `fetchServerInsights()`, whose shared abort fires on a slow connection.
-  it('reports a rejecting queued call instead of leaking an unhandled rejection', async () => {
+  it('reports a rejecting queued call without aborting replay', async () => {
     clearAllPendingCalls();
     const reported: Array<[string, string, unknown, string]> = [];
     const boom = new Error('signal timed out');
@@ -80,7 +65,7 @@ describe('pending panel-call queue', () => {
       () => replayPendingCalls('insights', panel, (key, method, error, dispatch) => {
         reported.push([key, method, error, dispatch]);
       }),
-      'a rejecting panel method must not reject the replay — that is the unhandled-rejection leak',
+      'a rejecting panel method must not abort replay or skip panel setup',
     );
 
     assert.deepEqual(reported, [['insights', 'updateInsights', boom, 'queued']]);
