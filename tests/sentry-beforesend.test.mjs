@@ -154,19 +154,37 @@ describe('ignoreErrors filters', () => {
 // ─── P2: firstPartyFile regex covers all Vite chunk patterns ─────────────
 
 describe('first-party file detection', () => {
+  // Runs `filter` in a child so a catastrophic-backtracking regression fails on
+  // the spawnSync deadline instead of hanging the suite (`node --test` sets no
+  // default timeout, so an in-process hang would never go red).
+  //
+  // Both cases run in ONE child, because the malformed case alone cannot tell
+  // "the regex ran and terminated" from "firstPartyFile was never reached": a
+  // short-circuit above the call (e.g. gating `hasFirstParty` on frame count)
+  // keeps the malformed event DROPPED and the guard green with the ReDoS live.
+  // The well-formed chunk is the positive control — it goes red under exactly
+  // that mutation, which pins the guard to the predicate it is guarding.
   it('finishes filtering a malformed asset filename with many hyphens', () => {
-    const event = makeEvent('.trim is not a function', 'TypeError', [
+    const malformed = makeEvent('.trim is not a function', 'TypeError', [
       { filename: `/assets/${'a-'.repeat(64)}!`, lineno: 10, function: 'doStuff' },
+    ]);
+    const wellFormed = makeEvent('.trim is not a function', 'TypeError', [
+      { filename: '/assets/main-AbC123.js', lineno: 10, function: 'doStuff' },
     ]);
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
       const filter = ${rawBeforeSend.toString()};
-      const result = filter(${JSON.stringify(event)}, () => false, () => false,
+      const run = event => filter(event, () => false, () => false,
         ${JSON.stringify(DESKTOP_NAVIGATOR)}, event => event, 'production');
-      process.stdout.write(JSON.stringify(result));
+      process.stdout.write(JSON.stringify({
+        malformed: run(${JSON.stringify(malformed)}),
+        wellFormed: run(${JSON.stringify(wellFormed)}),
+      }));
     `], { encoding: 'utf8', timeout: 5000 });
     assert.equal(child.error?.code, undefined, 'Filtering must finish within five seconds');
     assert.equal(child.status, 0, child.stderr);
-    assert.equal(JSON.parse(child.stdout), null);
+    const result = JSON.parse(child.stdout);
+    assert.equal(result.malformed, null, 'malformed /assets/ filename is not first-party');
+    assert.notEqual(result.wellFormed, null, 'positive control: a real chunk stays first-party');
   });
 
   // Note: deck-stack is a VENDOR chunk (@deck.gl/@luma.gl), not first-party app code.

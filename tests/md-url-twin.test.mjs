@@ -26,6 +26,31 @@ it('does not decode entities produced by numeric ampersands', () => {
     '# Title\n\n&amp; &#38; &lt;');
 });
 
+// stripTags no longer decodes, so the <title> path carries its own
+// decodeHtmlEntities() call. Dropping that wrapper is an easy refactor mistake
+// and every other <title> fixture in this file is plain text, so pin it here.
+it('decodes one entity layer in the <title> fallback heading', () => {
+  assert.equal(htmlToMarkdown('<html><title>News &amp; Views</title><main><p>Body.</p></main></html>', 'Fallback'),
+    '# News & Views\n\nBody.');
+});
+
+// The numeric branch's rejection arm. `&#7;` is below the 0x20 floor and must
+// vanish rather than land a control character in the emitted Markdown.
+it('drops numeric entities below the control-character floor', () => {
+  assert.equal(htmlToMarkdown('<main><p>a&#7;b</p></main>', 'Title'), '# Title\n\nab');
+});
+
+// `String.fromCharCode` coerces with ToUint16, so a code point above 0xFFFF
+// wraps back under the `>= 32` guard: `&#65596;` (60 + 0x10000) used to yield a
+// literal `<`. fromCodePoint with an explicit range check closes that and stops
+// truncating astral characters.
+it('does not let astral numeric entities wrap past the control-character guard', () => {
+  assert.equal(htmlToMarkdown('<main><p>&#65596;script&#65598;</p></main>', 'Title'),
+    '# Title\n\n\u{1003C}script\u{1003E}');
+  assert.equal(htmlToMarkdown('<main><p>&#128512;</p></main>', 'Title'), '# Title\n\n\u{1F600}');
+  assert.equal(htmlToMarkdown('<main><p>a&#999999999999999999999;b</p></main>', 'Title'), '# Title\n\nab');
+});
+
 /**
  * Sequences sibling responses across a redirect chain. Each entry answers one
  * hop, so a test can assert what the twin does with the LAST hop rather than

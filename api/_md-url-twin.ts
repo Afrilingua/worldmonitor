@@ -86,8 +86,15 @@ const HTML_ENTITIES: Record<string, string> = {
 function decodeHtmlEntities(value: string): string {
   return value.replace(/&(nbsp|amp|lt|gt|quot|#(\d+));/gi, (_, entity: string, code: string | undefined) => {
     if (code === undefined) return HTML_ENTITIES[entity.toLowerCase()]!;
+    // `fromCodePoint`, not `fromCharCode`: the latter coerces with ToUint16, so
+    // a code point above 0xFFFF wraps back under the `>= 32` guard after passing
+    // it — `&#65596;` yielded a literal `<` and `&#65536;` a NUL. It also
+    // truncates astral characters, decoding `&#128512;` to a private-use glyph
+    // instead of the emoji. Same reasoning as src/utils/html-entities.ts.
     const n = Number(code);
-    return Number.isFinite(n) && n >= 32 ? String.fromCharCode(n) : '';
+    const decodable = Number.isInteger(n) && n >= 32 && n <= 0x10ffff
+      && !(n >= 0xd800 && n <= 0xdfff);
+    return decodable ? String.fromCodePoint(n) : '';
   });
 }
 
