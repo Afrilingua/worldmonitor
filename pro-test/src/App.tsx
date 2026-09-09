@@ -389,6 +389,8 @@ const SignalBars = () => {
           const scaleY = isSignal
             ? [0.5, 1, 0.65, 0.9]
             : [1, 0.3, 0.7, 0.15, 0.5];
+          // Full transforms use native animation; individual scaleY values use Motion's frame loop.
+          const transform = scaleY.map((scale) => `scaleY(${scale})`);
 
           return (
             <div
@@ -405,14 +407,14 @@ const SignalBars = () => {
                     ? { boxShadow: `0 0 ${6 + signalIntensity * 12}px rgba(74,222,128,${signalIntensity * 0.5})` }
                     : null),
                 }}
-                initial={{ scaleY: initialScale, opacity: isSignal ? 0.4 : 0.08 }}
+                initial={{ transform: `scaleY(${initialScale})`, opacity: isSignal ? 0.4 : 0.08 }}
                 animate={isSignal
                   ? {
-                      scaleY,
+                      transform,
                       opacity: [0.6 + signalIntensity * 0.3, 1, 0.75 + signalIntensity * 0.2, 0.95],
                     }
                   : {
-                      scaleY,
+                      transform,
                       opacity: [0.2, 0.06, 0.15, 0.04, 0.12],
                     }
                 }

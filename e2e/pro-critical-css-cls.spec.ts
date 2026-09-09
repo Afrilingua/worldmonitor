@@ -76,6 +76,42 @@ const observeLayoutShifts = (page: Page) => page.addInitScript(() => {
   }).observe({ type: 'layout-shift', buffered: true });
 });
 
+test.describe('pro hero animation', () => {
+  for (const viewport of [MOBILE_VIEWPORT, { width: 1440, height: 900 }]) {
+    test(`bars animate natively at ${viewport.width}px`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      const errors: string[] = [];
+      page.on('pageerror', (error) => errors.push(error.message));
+      // Exercise the built React/Motion code; keep analytics and APIs offline.
+      await page.route('**/*', async (route) => {
+        const url = new URL(route.request().url());
+        if (url.origin !== ORIGIN) return route.abort();
+        const pathname = url.pathname === '/pro' ? '/pro/index.html' : url.pathname;
+        const path = resolve(repoRoot, 'public', pathname.replace(/^\//, ''));
+        if (!existsSync(path)) return route.abort();
+        return route.fulfill({ path });
+      });
+      await page.goto(`${ORIGIN}/pro`, { waitUntil: 'load' });
+      const bars = page.locator('main div[aria-hidden="true"] > div > div');
+      await expect(bars).toHaveCount(60);
+      // Individual scaleY values fall back to Motion's frame loop. Full
+      // transform keyframes must produce a native animation on every bar.
+      await expect.poll(() => bars.evaluateAll((elements) => elements.filter((bar) =>
+        bar.getAnimations().some((animation) => {
+          const effect = animation.effect;
+          return effect instanceof KeyframeEffect
+            && effect.getTiming().iterations === Infinity
+            && effect.getKeyframes().some((frame) => typeof frame.transform === 'string');
+        }),
+      ).length)).toBe(60);
+      const firstTransform = await bars.first().evaluate((bar) => getComputedStyle(bar).transform);
+      await expect.poll(() => bars.first().evaluate((bar) => getComputedStyle(bar).transform))
+        .not.toBe(firstTransform);
+      expect(errors).toEqual([]);
+    });
+  }
+});
+
 test.use({ viewport: MOBILE_VIEWPORT });
 
 test.describe('pro critical CSS causes no layout shift when the deferred stylesheet lands', () => {
