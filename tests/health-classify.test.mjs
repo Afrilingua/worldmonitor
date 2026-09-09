@@ -494,6 +494,30 @@ test('classifyKey: consumer-price coverage below the declared completion floor d
 
   assert.equal(entry.status, 'COVERAGE_DEGRADED');
   assert.equal(STATUS_COUNTS[entry.status], 'warn');
+  assert.equal(isContainedHealthWarning(entry, NOW), true,
+    'valid coverage evidence proves a bounded serving degradation');
+});
+
+test('classifyKey: malformed consumer-price completion evidence is not containable', () => {
+  const key = BOOTSTRAP_KEYS.consumerPricesCoverage;
+  const entry = classifyKey('consumerPricesCoverage', key, { allowOnDemand: false }, makeCtx({
+    strens: { [key]: 2048 },
+    metaValues: {
+      [SEED_META.consumerPricesCoverage.key]: seedMeta({
+        recordCount: 4,
+        coverage: {
+          status: 'degraded',
+          completedPages: 4,
+          failedPages: 8,
+          completionRatio: 'not-a-ratio',
+          rejectedCount: 2,
+        },
+      }),
+    },
+  }));
+
+  assert.equal(entry.status, 'COVERAGE_DEGRADED');
+  assert.equal(isContainedHealthWarning(entry, NOW), false);
 });
 
 test('classifyKey: consumer-price coverage at the floor remains healthy', () => {
@@ -650,6 +674,14 @@ test('classifyKey: missing consumer-price coverage metadata fails closed', () =>
 
   assert.equal(entry.status, 'COVERAGE_DEGRADED');
   assert.equal(entry.coverage, null);
+  assert.equal(isContainedHealthWarning(entry, NOW), false,
+    'missing required coverage cannot prove usable last-good data');
+  assert.equal(computeOverallStatus({
+    warn: 1,
+    onDemandWarn: 0,
+    containedWarn: Number(isContainedHealthWarning(entry, NOW)),
+    crit: 0,
+  }, 292).overall, 'WARNING');
 });
 
 test('health registers every currently enabled consumer-price market coverage key', () => {
@@ -1470,6 +1502,8 @@ test('classifyKey: predictionMarkets with one empty pool → COVERAGE_PARTIAL', 
   assert.deepEqual(entry.poolCounts, { geopolitical: 18, tech: 0, finance: 20 });
   assert.deepEqual(entry.minPoolCounts, { geopolitical: 1, tech: 1, finance: 1 });
   assert.equal(STATUS_COUNTS[entry.status], 'warn');
+  assert.equal(isContainedHealthWarning(entry, NOW), true,
+    'complete pool evidence proves a bounded shortfall');
 });
 
 test('classifyKey: stale prediction snapshot outranks per-pool coverage', () => {
@@ -1501,6 +1535,8 @@ test('classifyKey: predictionMarkets requires valid per-pool metadata', () => {
   assert.equal(entry.status, 'COVERAGE_PARTIAL');
   assert.equal(Object.hasOwn(entry, 'poolCounts'), false);
   assert.deepEqual(entry.minPoolCounts, { geopolitical: 1, tech: 1, finance: 1 });
+  assert.equal(isContainedHealthWarning(entry, NOW), false,
+    'missing required pool evidence cannot prove a bounded shortfall');
 });
 
 test('classifyKey: predictionMarkets is OK when every pool meets its floor', () => {

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { handleHealth, __testing__ } from '../api/health.js';
+import handler, { handleHealth, __testing__ } from '../api/health.js';
 import { handleSeedHealth } from '../api/seed-health.js';
 import { FRED_RATES_ACTIVATION_KEY } from '../scripts/seed-fred-rates.mjs';
 
@@ -13,6 +13,7 @@ const {
   ACTIVATION_MARKERS,
   FRED_RATES_ROLLOUT_DEADLINE_KEY,
   FRED_RATES_ROLLOUT_DURATION_MS,
+  CHINA_COVERAGE_SUMMARY_KEY,
   fredRatesRolloutCommands,
   parseFredRatesRolloutUntil,
 } = __testing__;
@@ -155,15 +156,97 @@ test('missing or malformed durable rollout state fails closed', () => {
 
 function installHealthPipelineMock(recordCount) {
   let sweepCommands;
+  let failureSignature = '';
+  let failureLogPushes = 0;
+  const educationCountries = Object.fromEntries(
+    Array.from({ length: 26 * 26 }, (_, index) => {
+      const code = String.fromCharCode(65 + Math.floor(index / 26), 65 + (index % 26));
+      return [code, { value: 50, year: 2025 }];
+    }),
+  );
+  const healthyChinaSummary = JSON.stringify({
+    schemaVersion: 1,
+    countryCode: 'CN',
+    status: 'healthy',
+    evaluatedAt: new Date(DEPLOYED_AT).toISOString(),
+    counts: { total: 1, launched: 1, planned: 0, blocked: 0, healthy: 1, degraded: 0, unavailable: 0 },
+    entries: [{ id: 'market.mock', launchStatus: 'launched', status: 'healthy', reasonCodes: [] }],
+  });
+  const configsByMetaKey = Object.values(SEED_META).reduce((map, config) => {
+    const configs = map.get(config.key) ?? [];
+    configs.push(config);
+    map.set(config.key, configs);
+    return map;
+  }, new Map());
+  const healthyMeta = (key) => {
+    const configs = configsByMetaKey.get(key) ?? [];
+    const meta = {
+      fetchedAt: DEPLOYED_AT,
+      recordCount: Math.max(10_000, ...configs.map((config) => config.minRecordCount ?? 0)),
+    };
+    for (const config of configs) {
+      if (config.requiredRedistributionPolicyVersion != null) {
+        meta.redistributionPolicyVersion = config.requiredRedistributionPolicyVersion;
+      }
+      if (config.minRankableRecordCount != null) {
+        meta.rankableRecordCount = Math.max(meta.rankableRecordCount ?? 0, config.minRankableRecordCount);
+      }
+      if (config.minPoolCounts) {
+        meta.poolCounts = Object.fromEntries(Object.entries(config.minPoolCounts)
+          .map(([pool, floor]) => [pool, floor + 20]));
+      }
+      if (config.requireCoverage || config.requireVulnerabilityCoverage) {
+        meta.coverage = {
+          status: 'healthy',
+          completedPages: 1,
+          failedPages: 0,
+          completionRatio: 1,
+          rejectedCount: 0,
+          ...Object.fromEntries(Object.entries(config.requireVulnerabilityCoverage ?? {})
+            .map(([field, floor]) => [field, floor])),
+        };
+      }
+      if (config.requireContentFreshness) {
+        const criticalCountries = config.requireContentFreshness.countries;
+        meta.contentFreshness = {
+          coveredCount: 200,
+          freshCount: 200,
+          staleCount: 0,
+          unknownCount: 0,
+          criticalCountries,
+          criticalFreshCount: criticalCountries.length,
+          criticalOldestObservedAt: DEPLOYED_AT - 60_000,
+        };
+      }
+      if (config.decisionGroups) {
+        meta.groupStates = Object.fromEntries(config.decisionGroups.map((group) => [group, 'available']));
+        meta.groupCounts = {
+          populated: config.decisionGroups.length,
+          partial: 0,
+          stale: 0,
+          unavailable: 0,
+          healthyQuiet: 0,
+          operationallyCovered: config.decisionGroups.length,
+        };
+      }
+      if (config.requireResilienceCacheState) {
+        meta._formula = 'pc';
+        meta._educationState = 'education-on';
+        meta._intervalMethodology = 'weight-perturbation-sensitivity-v3';
+      }
+    }
+    return meta;
+  };
   globalThis.fetch = async (_url, init) => {
     const commands = JSON.parse(init.body);
     const isSweep = commands.some(([op, key]) => op === 'SET' && key === FRED_RATES_ROLLOUT_DEADLINE_KEY);
     if (isSweep) sweepCommands = commands;
 
-    const results = commands.map(([op, key]) => {
+    const results = commands.map(([op, key, value]) => {
       if (op === 'STRLEN') return { result: key === KEY && recordCount == null ? 0 : 128 };
       if (op === 'LLEN') return { result: 1 };
-      if (op === 'EXISTS') return { result: 0 };
+      if (op === 'EXISTS') return { result: key === ACTIVATION_MARKERS[NAME] ? 0 : 1 };
+      if (op === 'HEXISTS') return { result: 1 };
       if (op === 'GET' && key === FRED_RATES_ROLLOUT_DEADLINE_KEY) return { result: String(UNTIL) };
       if (op === 'GET' && key === SEED_META[NAME].key) {
         return {
@@ -172,11 +255,18 @@ function installHealthPipelineMock(recordCount) {
             : JSON.stringify({ fetchedAt: DEPLOYED_AT, recordCount }),
         };
       }
-      if (op === 'GET' && String(key).includes('health:verdict')) return { result: null };
-      if (op === 'GET' && key === 'health:failure-log-sig') return { result: '' };
-      if (op === 'GET') {
-        return { result: JSON.stringify({ fetchedAt: DEPLOYED_AT, recordCount: 10_000 }) };
+      if (op === 'GET' && key === CHINA_COVERAGE_SUMMARY_KEY) return { result: healthyChinaSummary };
+      if (op === 'GET' && key === STANDALONE_KEYS.educationAttainment) {
+        return { result: JSON.stringify({ countries: educationCountries }) };
       }
+      if (op === 'GET' && String(key).includes('health:verdict')) return { result: null };
+      if (op === 'GET' && key === 'health:failure-log-sig') return { result: failureSignature };
+      if (op === 'GET') {
+        return { result: JSON.stringify(healthyMeta(key)) };
+      }
+      if (op === 'LPUSH' && key === 'health:failure-log') failureLogPushes++;
+      if (op === 'SET' && key === 'health:failure-log-sig') failureSignature = value;
+      if (op === 'DEL' && key === 'health:failure-log-sig') failureSignature = '';
       return { result: 'OK' };
     });
 
@@ -185,15 +275,18 @@ function installHealthPipelineMock(recordCount) {
       headers: { 'Content-Type': 'application/json' },
     });
   };
-  return () => sweepCommands;
+  return {
+    getSweepCommands: () => sweepCommands,
+    getFailureLogPushes: () => failureLogPushes,
+  };
 }
 
 async function readProductionHealth(recordCount) {
-  const getSweepCommands = installHealthPipelineMock(recordCount);
+  const mock = installHealthPipelineMock(recordCount);
   const response = await handleHealth(new Request('https://api.worldmonitor.app/api/health', {
     headers: { 'x-worldmonitor-key': 'fred-health-test-key' },
   }), undefined, { now: DEPLOYED_AT });
-  return { body: await response.json(), getSweepCommands };
+  return { body: await response.json(), getSweepCommands: mock.getSweepCommands };
 }
 
 test('production handleHealth parses FRED rollout slots without softening partial coverage', async () => {
@@ -226,6 +319,58 @@ test('production handleHealth parses FRED rollout slots without softening partia
     assert.equal(partial.body.checks[NAME].rolloutPendingUntil, undefined);
   } finally {
     globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('compact handler contains one metadata-backed warning and dedupes its incident history', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  const originalEnv = {
+    UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
+    UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
+    VERCEL_ENV: process.env.VERCEL_ENV,
+  };
+  process.env.UPSTASH_REDIS_REST_URL = 'https://mock-upstash.test';
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-token';
+  process.env.VERCEL_ENV = 'production';
+  Date.now = () => DEPLOYED_AT;
+
+  try {
+    const mock = installHealthPipelineMock(18);
+    const pending = [];
+    const ctx = { waitUntil: (promise) => pending.push(Promise.resolve(promise)) };
+    const read = async () => {
+      const response = await handler(
+        new Request('https://api.worldmonitor.app/api/health?compact=1'),
+        ctx,
+      );
+      const body = await response.json();
+      await Promise.all(pending.splice(0));
+      return body;
+    };
+
+    const first = await read();
+    assert.equal(first.status, 'HEALTHY');
+    assert.equal(first.summary.warn, 1);
+    assert.equal(first.summary.containedWarn, 1);
+    assert.deepEqual(Object.keys(first.problems), [NAME]);
+    assert.equal(first.problems[NAME].status, 'COVERAGE_PARTIAL');
+    assert.equal(first.problems[NAME].records, 18);
+    assert.equal(mock.getFailureLogPushes(), 1);
+
+    const second = await read();
+    assert.equal(second.status, 'HEALTHY');
+    assert.equal(second.summary.warn, 1);
+    assert.equal(second.summary.containedWarn, 1);
+    assert.deepEqual(second.problems, first.problems);
+    assert.equal(mock.getFailureLogPushes(), 1, 'an unchanged diagnostic signature must not LPUSH twice');
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalDateNow;
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value == null) delete process.env[key];
       else process.env[key] = value;
