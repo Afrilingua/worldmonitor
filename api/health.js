@@ -2626,11 +2626,19 @@ const CONTAINMENT_EVIDENCE_USABLE = Symbol('healthContainmentEvidenceUsable');
 
 function attachContainmentEvidence(entry, metaCount, evidenceUsable) {
   if (!entry || !Number.isFinite(metaCount)) return entry;
-  // Enumerable Symbol properties survive the few object-spread composition
-  // steps below, while JSON serialization still omits them.
-  entry[METADATA_RECORD_COUNT] = metaCount;
-  entry[CONTAINMENT_EVIDENCE_USABLE] = evidenceUsable;
+  Object.defineProperties(entry, {
+    [METADATA_RECORD_COUNT]: { value: metaCount, enumerable: false },
+    [CONTAINMENT_EVIDENCE_USABLE]: { value: evidenceUsable, enumerable: false },
+  });
   return entry;
+}
+
+function copyContainmentEvidence(source, entry) {
+  return attachContainmentEvidence(
+    entry,
+    source?.[METADATA_RECORD_COUNT],
+    source?.[CONTAINMENT_EVIDENCE_USABLE],
+  );
 }
 
 function classifyKey(name, redisKey, opts, ctx) {
@@ -3346,16 +3354,16 @@ function composeChinaCoverageStatus(entry, raw, readError = false, now = Date.no
 
   const seedStatus = entry.status;
   const projected = projectChinaCoverageStatus(raw, readError, now);
-  if (seedStatus === 'OK') return { ...entry, ...projected };
+  if (seedStatus === 'OK') return copyContainmentEvidence(entry, { ...entry, ...projected });
 
   // Preserve writer-health failures when the last summary was healthy, but do
   // not let a stale/error seed downgrade a known China content outage from
   // critical to warning. For degraded/unavailable summaries, surface the
   // content verdict and retain the independent writer signal as seedStatus.
   if (projected.status === 'OK') {
-    return { ...entry, ...projected, status: seedStatus, seedStatus };
+    return copyContainmentEvidence(entry, { ...entry, ...projected, status: seedStatus, seedStatus });
   }
-  return { ...entry, ...projected, seedStatus };
+  return copyContainmentEvidence(entry, { ...entry, ...projected, seedStatus });
 }
 
 function composeChinaDecisionSignalsStatus(entry, _chinaCoverageEntry, now) {
@@ -3376,7 +3384,10 @@ function composeChinaDecisionSignalsStatus(entry, _chinaCoverageEntry, now) {
   if (validCoverageShortfall) {
     const pendingUntil = lastSuccessAt + CHINA_DECISION_SIGNALS_PENDING_MS;
     if (Number.isSafeInteger(lastSuccessAt) && now < pendingUntil) {
-      return { ...entry, chinaCoveragePendingUntil: new Date(pendingUntil).toISOString() };
+      return copyContainmentEvidence(entry, {
+        ...entry,
+        chinaCoveragePendingUntil: new Date(pendingUntil).toISOString(),
+      });
     }
   }
 
@@ -3385,13 +3396,20 @@ function composeChinaDecisionSignalsStatus(entry, _chinaCoverageEntry, now) {
 
 function composeScorecardReadModelStatus(entry, raw, readError = false) {
   if (!entry) return entry;
-  if (readError) return { ...entry, status: 'REDIS_PARTIAL', readModelReady: false };
-  const readModelReady = Number(raw) === 1;
-  if (readModelReady) return { ...entry, readModelReady: true };
-  if (STATUS_COUNTS[entry.status] === 'crit' || entry.status === 'SEED_ERROR') {
-    return { ...entry, readModelReady: false };
+  if (readError) {
+    return copyContainmentEvidence(entry, { ...entry, status: 'REDIS_PARTIAL', readModelReady: false });
   }
-  return { ...entry, status: 'COVERAGE_PARTIAL', seedStatus: entry.status, readModelReady: false };
+  const readModelReady = Number(raw) === 1;
+  if (readModelReady) return copyContainmentEvidence(entry, { ...entry, readModelReady: true });
+  if (STATUS_COUNTS[entry.status] === 'crit' || entry.status === 'SEED_ERROR') {
+    return copyContainmentEvidence(entry, { ...entry, readModelReady: false });
+  }
+  return copyContainmentEvidence(entry, {
+    ...entry,
+    status: 'COVERAGE_PARTIAL',
+    seedStatus: entry.status,
+    readModelReady: false,
+  });
 }
 
 function parseHealthVerdictSnapshot(raw, now, { requireChecks = true } = {}) {

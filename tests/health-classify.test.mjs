@@ -2259,6 +2259,12 @@ test('only closed serving-degradation statuses with real positive metadata count
   }
   assert.equal(JSON.stringify(metadataBacked).includes('healthMetadataRecordCount'), false,
     'internal record-count evidence is not part of the public check');
+  for (const symbol of Object.getOwnPropertySymbols(metadataBacked)) {
+    assert.equal(Object.prototype.propertyIsEnumerable.call(metadataBacked, symbol), false,
+      'internal containment evidence must not leak through object enumeration');
+  }
+  assert.equal(Object.getOwnPropertySymbols({ ...metadataBacked }).length, 0,
+    'internal containment evidence must not leak through object spread');
 
   for (const status of ['REDIS_PARTIAL', 'ROLLOUT_PENDING', 'UNKNOWN_FUTURE_STATUS', 'EMPTY']) {
     metadataBacked.status = status;
