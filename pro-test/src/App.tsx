@@ -389,8 +389,18 @@ const SignalBars = () => {
           const scaleY = isSignal
             ? [0.5, 1, 0.65, 0.9]
             : [1, 0.3, 0.7, 0.15, 0.5];
-          // Full transforms use native animation; individual scaleY values use Motion's frame loop.
+          // Motion accelerates `transform` but not the individual `scaleY`
+          // shorthand, so complete transform strings keep these 60 forever-
+          // repeating bars on the browser's compositor instead of Motion's
+          // JavaScript frame loop. Collapsing this back to `scaleY: [...]`
+          // looks identical and silently restores that main-thread cost.
           const transform = scaleY.map((scale) => `scaleY(${scale})`);
+          // Motion's JS path expands a single `ease` into one easing per
+          // keyframe segment; its native path would apply a lone easing across
+          // the whole iteration and interpolate linearly between keyframes.
+          // Passing the array keeps the per-segment curve the bars had before,
+          // and still leaves the animation eligible for the native path.
+          const ease = scaleY.slice(1).map(() => 'easeInOut' as const);
 
           return (
             <div
@@ -423,7 +433,7 @@ const SignalBars = () => {
                   repeat: Infinity,
                   repeatType: 'reverse',
                   delay: isSignal ? distFromCenter * 0.07 : jitter(i, 2) * 0.6,
-                  ease: 'easeInOut',
+                  ease,
                 }}
               />
             </div>
