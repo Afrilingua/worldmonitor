@@ -67,6 +67,7 @@ function buildSentryInitOptions(): Parameters<SentryNs['init']>[0] {
     environment,
     enabled: Boolean(sentryDsn) && !location.hostname.startsWith('localhost') && !('__TAURI_INTERNALS__' in window),
     allowUrls: SENTRY_ALLOW_URLS,
+    maxValueLength: 2048,
     sendDefaultPii: true,
     tracesSampleRate: 0.1,
     ignoreErrors: [
