@@ -3385,7 +3385,8 @@ export function assertCountryBriefPresentation({ pagePath, html, sources }) {
     // must not add an entity or change a citation after publish-time validation.
     const claims = [...brief.matchAll(/<(p|li)\b([^>]*)>([\s\S]*?)<\/\1>/gi)]
       .filter((match) => !/\bclass="source"/.test(match[2]))
-      .map((match) => corpusVisibleText(match[3]));
+      .map((match) => corpusVisibleText(match[3]).replace(/&(amp|lt|gt|quot|#39);/g,
+        (entity) => ({ '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" })[entity]));
     const gap = briefCitationGroundingGap({ text: claims.join('\n'), sources });
     if (gap) throw new Error(`${pagePath} brief has unsupported citation: ${gap}`);
   }

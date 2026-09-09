@@ -24,6 +24,16 @@ describe('source-bound country brief generation', () => {
       assert.equal(renderSourceBoundCountryBrief(JSON.stringify({ ...payload(), situation: [{ text: sources[0].title, source }] }), sources, 'Finland'), null);
     }
   });
+  it('retains independently grounded claims and discloses withheld claims', () => {
+    const text = renderSourceBoundCountryBrief(JSON.stringify({ ...payload(), implications: [
+      { text: 'Tamar output increases 30%', source: 1 },
+      { text: 'The Fitburg defendants deny sabotage', source: 2 },
+    ] }), sources, 'Finland');
+    assert.match(text, /The Fitburg defendants deny sabotage \[2\]/);
+    assert.doesNotMatch(text, /Tamar|30%/);
+    assert.match(text, /Some generated claims were withheld/);
+    assert.equal(briefCitationGroundingGap({ text, sources }, { countryCode: 'FI', countryName: 'Finland' }), null);
+  });
   it('rejects missing citations, borrowed names, invented numbers, empty and malformed output', () => {
     for (const item of [
       { text: sources[0].title },

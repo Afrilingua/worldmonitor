@@ -42,25 +42,37 @@ export function renderSourceBoundCountryBrief(
   ];
   const record = parsed as Record<string, unknown>;
   const output: string[] = [];
+  let withheld = 0;
   for (const [key, heading] of sections) {
     const claims = record[key];
-    if (!Array.isArray(claims) || claims.length > 2 || (key === 'situation' && !claims.length)) return null;
+    if (!Array.isArray(claims) || claims.length > 6) return null;
     const lines: string[] = [];
     for (const claim of claims) {
       if (!claim || typeof claim !== 'object' || typeof claim.text !== 'string') return null;
       const citation = typeof claim.source === 'string' ? claim.source.match(/^(?:([1-6])|\[([1-6])\])$/) : null;
       const sourceIndex = citation ? Number(citation[1] || citation[2]) : claim.source;
-      if (!Number.isInteger(sourceIndex) || sourceIndex < 1 || sourceIndex > sources.length) return null;
+      if (!Number.isInteger(sourceIndex) || sourceIndex < 1 || sourceIndex > sources.length) {
+        withheld++;
+        continue;
+      }
       const text = claim.text.trim();
-      if (!text || text.length > 500 || /[\r\n\[\]*]/.test(text)) return null;
+      if (!text || text.length > 500 || /[\r\n\[\]*]/.test(text)) {
+        withheld++;
+        continue;
+      }
       const title = sources[sourceIndex - 1]!.title;
       const comparable = (value: string) => value.normalize('NFKD').replace(/\p{M}/gu, '');
       if (!validateNoHallucinatedProperNouns(comparable(text), comparable(title), { failClosed: true }).ok
-        || !validateNoHallucinatedFacts(text, title).ok) return null;
+        || !validateNoHallucinatedFacts(text, title).ok) {
+        withheld++;
+        continue;
+      }
       lines.push(`${text} [${sourceIndex}]`);
     }
+    if (key === 'situation' && !lines.length) return null;
     output.push(`${heading}\n${lines.length ? lines.join('\n') : 'The supplied headlines do not establish this.'}`);
   }
+  if (withheld) output.push('Some generated claims were withheld because they did not match the supplied source titles.');
   return output.join('\n\n');
 }
 

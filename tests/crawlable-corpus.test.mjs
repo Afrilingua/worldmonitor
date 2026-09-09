@@ -7143,3 +7143,10 @@ describe('chokepoint disruption-score methodology', () => {
     assert.match(scoreDriver, /Context only \(not score inputs\)/);
   });
 });
+
+it('checks rendered brief claims as visible text after HTML escaping', () => {
+  const sources = [{ title: "'Tomb Raider: Legacy Of Atlantis' shows the Greece level", url: 'https://example.com/news', source: 'Example' }];
+  const html = '<main><div data-intel-brief><p>The Greece level of &#39;Tomb Raider: Legacy Of Atlantis&#39; was shown. [1]</p></div></main>';
+  assert.doesNotThrow(() => assertCountryBriefPresentation({ pagePath: '/countries/greece/', html, sources }));
+  assert.throws(() => assertCountryBriefPresentation({ pagePath: '/countries/greece/', html: html.replace('Atlantis', 'Olympus'), sources }), /unsupported citation/);
+});
