@@ -177,6 +177,10 @@ const CHINA_COVERAGE_SUMMARY_KEY = 'health:china-coverage:v1';
 // snapshot stays visible and the 15-minute producer records every attempt. The
 // same ceiling is enforced by the seed-age budget and freshness monitor.
 const CHINA_DECISION_SIGNALS_PENDING_MS = 3 * 60 * 60 * 1_000;
+const CHINA_TRANSIENT_COVERAGE_REASONS = new Set([
+  'CHINA_COVERAGE_PARTIAL',
+  'TRANSPORT_ERROR',
+]);
 const HEALTH_VERDICT_SNAPSHOT_TTL_MS = HEALTH_VERDICT_SNAPSHOT_TTL_SECONDS * 1_000;
 const HEALTH_VERDICT_REFRESH_LOCK_KEY = `${HEALTH_VERDICT_SNAPSHOT_KEY}:refresh-lock`;
 // The sweep can consume its full 8s timeout, followed by a 4s failure-log read
@@ -2462,8 +2466,8 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
       partialGroups: decisionDiagnostics.partialGroups,
       staleGroups: decisionDiagnostics.staleGroups,
       unavailableGroups: decisionDiagnostics.unavailableGroups,
-      ...(decisionDiagnostics.coverageFailure
-        ? { coverageFailure: decisionDiagnostics.coverageFailure }
+      ...(decisionDiagnostics.coverageLastSuccessAt
+        ? { coverageLastSuccessAt: decisionDiagnostics.coverageLastSuccessAt }
         : {}),
       ...(decisionDiagnostics.coverageFailureInvalidReason
         ? { coverageFailureInvalidReason: decisionDiagnostics.coverageFailureInvalidReason }
@@ -3217,32 +3221,28 @@ function projectChinaCoverageStatus(raw, readError = false, now = Date.now()) {
     degraded: 'CHINA_DEGRADED',
     unavailable: 'CHINA_UNAVAILABLE',
   }[candidate.status] ?? 'CHINA_UNAVAILABLE';
-  // Hold DEGRADED only when the producer proves a recent healthy evaluation and
-  // the current unresolved episode. The deadline is wall-clock based, so retries
-  // and changing problem identities cannot exhaust or restart the three hours.
-  // UNAVAILABLE remains immediate. Missing or malformed timing evidence also
-  // fails closed as CHINA_DEGRADED.
+  // Hold DEGRADED only while the last proven healthy evaluation remains valid.
+  // Failed evaluations never advance that clock. UNAVAILABLE and missing or
+  // malformed timing evidence remain immediate.
   const evaluatedAt = Date.parse(candidate.evaluatedAt ?? '');
-  const validEpisode = status === 'CHINA_DEGRADED'
-    && Number.isSafeInteger(candidate.firstDegradedAt)
-    && Number.isSafeInteger(candidate.lastDegradedAt)
+  const validLastHealthy = status === 'CHINA_DEGRADED'
     && Number.isSafeInteger(candidate.lastHealthyAt)
     && candidate.lastHealthyAt > 0
-    && candidate.lastHealthyAt <= candidate.firstDegradedAt
-    && candidate.firstDegradedAt <= candidate.lastDegradedAt
-    && candidate.lastDegradedAt === evaluatedAt
-    && candidate.lastDegradedAt <= now;
-  const pendingUntil = validEpisode
-    ? Math.min(
-      candidate.firstDegradedAt + CHINA_DECISION_SIGNALS_PENDING_MS,
-      candidate.lastHealthyAt + CHINA_DECISION_SIGNALS_PENDING_MS,
-    )
+    && candidate.lastHealthyAt <= evaluatedAt
+    && evaluatedAt <= now;
+  const pendingUntil = validLastHealthy
+    ? candidate.lastHealthyAt + CHINA_DECISION_SIGNALS_PENDING_MS
     : null;
   const problems = Array.isArray(candidate.entries)
     ? candidate.entries
       .filter((entry) => entry?.launchStatus === 'launched' && entry?.status !== 'healthy')
       .map((entry) => ({ id: entry.id, status: entry.status, reasonCodes: entry.reasonCodes ?? [] }))
     : [];
+  const transientCoverageOnly = problems.length > 0 && problems.every((problem) => (
+    problem.status === 'degraded'
+    && problem.reasonCodes.length > 0
+    && problem.reasonCodes.every((reason) => CHINA_TRANSIENT_COVERAGE_REASONS.has(reason))
+  ));
   return {
     status,
     chinaStatus: candidate.status,
@@ -3256,16 +3256,10 @@ function projectChinaCoverageStatus(raw, readError = false, now = Date.now()) {
     ...(typeof candidate.degradedProblemKey === 'string'
       ? { degradedProblemKey: candidate.degradedProblemKey }
       : {}),
-    ...(Number.isSafeInteger(candidate.firstDegradedAt)
-      ? { firstDegradedAt: candidate.firstDegradedAt }
-      : {}),
-    ...(Number.isSafeInteger(candidate.lastDegradedAt)
-      ? { lastDegradedAt: candidate.lastDegradedAt }
-      : {}),
     ...(Number.isSafeInteger(candidate.lastHealthyAt)
       ? { lastHealthyAt: candidate.lastHealthyAt }
       : {}),
-    ...(pendingUntil !== null && now < pendingUntil
+    ...(transientCoverageOnly && pendingUntil !== null && now < pendingUntil
       ? { chinaCoveragePendingUntil: new Date(pendingUntil).toISOString() }
       : {}),
     ...(problems.length > 0 ? { problems } : {}),
@@ -3295,23 +3289,18 @@ function composeChinaDecisionSignalsStatus(entry, _chinaCoverageEntry, now) {
   const decisionProblems = Array.isArray(entry.decisionGroups?.unavailableGroups)
     ? entry.decisionGroups.unavailableGroups
     : [];
-  const failure = entry.decisionGroups?.coverageFailure;
-  const expectedFailureKey = decisionProblems.length > 0
-    ? JSON.stringify([...decisionProblems].sort((left, right) => left.id.localeCompare(right.id)))
-    : null;
+  const lastSuccessAt = entry.decisionGroups?.coverageLastSuccessAt;
   const requiredDecisionGroups = SEED_META.chinaDecisionSignals.minRecordCount;
-  const validCoverageShortfall = expectedFailureKey !== null
-    && failure?.failureKey === expectedFailureKey
+  const validCoverageShortfall = decisionProblems.length > 0
+    && !entry.decisionGroups?.coverageFailureInvalidReason
+    && !entry.decisionGroups?.staleGroups?.length
     && entry.minRecordCount === requiredDecisionGroups
     && entry.records === entry.decisionGroups?.operationallyCovered
     && entry.records > 0
     && entry.records < requiredDecisionGroups;
   if (validCoverageShortfall) {
-    const pendingUntil = Math.min(
-      failure.firstFailureAt + CHINA_DECISION_SIGNALS_PENDING_MS,
-      failure.lastSuccessAt + SEED_META.chinaDecisionSignals.maxStaleMin * 60_000,
-    );
-    if (failure.lastAttemptAt <= now && now < pendingUntil) {
+    const pendingUntil = lastSuccessAt + CHINA_DECISION_SIGNALS_PENDING_MS;
+    if (Number.isSafeInteger(lastSuccessAt) && now < pendingUntil) {
       return { ...entry, chinaCoveragePendingUntil: new Date(pendingUntil).toISOString() };
     }
   }

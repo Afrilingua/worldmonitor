@@ -738,13 +738,11 @@ function chinaCorporateCoverageSummary(now, degradedStreak) {
     entries: problems.map((problem) => ({ ...problem, launchStatus: 'launched' })),
     degradedStreak,
     degradedProblemKey: JSON.stringify(problems),
-    firstDegradedAt: now - 60_000,
-    lastDegradedAt: now - 60_000,
     lastHealthyAt: now - 16 * 60_000,
   };
 }
 
-function chinaCorporateDecisionMeta(now, consecutiveFailures = null) {
+function chinaCorporateDecisionMeta(now, withLastSuccess = false) {
   const unavailableGroups = [{
     id: 'corporate-disclosures',
     unavailableCause: 'upstream_unavailable',
@@ -769,13 +767,9 @@ function chinaCorporateDecisionMeta(now, consecutiveFailures = null) {
       operationallyCovered: 5,
     },
     unavailableCauses: { 'corporate-disclosures': 'upstream_unavailable' },
-    ...(consecutiveFailures == null ? {} : {
-      decisionCoverageFailureKey: JSON.stringify(unavailableGroups),
-      consecutiveDecisionCoverageFailures: consecutiveFailures,
-      firstDecisionCoverageFailureAt: now - 60_000,
-      lastDecisionCoverageAttemptAt: now - 60_000,
+    ...(withLastSuccess ? {
       lastDecisionCoverageSuccessAt: now - 16 * 60_000,
-    }),
+    } : {}),
   };
 }
 
@@ -823,8 +817,6 @@ function chinaHealthyCoverageSummary(now) {
     }],
     degradedStreak: 0,
     degradedProblemKey: null,
-    firstDegradedAt: null,
-    lastDegradedAt: null,
     lastHealthyAt: now,
   };
 }
@@ -898,7 +890,10 @@ test('handleHealth keeps repeated producer-owned China failures pending for thre
     chinaCoveragePendingUntil: deadline,
   });
   assert.equal(body.problems?.chinaDecisionSignals, undefined);
-  assert.equal(stored.checks.chinaDecisionSignals.decisionGroups.coverageFailure.consecutiveFailures, 12);
+  assert.equal(
+    stored.checks.chinaDecisionSignals.decisionGroups.coverageLastSuccessAt,
+    now - 16 * 60_000,
+  );
   assert.equal(stored.checks.chinaDecisionSignals.chinaCoveragePendingUntil, deadline);
 });
 

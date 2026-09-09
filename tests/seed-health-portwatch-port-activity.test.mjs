@@ -117,10 +117,6 @@ function installSeedHealthPipelineMock(
             operationallyCovered: 6,
           },
           unavailableCauses: {},
-          decisionCoverageFailureKey: null,
-          consecutiveDecisionCoverageFailures: 0,
-          firstDecisionCoverageFailureAt: null,
-          lastDecisionCoverageAttemptAt: now,
           lastDecisionCoverageSuccessAt: now,
         }) };
       }
@@ -340,14 +336,6 @@ test('seed-health publishes partial and stale China decision groups like /api/he
         'corridor-conditions': 'insufficient_data',
         'activity-nowcast': 'upstream_unavailable',
       },
-      decisionCoverageFailureKey: JSON.stringify([
-        { id: 'activity-nowcast', unavailableCause: 'upstream_unavailable' },
-        { id: 'corridor-conditions', unavailableCause: 'insufficient_data' },
-        { id: 'policy-enforcement', unavailableCause: 'stale' },
-      ]),
-      consecutiveDecisionCoverageFailures: 2,
-      firstDecisionCoverageFailureAt: TEST_NOW - 15 * 60_000,
-      lastDecisionCoverageAttemptAt: TEST_NOW,
       lastDecisionCoverageSuccessAt: TEST_NOW - 30 * 60_000,
     },
   });
@@ -360,17 +348,7 @@ test('seed-health publishes partial and stale China decision groups like /api/he
   assert.deepEqual(entry.partialGroups, ['macro']);
   assert.deepEqual(entry.staleGroups, ['policy-enforcement']);
   assert.deepEqual(entry.quietGroups, ['corporate-disclosures']);
-  assert.deepEqual(entry.coverageFailure, {
-    failureKey: JSON.stringify([
-      { id: 'activity-nowcast', unavailableCause: 'upstream_unavailable' },
-      { id: 'corridor-conditions', unavailableCause: 'insufficient_data' },
-      { id: 'policy-enforcement', unavailableCause: 'stale' },
-    ]),
-    consecutiveFailures: 2,
-    firstFailureAt: TEST_NOW - 15 * 60_000,
-    lastAttemptAt: TEST_NOW,
-    lastSuccessAt: TEST_NOW - 30 * 60_000,
-  });
+  assert.equal(entry.coverageLastSuccessAt, TEST_NOW - 30 * 60_000);
 });
 
 test('seed-health warns when China decision diagnostics or failure evidence are invalid', async () => {
@@ -404,15 +382,9 @@ test('seed-health warns when China decision diagnostics or failure evidence are 
         groupStates: coveredStates,
         groupCounts: validCounts,
         unavailableCauses: {},
-        decisionCoverageFailureKey: JSON.stringify([
-          { id: 'macro', unavailableCause: 'upstream_unavailable' },
-        ]),
-        consecutiveDecisionCoverageFailures: 1,
-        firstDecisionCoverageFailureAt: TEST_NOW - 15 * 60_000,
-        lastDecisionCoverageAttemptAt: TEST_NOW,
-        lastDecisionCoverageSuccessAt: TEST_NOW - 5 * 60_000,
+        lastDecisionCoverageSuccessAt: TEST_NOW + 5 * 60_000,
       },
-      expectedReason: 'FAILURE_TIMESTAMP_ORDER_INVALID',
+      expectedReason: 'LAST_SUCCESS_INVALID',
     },
   ];
 

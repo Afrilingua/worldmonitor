@@ -1232,10 +1232,6 @@ describe('a prolonged relay rejection is visible in /api/seed-health', () => {
               operationallyCovered: 6,
             },
             unavailableCauses: {},
-            decisionCoverageFailureKey: null,
-            consecutiveDecisionCoverageFailures: 0,
-            firstDecisionCoverageFailureAt: null,
-            lastDecisionCoverageAttemptAt: now,
             lastDecisionCoverageSuccessAt: now,
           }) };
         }

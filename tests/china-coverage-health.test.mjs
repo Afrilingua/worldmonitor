@@ -552,7 +552,7 @@ describe('China coverage manifest', () => {
   });
 });
 
-describe('China coverage degraded streak', () => {
+describe('China coverage last-good validity', () => {
   // The evaluator samples 16 sources once an hour. A source degraded at the
   // sampling instant and healthy moments later pinned CHINA_DEGRADED for the
   // whole cycle: on 2026-08-25 it sampled market.china-stock-connect at
@@ -571,8 +571,6 @@ describe('China coverage degraded streak', () => {
     const result = evaluateChinaCoverage({ entries: [entry], data, meta, now: NOW });
     assert.equal(result.status, 'degraded');
     assert.equal(result.degradedStreak, 1);
-    assert.equal(result.firstDegradedAt, NOW);
-    assert.equal(result.lastDegradedAt, NOW);
     assert.equal(result.lastHealthyAt, null);
   });
 
@@ -590,10 +588,7 @@ describe('China coverage degraded streak', () => {
     const retry = evaluateChinaCoverage({ entries: [degraded], data, meta, now: NOW + 60_000, previous: first });
 
     assert.equal(first.lastHealthyAt, healthyAt);
-    assert.equal(first.firstDegradedAt, NOW);
     assert.equal(retry.lastHealthyAt, healthyAt);
-    assert.equal(retry.firstDegradedAt, NOW);
-    assert.equal(retry.lastDegradedAt, NOW + 60_000);
   });
 
   it('does not infer last-good coverage from a contradictory legacy summary', () => {
@@ -644,7 +639,6 @@ describe('China coverage degraded streak', () => {
 
     assert.equal(result.status, 'degraded');
     assert.equal(result.lastHealthyAt, null);
-    assert.equal(result.firstDegradedAt, NOW);
   });
 
   it('does not carry last-good coverage from counts rejected by the API contract', () => {
@@ -665,7 +659,6 @@ describe('China coverage degraded streak', () => {
     const result = evaluateChinaCoverage({ entries: [degraded], data, meta, now: NOW, previous: healthy });
 
     assert.equal(result.lastHealthyAt, null);
-    assert.equal(result.firstDegradedAt, NOW);
   });
 
   it('does not carry last-good coverage from a summary above the API entry limit', () => {
@@ -691,7 +684,6 @@ describe('China coverage degraded streak', () => {
     });
 
     assert.equal(result.lastHealthyAt, null);
-    assert.equal(result.firstDegradedAt, NOW);
   });
 
   it('does not carry last-good coverage through a malformed episode clock', () => {
@@ -704,14 +696,11 @@ describe('China coverage degraded streak', () => {
       previous: {
         status: 'degraded',
         evaluatedAt: new Date(NOW - 15 * 60_000).toISOString(),
-        firstDegradedAt: NOW - 30 * 60_000,
-        lastDegradedAt: NOW - 20 * 60_000,
         lastHealthyAt: NOW - 45 * 60_000,
       },
     });
 
     assert.equal(result.lastHealthyAt, null);
-    assert.equal(result.firstDegradedAt, NOW);
   });
 
   it('does not carry an ordered episode clock from a structurally invalid summary', () => {
@@ -725,14 +714,11 @@ describe('China coverage degraded streak', () => {
       previous: {
         status: 'garbage',
         evaluatedAt: new Date(priorEvaluatedAt).toISOString(),
-        firstDegradedAt: NOW - 30 * 60_000,
-        lastDegradedAt: priorEvaluatedAt,
         lastHealthyAt: NOW - 45 * 60_000,
       },
     });
 
     assert.equal(result.lastHealthyAt, null);
-    assert.equal(result.firstDegradedAt, NOW);
   });
 
   it('increments while the degradation persists', () => {
@@ -761,8 +747,6 @@ describe('China coverage degraded streak', () => {
     });
     assert.equal(healthy.status, 'healthy');
     assert.equal(healthy.degradedStreak, 0, 'a recovery must not stay one observation away from alarming');
-    assert.equal(healthy.firstDegradedAt, null);
-    assert.equal(healthy.lastDegradedAt, null);
     assert.equal(healthy.lastHealthyAt, NOW);
   });
 

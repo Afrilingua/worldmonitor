@@ -307,7 +307,7 @@ describe('China decision-signal alert policy (#5580)', () => {
     assert.doesNotMatch(JSON.stringify(diagnostics), /macro-item|policy-item|cross-strait-item/);
   });
 
-  it('counts three same-incident coverage failures against a proven last success', () => {
+  it('keeps the last proven success across repeated coverage failures', () => {
     const successAt = Date.parse('2026-07-26T11:45:00.000Z');
     const firstAt = Date.parse('2026-07-26T12:00:00.000Z');
     const secondAt = Date.parse('2026-07-26T12:15:00.000Z');
@@ -325,18 +325,13 @@ describe('China decision-signal alert policy (#5580)', () => {
       { ...second, fetchedAt: secondAt, recordCount: GROUP_IDS.length - 1 },
     );
 
-    assert.equal(first.consecutiveDecisionCoverageFailures, 1);
-    assert.equal(second.consecutiveDecisionCoverageFailures, 2);
-    assert.equal(third.consecutiveDecisionCoverageFailures, 3);
-    assert.equal(first.firstDecisionCoverageFailureAt, firstAt);
-    assert.equal(second.firstDecisionCoverageFailureAt, firstAt);
-    assert.equal(third.firstDecisionCoverageFailureAt, firstAt);
+    assert.deepEqual(first, { lastDecisionCoverageSuccessAt: successAt });
+    assert.deepEqual(second, first);
+    assert.deepEqual(third, first);
     assert.equal(third.lastDecisionCoverageSuccessAt, successAt);
-    assert.equal(third.lastDecisionCoverageAttemptAt, thirdAt);
-    assert.equal(third.decisionCoverageFailureKey, first.decisionCoverageFailureKey);
   });
 
-  it('does not let a changed coverage failure extend the incident deadline', () => {
+  it('does not let a changed coverage failure extend validity', () => {
     const successAt = Date.parse('2026-07-26T11:45:00.000Z');
     const firstAt = Date.parse('2026-07-26T12:00:00.000Z');
     const changedAt = Date.parse('2026-07-26T12:15:00.000Z');
@@ -349,10 +344,7 @@ describe('China decision-signal alert policy (#5580)', () => {
       { ...first, fetchedAt: firstAt, recordCount: GROUP_IDS.length - 1 },
     );
 
-    assert.equal(changed.consecutiveDecisionCoverageFailures, 1);
-    assert.notEqual(changed.decisionCoverageFailureKey, first.decisionCoverageFailureKey);
-    assert.equal(changed.firstDecisionCoverageFailureAt, firstAt);
-    assert.equal(changed.lastDecisionCoverageSuccessAt, successAt);
+    assert.deepEqual(changed, first);
   });
 
   it('clamps future snapshot clocks to the local attempt time', () => {
@@ -364,12 +356,10 @@ describe('China decision-signal alert policy (#5580)', () => {
       now,
     );
 
-    assert.equal(state.firstDecisionCoverageFailureAt, now);
-    assert.equal(state.lastDecisionCoverageAttemptAt, now);
     assert.equal(state.lastDecisionCoverageSuccessAt, now - 15 * 60_000);
   });
 
-  it('does not increment the same producer attempt twice', () => {
+  it('is idempotent for the same producer attempt', () => {
     const successAt = Date.parse('2026-07-26T11:45:00.000Z');
     const attemptAt = Date.parse('2026-07-26T12:00:00.000Z');
     const first = nextChinaDecisionCoverageFailure(
@@ -397,13 +387,7 @@ describe('China decision-signal alert policy (#5580)', () => {
       { ...failed, fetchedAt: failureAt, recordCount: GROUP_IDS.length - 1 },
     );
 
-    assert.deepEqual(recovered, {
-      decisionCoverageFailureKey: null,
-      consecutiveDecisionCoverageFailures: 0,
-      firstDecisionCoverageFailureAt: null,
-      lastDecisionCoverageAttemptAt: recoveryAt,
-      lastDecisionCoverageSuccessAt: recoveryAt,
-    });
+    assert.deepEqual(recovered, { lastDecisionCoverageSuccessAt: recoveryAt });
   });
 
   it('does not invent a last success for legacy partial metadata', () => {
@@ -413,7 +397,6 @@ describe('China decision-signal alert policy (#5580)', () => {
       { fetchedAt: failureAt - 15 * 60_000, recordCount: GROUP_IDS.length - 1 },
     );
 
-    assert.equal(state.consecutiveDecisionCoverageFailures, 1);
     assert.equal(state.lastDecisionCoverageSuccessAt, null);
   });
 
@@ -426,22 +409,17 @@ describe('China decision-signal alert policy (#5580)', () => {
       previous,
     );
 
-    assert.equal(state.consecutiveDecisionCoverageFailures, 1);
     assert.equal(state.lastDecisionCoverageSuccessAt, null);
   });
 
-  it('does not carry an explicit success through malformed failure history', () => {
+  it('does not carry a future success timestamp', () => {
     const failureAt = Date.parse('2026-07-26T12:00:00.000Z');
     const state = nextChinaDecisionCoverageFailure(
       coverageFailureSnapshot(failureAt),
       {
         fetchedAt: failureAt - 15 * 60_000,
         recordCount: GROUP_IDS.length - 1,
-        decisionCoverageFailureKey: '{malformed-history}',
-        consecutiveDecisionCoverageFailures: 2,
-        firstDecisionCoverageFailureAt: null,
-        lastDecisionCoverageAttemptAt: failureAt - 15 * 60_000,
-        lastDecisionCoverageSuccessAt: failureAt - 30 * 60_000,
+        lastDecisionCoverageSuccessAt: failureAt + 30 * 60_000,
       },
     );
 

@@ -308,10 +308,8 @@ export function evaluateChinaCoverage({
   if (launched.length > 0 && counts.unavailable === launched.length) status = 'unavailable';
   else if (counts.degraded > 0 || counts.unavailable > 0) status = 'degraded';
 
-  // Keep the instantaneous status truthful, but also publish a producer-owned
-  // episode clock. Health can then retain proven last-good coverage for a fixed
-  // wall-clock window; extra evaluations cannot spend that window faster, and a
-  // rotating problem identity cannot restart it.
+  // Keep the instantaneous status truthful while retaining the last proven
+  // healthy clock. Non-healthy evaluations never advance it.
   const degradedProblemKey = normalizeChinaProblemIdentity(evaluated);
   const previousStreak = Number.isInteger(previous?.degradedStreak)
     && previous.degradedStreak > 0
@@ -322,6 +320,7 @@ export function evaluateChinaCoverage({
   const previousEvaluatedAt = Date.parse(previous?.evaluatedAt ?? '');
   const explicitLastHealthyAt = Number.isSafeInteger(previous?.lastHealthyAt)
     && previous.lastHealthyAt > 0
+    && previous.lastHealthyAt <= previousEvaluatedAt
     && previous.lastHealthyAt <= now
       ? previous.lastHealthyAt
       : null;
@@ -329,31 +328,9 @@ export function evaluateChinaCoverage({
   const legacyLastHealthyAt = previousSummaryValid && previous.status === 'healthy'
       ? previousEvaluatedAt
       : null;
-  const priorFirstDegradedAt = Number.isSafeInteger(previous?.firstDegradedAt)
-    && previous.firstDegradedAt > 0
-      ? previous.firstDegradedAt
-      : null;
-  const priorLastDegradedAt = Number.isSafeInteger(previous?.lastDegradedAt)
-    && previous.lastDegradedAt > 0
-      ? previous.lastDegradedAt
-      : null;
-  const priorLastHealthyAt = explicitLastHealthyAt ?? legacyLastHealthyAt;
-  const validPriorEpisode = previousSummaryValid
-    && previous.status !== 'healthy'
-    && priorLastHealthyAt !== null
-    && priorFirstDegradedAt !== null
-    && priorLastDegradedAt !== null
-    && priorLastHealthyAt <= priorFirstDegradedAt
-    && priorFirstDegradedAt <= priorLastDegradedAt
-    && priorLastDegradedAt === previousEvaluatedAt
-    && priorLastDegradedAt <= now;
   const lastHealthyAt = status === 'healthy'
     ? now
-    : validPriorEpisode ? priorLastHealthyAt : legacyLastHealthyAt;
-  const firstDegradedAt = status === 'healthy'
-    ? null
-    : validPriorEpisode ? priorFirstDegradedAt : now;
-  const lastDegradedAt = status === 'healthy' ? null : now;
+    : previousSummaryValid ? explicitLastHealthyAt ?? legacyLastHealthyAt : null;
 
   return {
     schemaVersion: 1,
@@ -361,8 +338,6 @@ export function evaluateChinaCoverage({
     status,
     degradedStreak,
     degradedProblemKey,
-    firstDegradedAt,
-    lastDegradedAt,
     lastHealthyAt,
     evaluatedAt: new Date(now).toISOString(),
     counts,

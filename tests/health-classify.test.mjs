@@ -2324,8 +2324,6 @@ const chinaSummary = (over = {}) => ({
     status: 'degraded',
     reasonCodes: ['CHINA_COVERAGE_PARTIAL'],
   }]),
-  firstDegradedAt: CHINA_SUMMARY_AT,
-  lastDegradedAt: CHINA_SUMMARY_AT,
   lastHealthyAt: CHINA_LAST_HEALTHY_AT,
   ...over,
 });
@@ -2361,6 +2359,19 @@ test('china coverage: the hold expires at exactly three hours after the last hea
   assert.equal(projected.status, 'CHINA_DEGRADED');
   assert.equal(projected.chinaCoveragePendingUntil, undefined);
   assert.equal(__testing__.healthStatusBucket(projected, deadline), 'warn');
+});
+
+test('china coverage: stale evidence warns immediately', () => {
+  const projected = projectChinaCoverageStatus(chinaSummary({
+    entries: [{
+      id: 'market.china-stock-connect',
+      launchStatus: 'launched',
+      status: 'degraded',
+      reasonCodes: ['CONTENT_STALE'],
+    }],
+  }), false, CHINA_SUMMARY_AT + ONE_MIN_MS);
+  assert.equal(projected.chinaCoveragePendingUntil, undefined);
+  assert.equal(__testing__.healthStatusBucket(projected, CHINA_SUMMARY_AT + ONE_MIN_MS), 'warn');
 });
 
 test('china coverage: a held verdict stays visible rather than silent', () => {
@@ -2435,14 +2446,9 @@ test('china decision signals: aggregate degradation cannot replace producer succ
   assert.equal(__testing__.healthStatusBucket(decisionSignals, now), 'warn');
 });
 
-test('china decision signals: producer attempts cannot exhaust the three-hour validity window', () => {
+test('china decision signals: failed publications cannot extend the three-hour validity window', () => {
   const successAt = NOW - 15 * ONE_MIN_MS;
-  const firstAt = NOW;
-  const failureKey = JSON.stringify([{
-    id: 'corporate-disclosures',
-    unavailableCause: 'upstream_unavailable',
-  }]);
-  const candidate = (consecutiveFailures) => ({
+  const candidate = {
     status: 'COVERAGE_PARTIAL',
     records: 5,
     minRecordCount: 6,
@@ -2452,38 +2458,26 @@ test('china decision signals: producer attempts cannot exhaust the three-hour va
         id: 'corporate-disclosures',
         unavailableCause: 'upstream_unavailable',
       }],
-      coverageFailure: {
-        failureKey,
-        consecutiveFailures,
-        firstFailureAt: firstAt,
-        lastAttemptAt: NOW,
-        lastSuccessAt: successAt,
-      },
+      coverageLastSuccessAt: successAt,
     },
-  });
+  };
 
-  for (const consecutiveFailures of [1, 2, 3, 12]) {
-    const composed = composeChinaDecisionSignalsStatus(candidate(consecutiveFailures), null, NOW);
-    assert.equal(composed.status, 'COVERAGE_PARTIAL');
-    assert.equal(
-      composed.chinaCoveragePendingUntil,
-      new Date(successAt + SEED_META.chinaDecisionSignals.maxStaleMin * ONE_MIN_MS).toISOString(),
-    );
-    assert.equal(__testing__.healthStatusBucket(composed, NOW), 'ok');
-  }
+  const composed = composeChinaDecisionSignalsStatus(candidate, null, NOW);
+  assert.equal(composed.status, 'COVERAGE_PARTIAL');
   assert.equal(
-    composeChinaDecisionSignalsStatus(candidate(12), null, successAt + 180 * ONE_MIN_MS)
+    composed.chinaCoveragePendingUntil,
+    new Date(successAt + SEED_META.chinaDecisionSignals.maxStaleMin * ONE_MIN_MS).toISOString(),
+  );
+  assert.equal(__testing__.healthStatusBucket(composed, NOW), 'ok');
+  assert.equal(
+    composeChinaDecisionSignalsStatus(candidate, null, successAt + 180 * ONE_MIN_MS)
       .chinaCoveragePendingUntil,
     undefined,
     'the three-hour freshness ceiling still expires the hold',
   );
 });
 
-test('china decision signals: missing or mismatched failure evidence fails closed', () => {
-  const failureKey = JSON.stringify([{
-    id: 'corporate-disclosures',
-    unavailableCause: 'upstream_unavailable',
-  }]);
+test('china decision signals: missing or invalid last-success evidence fails closed', () => {
   const valid = {
     status: 'COVERAGE_PARTIAL',
     records: 5,
@@ -2494,23 +2488,13 @@ test('china decision signals: missing or mismatched failure evidence fails close
         id: 'corporate-disclosures',
         unavailableCause: 'upstream_unavailable',
       }],
-      coverageFailure: {
-        failureKey,
-        consecutiveFailures: 1,
-        firstFailureAt: NOW,
-        lastAttemptAt: NOW,
-        lastSuccessAt: NOW - 15 * ONE_MIN_MS,
-      },
+      coverageLastSuccessAt: NOW - 15 * ONE_MIN_MS,
     },
   };
-  for (const coverageFailure of [
-    undefined,
-    { ...valid.decisionGroups.coverageFailure, failureKey: 'different' },
-    { ...valid.decisionGroups.coverageFailure, lastSuccessAt: null },
-  ]) {
+  for (const coverageLastSuccessAt of [undefined, null, Number.NaN]) {
     const candidate = {
       ...valid,
-      decisionGroups: { ...valid.decisionGroups, coverageFailure },
+      decisionGroups: { ...valid.decisionGroups, coverageLastSuccessAt },
     };
     assert.equal(
       composeChinaDecisionSignalsStatus(candidate, null, NOW).chinaCoveragePendingUntil,
@@ -2549,10 +2533,8 @@ test('china decision signals: malformed producer evidence cannot use the legacy 
   );
 });
 
-test('china coverage: a summary with no episode clock alarms immediately', () => {
+test('china coverage: a summary with no last-healthy clock alarms immediately', () => {
   const projected = projectChinaCoverageStatus(chinaSummary({
-    firstDegradedAt: undefined,
-    lastDegradedAt: undefined,
     lastHealthyAt: undefined,
   }), false, CHINA_SUMMARY_AT + ONE_MIN_MS);
   assert.equal(projected.status, 'CHINA_DEGRADED');
