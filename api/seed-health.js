@@ -669,6 +669,9 @@ export async function handleSeedHealth(req, options = {}) {
       : null;
     const chinaDecisionDiagnosticsInvalid = domain === 'intelligence:china-decision-signals'
       && chinaDecisionDiagnostics === null;
+    const chinaDecisionFailureEvidenceInvalid = Boolean(
+      chinaDecisionDiagnostics?.coverageFailureInvalidReason,
+    );
     const redistributionPolicyVersion = Number.isInteger(meta.redistributionPolicyVersion)
       ? meta.redistributionPolicyVersion
       : null;
@@ -684,6 +687,7 @@ export async function handleSeedHealth(req, options = {}) {
       || rankableCoveragePartial
       || poolCoveragePartial
       || chinaDecisionDiagnosticsInvalid
+      || chinaDecisionFailureEvidenceInvalid
       || (chinaDecisionDiagnostics?.staleGroups.length ?? 0) > 0;
     // Source-specific seed projections retain their last-good records while
     // reporting a current upstream failure through sourceState. Treat that as
@@ -758,7 +762,7 @@ export async function handleSeedHealth(req, options = {}) {
       || probe?.ok === false
       || contentFreshnessInvalid
       || contentFreshnessStale;
-    if (stale || poolCoveragePartial) staleCount++;
+    if (stale || coveragePartial) staleCount++;
     // A policy mismatch is an operator error only once the producer has
     // actually activated. Before the first publish the field is legitimately
     // absent, so escalating then would drive `overall: degraded` (HTTP 503) for
