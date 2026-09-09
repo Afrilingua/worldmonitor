@@ -117,7 +117,6 @@ export function createRelayHandler(cfg) {
       const isTimeout = error?.name === 'AbortError';
       return jsonResponse({
         error: isTimeout ? 'Relay timeout' : 'Relay request failed',
-        details: error?.message || String(error),
       }, isTimeout ? 504 : 502, corsHeaders);
     }
   };

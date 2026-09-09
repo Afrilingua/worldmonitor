@@ -300,17 +300,16 @@ describe('createRelayHandler', () => {
     const res = await handler(makeRequest('https://worldmonitor.app/api/test'));
     assert.equal(res.status, 504);
     const body = await res.json();
-    assert.equal(body.error, 'Relay timeout');
+    assert.deepEqual(body, { error: 'Relay timeout' });
   });
 
   it('returns 502 on network error', async () => {
-    mockFetchError('Connection refused');
+    mockFetchError('Connection refused at https://relay.internal/?key=synthetic-secret');
     const handler = createRelayHandler({ relayPath: '/test' });
     const res = await handler(makeRequest('https://worldmonitor.app/api/test'));
     assert.equal(res.status, 502);
     const body = await res.json();
-    assert.equal(body.error, 'Relay request failed');
-    assert.equal(body.details, 'Connection refused');
+    assert.deepEqual(body, { error: 'Relay request failed' });
   });
 
   it('calls fallback when relay unavailable', async () => {
