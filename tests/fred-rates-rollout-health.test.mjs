@@ -471,6 +471,25 @@ test('handler contains multiple served warnings up to the 3% fleet boundary', as
     assert.equal(futureBody.status, 'WARNING');
     assert.equal(futureBody.summary.containedWarn, 0);
     assert.equal(futureBody.problems?.chinaCoverage?.status, 'CHINA_DEGRADED');
+
+    installHealthPipelineMock(24, { chinaCoverageSummary: {
+      ...degradedSummary,
+      counts: { total: 2, launched: 2, planned: 0, blocked: 0, healthy: 1, degraded: 0, unavailable: 1 },
+      entries: [
+        { id: 'market.china-healthy', launchStatus: 'launched', status: 'healthy', reasonCodes: [] },
+        { id: 'market.china-unavailable', launchStatus: 'launched', status: 'unavailable', reasonCodes: ['UPSTREAM_UNAVAILABLE'] },
+      ],
+    } });
+    const unavailableBody = await read();
+    assert.equal(unavailableBody.status, 'WARNING');
+    assert.equal(unavailableBody.summary.warn, 1);
+    assert.equal(unavailableBody.summary.containedWarn, 0);
+    assert.equal(unavailableBody.problems?.chinaCoverage?.status, 'CHINA_DEGRADED');
+    assert.deepEqual(unavailableBody.problems?.chinaCoverage?.problems, [{
+      id: 'market.china-unavailable',
+      status: 'unavailable',
+      reasonCodes: ['UPSTREAM_UNAVAILABLE'],
+    }]);
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalDateNow;

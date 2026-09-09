@@ -4108,7 +4108,8 @@ export async function handleHealth(req, ctx, options = {}) {
         const evidence = containmentEvidenceByName.get(name);
         const evaluatedAt = Date.parse(entry.evaluatedAt ?? '');
         if (evidence && evidence.records === entry.records
-          && Number.isFinite(evaluatedAt) && evaluatedAt <= evaluationNow) {
+          && Number.isFinite(evaluatedAt) && evaluatedAt <= evaluationNow
+          && !entry.problems?.some((problem) => problem.status === 'unavailable')) {
           evidence.status = entry.status;
         }
       }
