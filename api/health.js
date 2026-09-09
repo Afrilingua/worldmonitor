@@ -2614,6 +2614,19 @@ function isCascadeCovered(name, hasData, keyStrens, keyErrors) {
   return false;
 }
 
+// Internal proof that `records` came from readable seed metadata instead of
+// the legacy `metaCount ?? 1` payload-presence fallback. A Symbol keeps this
+// evidence out of full and compact public responses.
+const METADATA_RECORD_COUNT = Symbol('healthMetadataRecordCount');
+
+function attachMetadataRecordCount(entry, metaCount) {
+  if (!entry || !Number.isFinite(metaCount)) return entry;
+  // Enumerable Symbol properties survive the few object-spread composition
+  // steps below, while JSON serialization still omits them.
+  entry[METADATA_RECORD_COUNT] = metaCount;
+  return entry;
+}
+
 function classifyKey(name, redisKey, opts, ctx) {
   const { keyStrens, keyErrors, keyMetaValues, keyMetaErrors, now } = ctx;
   const seedCfg = SEED_META[name];
@@ -3055,7 +3068,7 @@ function classifyKey(name, redisKey, opts, ctx) {
       entry.lastSynthesisFailureCode = synthesisFailure.lastSynthesisFailureCode;
     }
   }
-  return entry;
+  return attachMetadataRecordCount(entry, hasData ? metaCount : null);
 }
 
 const STATUS_COUNTS = {
@@ -3123,6 +3136,24 @@ function healthStatusBucket(entry, now) {
     && !isExpiredDeadline(entry.staleContentGraceUntil, now)
   ) return 'ok';
   return STATUS_COUNTS[entry?.status] ?? 'warn';
+}
+
+const CONTAINMENT_ELIGIBLE_STATUSES = new Set([
+  'STALE_SEED',
+  'SEED_ERROR',
+  'STALE_CONTENT',
+  'COVERAGE_PARTIAL',
+  'COVERAGE_DEGRADED',
+  'CHINA_DEGRADED',
+]);
+
+function isContainedHealthWarning(entry, now = Date.now()) {
+  return healthStatusBucket(entry, now) === 'warn'
+    && CONTAINMENT_ELIGIBLE_STATUSES.has(entry?.status)
+    && Number.isFinite(entry?.records)
+    && entry.records > 0
+    && entry[METADATA_RECORD_COUNT] === entry.records
+    && entry.readModelReady !== false;
 }
 
 // Orders the buckets above so classifyKey can compare two candidate verdicts
@@ -3481,24 +3512,41 @@ function snapshotTtlSeconds(snapshot, now) {
  * ROLLOUT_PENDING is NOT — were pinned against a copy rather than against this
  * code. Subtracting a new bucket here would have kept every test green.
  *
- * `onDemandWarn` is the ONLY bucket subtracted: an on-demand key nobody has
- * requested yet is warn-level for visibility and must not flip the verdict.
- * ROLLOUT_PENDING deliberately stays inside `realWarnCount` (#6059) — it is on a
- * clock, and its escalation to crit is the deadline, not operator attention.
+ * `realWarnCount` preserves the diagnostic warning census by subtracting only
+ * on-demand misses. Availability then subtracts the explicit contained subset;
+ * those defects stay actionable in `summary.warn` and `problems`.
+ * ROLLOUT_PENDING is never contained (#6059): it stays availability-affecting
+ * until its deadline promotes a missing payload to critical.
  */
 function computeOverallStatus(counts, totalChecks) {
   const realWarnCount = counts.warn - counts.onDemandWarn;
+  const containedWarnCount = Number.isInteger(counts.containedWarn)
+    && counts.containedWarn >= 0
+    && counts.containedWarn <= realWarnCount
+    ? counts.containedWarn
+    : 0;
+  const availabilityWarnCount = realWarnCount - containedWarnCount;
   const critCount = counts.crit;
 
-  let overall;
-  if (critCount === 0 && realWarnCount === 0) overall = 'HEALTHY';
-  else if (critCount === 0) overall = 'WARNING';
-  // Degraded threshold scales with registry size so adding keys doesn't
-  // silently raise the page-out bar. ~3% of total keys (was hardcoded 3).
-  else if (critCount / totalChecks <= 0.03) overall = 'DEGRADED';
-  else overall = 'UNHEALTHY';
+  // Critical severity is shared by both verdicts. The threshold scales with
+  // registry size so adding keys does not silently raise the page-out bar.
+  const criticalOverall = critCount / totalChecks <= 0.03 ? 'DEGRADED' : 'UNHEALTHY';
+  const diagnosticOverall = critCount > 0
+    ? criticalOverall
+    : realWarnCount > 0 ? 'WARNING' : 'HEALTHY';
+  const availabilityOverall = critCount > 0
+    ? criticalOverall
+    : availabilityWarnCount === 0 && containedWarnCount / totalChecks <= 0.03
+      ? 'HEALTHY'
+      : 'WARNING';
 
-  return { overall, realWarnCount, critCount };
+  return {
+    overall: availabilityOverall,
+    diagnosticOverall,
+    availabilityOverall,
+    realWarnCount,
+    critCount,
+  };
 }
 
 // Failure-log / ?history=1 problem set. Distinct from the compact `problems` map
@@ -3928,7 +3976,16 @@ export async function handleHealth(req, ctx, options = {}) {
   };
   const checks = {};
   const contentFreshnessPendingUntil = {};
-  const counts = { ok: 0, warn: 0, onDemandWarn: 0, staleContent: 0, rolloutPending: 0, pending: 0, crit: 0 };
+  const counts = {
+    ok: 0,
+    warn: 0,
+    containedWarn: 0,
+    onDemandWarn: 0,
+    staleContent: 0,
+    rolloutPending: 0,
+    pending: 0,
+    crit: 0,
+  };
   let totalChecks = 0;
 
   const sources = [
@@ -3996,6 +4053,7 @@ export async function handleHealth(req, ctx, options = {}) {
   for (const entry of Object.values(checks)) {
     const bucket = healthStatusBucket(entry, evaluationNow);
     counts[bucket]++;
+    if (isContainedHealthWarning(entry, evaluationNow)) counts.containedWarn++;
     if (isPendingHealthEntry(entry, evaluationNow)) counts.pending++;
     if (entry.status === 'EMPTY_ON_DEMAND') counts.onDemandWarn++;
     // STALE_CONTENT = "seeder is fresh but the upstream DATA stopped advancing"
@@ -4061,6 +4119,10 @@ export async function handleHealth(req, ctx, options = {}) {
       // `warn` excludes on-demand-empty (cosmetic warns); `onDemandWarn` is
       // surfaced separately so readers can reconcile against `overall`.
       warn: realWarnCount,
+      // Subset of `warn`: actionable source defects that still prove a usable
+      // metadata-backed payload. These remain in `problems` even when the
+      // small-cohort availability verdict stays HEALTHY.
+      containedWarn: counts.containedWarn,
       onDemandWarn: counts.onDemandWarn,
       // `staleContent` counts every STALE_CONTENT diagnosis (fresh seeder,
       // frozen upstream data — issue #3845), so a frozen feed is visible
@@ -4159,6 +4221,7 @@ export const __testing__ = {
   staleContentGraceUntilMs,
   applyStaleContentGrace,
   healthStatusBucket,
+  isContainedHealthWarning,
   computeOverallStatus,
   hasExpiredActivationGrace,
   snapshotTtlSeconds,

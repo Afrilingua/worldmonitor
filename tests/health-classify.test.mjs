@@ -32,6 +32,8 @@ const {
   EMPTY_DATA_OK_KEYS,
   projectChinaCoverageStatus,
   composeChinaDecisionSignalsStatus,
+  computeOverallStatus,
+  isContainedHealthWarning,
 } = __testing__;
 
 const NOW = 1_700_000_000_000;
@@ -162,21 +164,6 @@ const classifyNewsInsights = (over = {}) => classifyKey(
     metaValues: { [SEED_META.newsInsights.key]: seedMeta(over) },
   }),
 );
-
-// Mirror of the handler's overall-status computation (api/health.js ~850-859).
-// The handler computes this inline; these tests exercise the LOCAL replica —
-// they document the intended HEALTHY/WARNING/DEGRADED/UNHEALTHY thresholds but
-// do NOT catch handler drift if the 0.03 constant or branch order changes in
-// api/health.js without updating here. Non-REDIS_DOWN states return HTTP 200
-// (verdict in the JSON `status`); REDIS_DOWN returns 503.
-function computeOverall(critCount, realWarnCount, totalChecks) {
-  let status;
-  if (critCount === 0 && realWarnCount === 0) status = 'HEALTHY';
-  else if (critCount === 0) status = 'WARNING';
-  else if (critCount / totalChecks <= 0.03) status = 'DEGRADED';
-  else status = 'UNHEALTHY';
-  return { status, http: 200 };
-}
 
 // ── STATUS_COUNTS buckets ───────────────────────────────────────────────────
 
@@ -2186,25 +2173,90 @@ test('cascade: a member that HAS data classifies on its own merits (OK), never d
 
 // ── overall status thresholds ───────────────────────────────────────────────
 
-test('overall: 0 crit / 0 warn → HEALTHY / 200', () => {
-  assert.deepEqual(computeOverall(0, 0, 150), { status: 'HEALTHY', http: 200 });
+test('overall: 0 crit / 0 warn → HEALTHY', () => {
+  assert.equal(computeOverallStatus({ warn: 0, onDemandWarn: 0, containedWarn: 0, crit: 0 }, 150).overall, 'HEALTHY');
 });
 
-test('overall: warn>0 (no crit) → WARNING / 200', () => {
-  assert.deepEqual(computeOverall(0, 1, 150), { status: 'WARNING', http: 200 });
-  assert.deepEqual(computeOverall(0, 40, 150), { status: 'WARNING', http: 200 });
+test('overall: contained warnings stay HEALTHY through the exact 3% boundary', () => {
+  const currentProductionShape = computeOverallStatus(
+    { warn: 2, onDemandWarn: 0, containedWarn: 2, crit: 0 },
+    292,
+  );
+  assert.equal(currentProductionShape.diagnosticOverall, 'WARNING');
+  assert.equal(currentProductionShape.availabilityOverall, 'HEALTHY');
+  assert.equal(currentProductionShape.overall, 'HEALTHY');
+  assert.equal(computeOverallStatus({ warn: 3, onDemandWarn: 0, containedWarn: 3, crit: 0 }, 100).overall, 'HEALTHY');
+  assert.equal(computeOverallStatus({ warn: 4, onDemandWarn: 0, containedWarn: 4, crit: 0 }, 100).overall, 'WARNING');
 });
 
-test('overall: crit within ~3% of total → DEGRADED / 200', () => {
-  // 3/150 = 0.02 <= 0.03
-  assert.deepEqual(computeOverall(3, 0, 150), { status: 'DEGRADED', http: 200 });
-  assert.deepEqual(computeOverall(1, 5, 150), { status: 'DEGRADED', http: 200 });
+test('overall: any uncontained warning remains WARNING and on-demand misses stay excused', () => {
+  assert.equal(computeOverallStatus({ warn: 2, onDemandWarn: 0, containedWarn: 1, crit: 0 }, 150).overall, 'WARNING');
+  assert.equal(computeOverallStatus({ warn: 40, onDemandWarn: 0, containedWarn: 0, crit: 0 }, 150).overall, 'WARNING');
+  assert.equal(computeOverallStatus({ warn: 2, onDemandWarn: 1, containedWarn: 1, crit: 0 }, 150).overall, 'HEALTHY');
 });
 
-test('overall: crit above ~3% of total → UNHEALTHY / 200', () => {
-  // 5/150 = 0.033 > 0.03
-  assert.deepEqual(computeOverall(5, 0, 150), { status: 'UNHEALTHY', http: 200 });
-  assert.deepEqual(computeOverall(20, 2, 150), { status: 'UNHEALTHY', http: 200 });
+test('overall: crit within ~3% of total → DEGRADED', () => {
+  assert.equal(computeOverallStatus({ warn: 0, onDemandWarn: 0, containedWarn: 0, crit: 3 }, 100).overall, 'DEGRADED');
+  assert.equal(computeOverallStatus({ warn: 5, onDemandWarn: 0, containedWarn: 5, crit: 1 }, 150).overall, 'DEGRADED');
+});
+
+test('overall: crit above ~3% of total → UNHEALTHY', () => {
+  assert.equal(computeOverallStatus({ warn: 0, onDemandWarn: 0, containedWarn: 0, crit: 4 }, 100).overall, 'UNHEALTHY');
+  assert.equal(computeOverallStatus({ warn: 2, onDemandWarn: 0, containedWarn: 2, crit: 20 }, 150).overall, 'UNHEALTHY');
+});
+
+test('only closed serving-degradation statuses with real positive metadata counts are contained', () => {
+  const dataKey = BOOTSTRAP_KEYS.earthquakes;
+  const metadataBacked = classifyKey('earthquakes', dataKey, { allowOnDemand: false }, makeCtx({
+    strens: { [dataKey]: 1024 },
+    metaValues: { [SEED_META.earthquakes.key]: seedMeta({ status: 'error', recordCount: 5 }) },
+  }));
+  assert.equal(metadataBacked.status, 'SEED_ERROR');
+
+  for (const status of [
+    'STALE_SEED', 'SEED_ERROR', 'STALE_CONTENT',
+    'COVERAGE_PARTIAL', 'COVERAGE_DEGRADED', 'CHINA_DEGRADED',
+  ]) {
+    metadataBacked.status = status;
+    metadataBacked.records = 5;
+    delete metadataBacked.readModelReady;
+    assert.equal(isContainedHealthWarning(metadataBacked, NOW), true, status);
+  }
+  assert.equal(JSON.stringify(metadataBacked).includes('healthMetadataRecordCount'), false,
+    'internal record-count evidence is not part of the public check');
+
+  for (const status of ['REDIS_PARTIAL', 'ROLLOUT_PENDING', 'UNKNOWN_FUTURE_STATUS', 'EMPTY']) {
+    metadataBacked.status = status;
+    assert.equal(isContainedHealthWarning(metadataBacked, NOW), false, status);
+  }
+
+  metadataBacked.status = 'COVERAGE_PARTIAL';
+  metadataBacked.readModelReady = false;
+  assert.equal(isContainedHealthWarning(metadataBacked, NOW), false, 'an unusable read model fails closed');
+
+  metadataBacked.status = 'SEED_ERROR';
+  delete metadataBacked.readModelReady;
+  metadataBacked.sourceFailurePendingUntil = new Date(NOW + ONE_MIN_MS).toISOString();
+  assert.equal(isContainedHealthWarning(metadataBacked, NOW), false, 'active pending grace is not containment');
+});
+
+test('containment fails closed for invalid or synthetic record counts', () => {
+  const dataKey = BOOTSTRAP_KEYS.earthquakes;
+  const metadataBacked = classifyKey('earthquakes', dataKey, { allowOnDemand: false }, makeCtx({
+    strens: { [dataKey]: 1024 },
+    metaValues: { [SEED_META.earthquakes.key]: seedMeta({ status: 'error', recordCount: 5 }) },
+  }));
+  for (const records of [0, null, undefined, -1, Infinity, NaN, '5']) {
+    metadataBacked.records = records;
+    assert.equal(isContainedHealthWarning(metadataBacked, NOW), false, String(records));
+  }
+
+  const syntheticFallback = classifyKey('earthquakes', dataKey, { allowOnDemand: false }, makeCtx({
+    strens: { [dataKey]: 1024 },
+  }));
+  assert.equal(syntheticFallback.records, 1, 'documents the legacy payload-presence fallback');
+  assert.equal(syntheticFallback.status, 'STALE_SEED');
+  assert.equal(isContainedHealthWarning(syntheticFallback, NOW), false, 'a fallback count is not last-good evidence');
 });
 
 // #6987. flightDelays serves the combined page-load aggregate but read its
