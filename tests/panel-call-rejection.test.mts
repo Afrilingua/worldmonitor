@@ -48,18 +48,19 @@ describe('invokePanelMethod — async panel rejections must not escape', () => {
   });
 
   it('reports the rejection so the failure stays observable', async () => {
-    const seen: Array<{ key: string; method: string; error: unknown }> = [];
+    const seen: Array<{ key: string; method: string; error: unknown; dispatch: string }> = [];
     const boom = new Error('boom');
     const panel = { updateInsights: async () => { throw boom; } };
 
-    invokePanelMethod(panel, 'insights', 'updateInsights', [], (key, method, error) => {
-      seen.push({ key, method, error });
+    invokePanelMethod(panel, 'insights', 'updateInsights', [], (key, method, error, dispatch) => {
+      seen.push({ key, method, error, dispatch });
     });
     await settle();
 
     assert.equal(seen.length, 1, 'exactly one report per rejected call');
     assert.equal(seen[0]?.key, 'insights');
     assert.equal(seen[0]?.method, 'updateInsights');
+    assert.equal(seen[0]?.dispatch, 'direct');
     assert.equal(seen[0]?.error, boom, 'the original error must reach the reporter');
   });
 

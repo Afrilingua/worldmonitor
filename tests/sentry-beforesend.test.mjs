@@ -389,6 +389,15 @@ describe('dynamic-module-import failures (stale chunk after deploy)', () => {
 // (WORLDMONITOR-66 / WORLDMONITOR-62).
 
 describe('zero-frame async-rejection patterns (timeout / DOMException / OOM / DOM-walker / wrapper-injected timeout)', () => {
+  for (const dispatch of ['direct', 'queued']) {
+    it(`preserves a zero-frame timeout explicitly reported by ${dispatch} panel dispatch`, () => {
+      const event = makeEvent('signal timed out', 'TimeoutError');
+      event.tags = { kind: 'panel_call_rejected', panel: 'insights', method: 'updateInsights', dispatch };
+      assert.equal(isIgnored('signal timed out'), false);
+      assert.equal(beforeSend(event), event);
+    });
+  }
+
   const zeroFrameErrors = [
     ['signal timed out', 'TimeoutError'],
     ['NotSupportedError: The operation is not supported.', 'Error'],

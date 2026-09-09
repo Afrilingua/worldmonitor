@@ -71,19 +71,19 @@ describe('pending panel-call queue', () => {
   // `fetchServerInsights()`, whose shared abort fires on a slow connection.
   it('reports a rejecting queued call instead of leaking an unhandled rejection', async () => {
     clearAllPendingCalls();
-    const reported: Array<[string, string, unknown]> = [];
+    const reported: Array<[string, string, unknown, string]> = [];
     const boom = new Error('signal timed out');
     const panel = { updateInsights: () => Promise.reject(boom) };
 
     enqueuePanelCall('insights', 'updateInsights', [[]]);
     await assert.doesNotReject(
-      () => replayPendingCalls('insights', panel, (key, method, error) => {
-        reported.push([key, method, error]);
+      () => replayPendingCalls('insights', panel, (key, method, error, dispatch) => {
+        reported.push([key, method, error, dispatch]);
       }),
       'a rejecting panel method must not reject the replay — that is the unhandled-rejection leak',
     );
 
-    assert.deepEqual(reported, [['insights', 'updateInsights', boom]]);
+    assert.deepEqual(reported, [['insights', 'updateInsights', boom, 'queued']]);
   });
 
   // Same defect, second symptom: `await`ing the rejection inside the loop threw
@@ -103,6 +103,41 @@ describe('pending panel-call queue', () => {
     await replayPendingCalls('insights', panel, () => {});
 
     assert.equal(refreshed, 1, 'a rejecting method must not abort the rest of the queue');
+  });
+
+  it('reports a synchronous throw and delivers the remaining queued methods', async () => {
+    clearAllPendingCalls();
+    const boom = new Error('sync failure');
+    const reported: unknown[] = [];
+    let refreshed = false;
+    enqueuePanelCall('insights', 'updateInsights', []);
+    enqueuePanelCall('insights', 'refresh', []);
+    await replayPendingCalls('insights', {
+      updateInsights() { throw boom; },
+      refresh() { refreshed = true; },
+    }, (_key, _method, error) => { reported.push(error); });
+    assert.deepEqual(reported, [boom]);
+    assert.equal(refreshed, true);
+  });
+
+  it('preserves replay order and continues when the failure reporter throws', async () => {
+    clearAllPendingCalls();
+    const calls: string[] = [];
+    enqueuePanelCall('insights', 'updateInsights', []);
+    enqueuePanelCall('insights', 'refresh', []);
+    await replayPendingCalls('insights', {
+      async updateInsights() {
+        await Promise.resolve();
+        calls.push('update');
+        throw new Error('update failure');
+      },
+      refresh() { calls.push('refresh'); },
+    }, () => {
+      calls.push('report');
+      throw new Error('report failure');
+    });
+    calls.push('setup');
+    assert.deepEqual(calls, ['update', 'report', 'refresh', 'setup']);
   });
 });
 
