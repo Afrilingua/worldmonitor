@@ -3373,7 +3373,7 @@ function intelBriefHtml(html) {
 // crawlers saw literal `**` and `WHAT THIS MEANS FOR NO`. Fail the build
 // when either artifact reaches <main>, including section titles that are
 // still plain text rather than <h*> tags.
-const MEANS_FOR_ISO_RE = /^\s*what this means for [a-z]{2}\s*:?\s*$/im;
+const MEANS_FOR_ISO_RE = /^\s*what this means for [a-z]{2}(?=\s*(?::|$))/im;
 
 export function assertCountryBriefPresentation({ pagePath, html, sources }) {
   const main = corpusMainHtml(html);
