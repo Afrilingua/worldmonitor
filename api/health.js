@@ -2911,8 +2911,7 @@ function classifyKey(name, redisKey, opts, ctx) {
   // Fires AFTER all earlier failure paths so STALE_SEED, COVERAGE_PARTIAL,
   // EMPTY_*, etc. take precedence — STALE_CONTENT is "the seeder is healthy
   // and the data set is sized correctly, but the content itself is older than
-  // the seeder's content-age budget" (e.g. WHO Disease Outbreak News hasn't
-  // published in >9 days for the disease-outbreaks pilot).
+  // the seeder's content-age budget".
   // The opt-in signal is contentAge being non-null in seed-meta (presence of
   // meta.maxContentAgeMin); legacy seeders without it skip this branch.
   // 2026-05-04 health-readiness plan, Sprint 1.
