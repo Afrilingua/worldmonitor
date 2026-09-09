@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -153,6 +154,21 @@ describe('ignoreErrors filters', () => {
 // ─── P2: firstPartyFile regex covers all Vite chunk patterns ─────────────
 
 describe('first-party file detection', () => {
+  it('finishes filtering a malformed asset filename with many hyphens', () => {
+    const event = makeEvent('.trim is not a function', 'TypeError', [
+      { filename: `/assets/${'a-'.repeat(64)}!`, lineno: 10, function: 'doStuff' },
+    ]);
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+      const filter = ${rawBeforeSend.toString()};
+      const result = filter(${JSON.stringify(event)}, () => false, () => false,
+        ${JSON.stringify(DESKTOP_NAVIGATOR)}, event => event, 'production');
+      process.stdout.write(JSON.stringify(result));
+    `], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(child.error?.code, undefined, 'Filtering must finish within five seconds');
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(JSON.parse(child.stdout), null);
+  });
+
   // Note: deck-stack is a VENDOR chunk (@deck.gl/@luma.gl), not first-party app code.
   // It is correctly caught by the "entirely within maplibre/deck.gl internals" filter.
   const testPatterns = [
