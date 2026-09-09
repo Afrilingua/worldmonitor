@@ -631,7 +631,7 @@ const SEED_META = {
     sourceFailure: [
       { warnAfterConsecutive: 2, failureCodePattern: /^FIRMS_PARTIAL_COVERAGE$/ },
       {
-        warnAfterConsecutive: 2, maxPendingMin: 15,
+        warnAfterConsecutive: 3, maxPendingMin: 180,
         successAtField: 'lastSourceSuccessAt',
         sources: ['cwfis', 'firms', 'bc'],
         failureCodePattern: /^CWFIS_SOURCE_FAILED$/,
