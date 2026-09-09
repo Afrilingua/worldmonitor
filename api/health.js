@@ -3567,6 +3567,64 @@ function collectFailureLogProblems(checks, now = Date.now()) {
   };
 }
 
+function buildFailureLogPersistencePlan({
+  availabilityOverall,
+  diagnosticOverall,
+  critCount,
+  warnCount,
+  containedWarnCount,
+  problemKeys,
+  sigKeys,
+  previousSignature,
+  now,
+}) {
+  if (problemKeys.length === 0) {
+    // A later recurrence of the same problem set is a new incident only after
+    // a diagnostic recovery, independent of the public availability verdict.
+    return {
+      action: 'clear',
+      commands: [['DEL', 'health:failure-log-sig']],
+    };
+  }
+
+  const entry = {
+    at: new Date(now).toISOString(),
+    status: diagnosticOverall,
+    ...(diagnosticOverall !== availabilityOverall
+      ? { availabilityStatus: availabilityOverall, containedWarnCount }
+      : {}),
+    critCount,
+    warnCount,
+    problems: problemKeys,
+  };
+  const signature = `${diagnosticOverall}|${sigKeys.join(',')}`;
+  const appendIncident = signature !== previousSignature;
+  const commands = [
+    ['SET', 'health:last-failure', JSON.stringify(entry), 'EX', 86400],
+  ];
+
+  if (appendIncident) {
+    commands.push(
+      ['LPUSH', 'health:failure-log', JSON.stringify(entry)],
+      ['LTRIM', 'health:failure-log', 0, 49],
+      ['EXPIRE', 'health:failure-log', 86400 * 7],
+    );
+  }
+
+  // Keep the active signature alive even when it has not changed. Otherwise a
+  // continuous incident lasting longer than 24 hours is appended again when
+  // the dedupe key expires, despite there being no recovery or transition.
+  commands.push(['SET', 'health:failure-log-sig', signature, 'EX', 86400]);
+
+  return {
+    action: 'persist',
+    appendIncident,
+    entry,
+    signature,
+    commands,
+  };
+}
+
 function healthResponseBody(snapshot, compact) {
   const body = {
     status: snapshot.status,
@@ -4067,49 +4125,36 @@ export async function handleHealth(req, ctx, options = {}) {
     if (entry.status === 'ROLLOUT_PENDING') counts.rolloutPending++;
   }
 
-  const { overall, realWarnCount, critCount } = computeOverallStatus(counts, totalChecks);
+  const {
+    overall,
+    diagnosticOverall,
+    realWarnCount,
+    critCount,
+  } = computeOverallStatus(counts, totalChecks);
 
-  if (overall !== 'HEALTHY') {
-    // problemKeys includes seedAgeMin for the snapshot (useful for post-mortem),
-    // but the dedupe signature uses only key:status (no age) so a long STALE_SEED
-    // window doesn't produce a new log entry on every poll.
-    const { problemKeys, sigKeys } = collectFailureLogProblems(checks, evaluationNow);
-    console.log('[health] %s problems=[%s]', overall, problemKeys.join(', '));
-    const failureLogEntry = {
-      at: new Date(evaluationNow).toISOString(),
-      status: overall,
-      critCount,
-      warnCount: realWarnCount,
-      problems: problemKeys,
-    };
-    // Dedupe: only LPUSH when the incident signature (status + problem set,
-    // excluding seedAgeMin) changes. Read the previous sig first, then write
-    // everything (last-failure + sig + LPUSH) in one atomic pipeline so the
-    // sig only advances when the LPUSH succeeds. If the pipeline fails, the
-    // sig stays stale and the next poll retries the append.
-    const sig = `${overall}|${sigKeys.join(',')}`;
+  // Incident history follows actionable diagnostics, not the public
+  // availability verdict. A contained defect may intentionally leave uptime
+  // HEALTHY, but it must remain visible to operators and strict monitors.
+  const { problemKeys, sigKeys } = collectFailureLogProblems(checks, evaluationNow);
+  let prevSig = '';
+  if (problemKeys.length > 0) {
+    console.log('[health] %s problems=[%s]', diagnosticOverall, problemKeys.join(', '));
     const prevSigResult = await redisPipeline([['GET', 'health:failure-log-sig']], 4_000).catch(() => null);
-    const prevSig = prevSigResult?.[0]?.result ?? '';
-    const persistCmds = [
-      ['SET', 'health:last-failure', JSON.stringify(failureLogEntry), 'EX', 86400],
-    ];
-    if (sig !== prevSig) {
-      persistCmds.push(
-        ['LPUSH', 'health:failure-log', JSON.stringify(failureLogEntry)],
-        ['LTRIM', 'health:failure-log', 0, 49],
-        ['EXPIRE', 'health:failure-log', 86400 * 7],
-        ['SET', 'health:failure-log-sig', sig, 'EX', 86400],
-      );
-    }
-    const persist = redisPipeline(persistCmds, 4_000).catch(() => {});
-    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(persist);
-  } else {
-    // Clear the sig on recovery so a recurrence of the same problem set
-    // after a healthy gap is logged as a new incident, not deduped against
-    // the previous one.
-    const clear = redisPipeline([['DEL', 'health:failure-log-sig']], 4_000).catch(() => {});
-    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(clear);
+    prevSig = prevSigResult?.[0]?.result ?? '';
   }
+  const persistencePlan = buildFailureLogPersistencePlan({
+    availabilityOverall: overall,
+    diagnosticOverall,
+    critCount,
+    warnCount: realWarnCount,
+    containedWarnCount: counts.containedWarn,
+    problemKeys,
+    sigKeys,
+    previousSignature: prevSig,
+    now: evaluationNow,
+  });
+  const persist = redisPipeline(persistencePlan.commands, 4_000).catch(() => {});
+  if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(persist);
 
   const verdictSnapshot = {
     status: overall,
@@ -4205,6 +4250,7 @@ export const __testing__ = {
   classifyKey,
   healthResponseBody,
   collectFailureLogProblems,
+  buildFailureLogPersistencePlan,
   ACTIVATION_MARKERS,
   CONTENT_FRESHNESS_ROLLOUT_UNTIL_MS,
   RUNTIME_ROLLOUT_PENDING_POLICIES,
