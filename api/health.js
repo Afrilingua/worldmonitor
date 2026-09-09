@@ -2578,6 +2578,7 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
   const chinaRow = projectJodiChinaRow(meta, seedCfg?.chinaRow);
   return {
     hasMeta: meta != null,
+    seedFetchedAt: fetchedAt,
     seedAge,
     seedStale,
     seedError: sourceDegraded || failedDatasets.length > 0,
@@ -2618,32 +2619,10 @@ function isCascadeCovered(name, hasData, keyStrens, keyErrors) {
   return false;
 }
 
-// Internal proof that `records` came from readable seed metadata instead of
-// the legacy `metaCount ?? 1` payload-presence fallback. A Symbol keeps this
-// evidence out of full and compact public responses.
-const METADATA_RECORD_COUNT = Symbol('healthMetadataRecordCount');
-const CONTAINMENT_EVIDENCE_USABLE = Symbol('healthContainmentEvidenceUsable');
-
-function attachContainmentEvidence(entry, metaCount, evidenceUsable) {
-  if (!entry || !Number.isFinite(metaCount)) return entry;
-  Object.defineProperties(entry, {
-    [METADATA_RECORD_COUNT]: { value: metaCount, enumerable: false },
-    [CONTAINMENT_EVIDENCE_USABLE]: { value: evidenceUsable, enumerable: false },
-  });
-  return entry;
-}
-
-function copyContainmentEvidence(source, entry) {
-  return attachContainmentEvidence(
-    entry,
-    source?.[METADATA_RECORD_COUNT],
-    source?.[CONTAINMENT_EVIDENCE_USABLE],
-  );
-}
-
 function classifyKey(name, redisKey, opts, ctx) {
   const { keyStrens, keyErrors, keyMetaValues, keyMetaErrors, now } = ctx;
   const seedCfg = SEED_META[name];
+  ctx.containmentEvidenceByName?.delete(name);
   // #6095 audited this grace and DELIBERATELY kept it soft when the marker read
   // failed, unlike the content-freshness grace below. What it gates is why:
   //   1. It downgrades exactly the two "no records" verdicts — EMPTY (key
@@ -3083,10 +3062,26 @@ function classifyKey(name, redisKey, opts, ctx) {
   }
   // Diagnostic precedence must not skip a reader requirement: every required
   // proof is checked here, even when an earlier stale/error verdict won.
-  return attachContainmentEvidence(
-    entry,
-    hasData ? metaCount : null,
-    Number.isFinite(seedAge) && seedAge >= 0
+  const validUntil = Math.min(
+    meta.seedFetchedAt + seedCfg?.maxStaleMin * 60_000,
+    contentAge ? contentAge.newestItemAt + contentAge.maxContentAgeMin * 60_000 : Infinity,
+    contentFreshness?.usable
+      ? contentFreshness.criticalOldestObservedAt + contentFreshness.budgetMinutes * 60_000
+      : Infinity,
+    synthesisFailure?.servedGeneratedAt
+      ? Date.parse(synthesisFailure.servedGeneratedAt) + seedCfg?.maxStaleMin * 60_000
+      : Infinity,
+  );
+  ctx.containmentEvidenceByName?.set(name, {
+    status,
+    records: hasData ? metaCount : null,
+    validUntil,
+    usable: Number.isFinite(seedAge) && seedAge >= 0
+      && Number.isFinite(meta.seedFetchedAt) && meta.seedFetchedAt > 0 && meta.seedFetchedAt <= now
+      && !NEVER_CONTAINED_KEYS.has(name)
+      && Number.isFinite(validUntil) && now < validUntil
+      && !contentFreshness?.contentStale
+      && (!synthesisFailure?.servedGeneratedAt || Date.parse(synthesisFailure.servedGeneratedAt) <= now)
       && (seedCfg?.requiredRedistributionPolicyVersion == null
         || redistributionPolicyVersion === seedCfg.requiredRedistributionPolicyVersion)
       && !decisionGroups?.coverageFailureInvalidReason
@@ -3098,12 +3093,14 @@ function classifyKey(name, redisKey, opts, ctx) {
       && (!seedCfg?.requireCoverage || coverage !== null)
       && (!coverage || seedCfg?.minSuccessRate == null || coverageCompletionRatioUsable)
       && (!seedCfg?.requireContentFreshness || contentFreshness?.usable || contentFreshnessPending)
-      && (!contentAge || (Number.isFinite(contentAge.contentAgeMin) && contentAge.contentAgeMin >= 0))
+      && (!contentAge || (Number.isFinite(contentAge.newestItemAt) && contentAge.newestItemAt <= now
+        && Number.isFinite(contentAge.contentAgeMin) && contentAge.contentAgeMin >= 0))
       && resilienceCacheState?.ok !== false
       // These records include missing/stale input placeholders. A positive
       // count alone cannot prove that the reader serves a usable index.
       && !seedCfg?.enforceInputFreshUntil,
-  );
+  });
+  return entry;
 }
 
 const STATUS_COUNTS = {
@@ -3173,21 +3170,31 @@ function healthStatusBucket(entry, now) {
   return STATUS_COUNTS[entry?.status] ?? 'warn';
 }
 
+// These checks describe sanctions, tariff rules, or redistribution rights.
+// Their warnings must remain availability-affecting even with retained data.
+const NEVER_CONTAINED_KEYS = new Set([
+  'sanctionsPressure',
+  'sanctionsEntities',
+  'tariffTrendsUs',
+  'supplyVulnerability',
+  'supplyChokepointDependencies',
+]);
+
 const CONTAINMENT_ELIGIBLE_STATUSES = new Set([
-  'STALE_SEED',
   'SEED_ERROR',
-  'STALE_CONTENT',
   'COVERAGE_PARTIAL',
   'COVERAGE_DEGRADED',
 ]);
 
-function isContainedHealthWarning(entry, now = Date.now()) {
+function isContainedHealthWarning(entry, evidence, now = Date.now()) {
   return healthStatusBucket(entry, now) === 'warn'
     && CONTAINMENT_ELIGIBLE_STATUSES.has(entry?.status)
     && Number.isFinite(entry?.records)
     && entry.records > 0
-    && entry[METADATA_RECORD_COUNT] === entry.records
-    && entry[CONTAINMENT_EVIDENCE_USABLE] === true
+    && evidence?.status === entry.status
+    && evidence.records === entry.records
+    && evidence.usable === true
+    && Number.isFinite(evidence.validUntil) && now < evidence.validUntil
     && entry.readModelReady !== false;
 }
 
@@ -3336,16 +3343,16 @@ function composeChinaCoverageStatus(entry, raw, readError = false, now = Date.no
 
   const seedStatus = entry.status;
   const projected = projectChinaCoverageStatus(raw, readError, now);
-  if (seedStatus === 'OK') return copyContainmentEvidence(entry, { ...entry, ...projected });
+  if (seedStatus === 'OK') return { ...entry, ...projected };
 
   // Preserve writer-health failures when the last summary was healthy, but do
   // not let a stale/error seed downgrade a known China content outage from
   // critical to warning. For degraded/unavailable summaries, surface the
   // content verdict and retain the independent writer signal as seedStatus.
   if (projected.status === 'OK') {
-    return copyContainmentEvidence(entry, { ...entry, ...projected, status: seedStatus, seedStatus });
+    return { ...entry, ...projected, status: seedStatus, seedStatus };
   }
-  return copyContainmentEvidence(entry, { ...entry, ...projected, seedStatus });
+  return { ...entry, ...projected, seedStatus };
 }
 
 function composeChinaDecisionSignalsStatus(entry, _chinaCoverageEntry, now) {
@@ -3366,10 +3373,10 @@ function composeChinaDecisionSignalsStatus(entry, _chinaCoverageEntry, now) {
   if (validCoverageShortfall) {
     const pendingUntil = lastSuccessAt + CHINA_DECISION_SIGNALS_PENDING_MS;
     if (Number.isSafeInteger(lastSuccessAt) && now < pendingUntil) {
-      return copyContainmentEvidence(entry, {
+      return {
         ...entry,
         chinaCoveragePendingUntil: new Date(pendingUntil).toISOString(),
-      });
+      };
     }
   }
 
@@ -3379,19 +3386,19 @@ function composeChinaDecisionSignalsStatus(entry, _chinaCoverageEntry, now) {
 function composeScorecardReadModelStatus(entry, raw, readError = false) {
   if (!entry) return entry;
   if (readError) {
-    return copyContainmentEvidence(entry, { ...entry, status: 'REDIS_PARTIAL', readModelReady: false });
+    return { ...entry, status: 'REDIS_PARTIAL', readModelReady: false };
   }
   const readModelReady = Number(raw) === 1;
-  if (readModelReady) return copyContainmentEvidence(entry, { ...entry, readModelReady: true });
+  if (readModelReady) return { ...entry, readModelReady: true };
   if (STATUS_COUNTS[entry.status] === 'crit' || entry.status === 'SEED_ERROR') {
-    return copyContainmentEvidence(entry, { ...entry, readModelReady: false });
+    return { ...entry, readModelReady: false };
   }
-  return copyContainmentEvidence(entry, {
+  return {
     ...entry,
     status: 'COVERAGE_PARTIAL',
     seedStatus: entry.status,
     readModelReady: false,
-  });
+  };
 }
 
 function parseHealthVerdictSnapshot(raw, now, { requireChecks = true } = {}) {
@@ -3466,6 +3473,7 @@ const ENTRY_SOFTENING_DEADLINES = [
   { field: 'staleContentGraceUntil', kind: 'content', status: null },
   { field: 'sourceFailurePendingUntil', kind: 'source', status: 'SEED_ERROR' },
   { field: 'chinaCoveragePendingUntil', kind: 'source', status: null },
+  { field: 'containmentUntil', kind: 'source', status: null },
 ];
 
 function entryDeadlineRaw(entry, { field, status }) {
@@ -3587,6 +3595,7 @@ function computeOverallStatus(counts, totalChecks) {
 
   const diagnosticOverall = realWarnCount > 0 ? 'WARNING' : 'HEALTHY';
   const overall = availabilityWarnCount === 0
+    && containedWarnCount <= 1
     && containedWarnCount / totalChecks <= 0.03
     ? 'HEALTHY'
     : 'WARNING';
@@ -4076,7 +4085,9 @@ export async function handleHealth(req, ctx, options = {}) {
     rolloutPendingUntilMs.set('fredRatesSeeder', fredRatesRolloutUntil);
   }
 
+  const containmentEvidenceByName = new Map();
   const classifyCtx = {
+    containmentEvidenceByName,
     keyStrens,
     keyErrors,
     keyMetaValues,
@@ -4163,10 +4174,14 @@ export async function handleHealth(req, ctx, options = {}) {
     if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(graceCleanup);
   }
 
-  for (const entry of Object.values(checks)) {
+  for (const [name, entry] of Object.entries(checks)) {
     const bucket = healthStatusBucket(entry, evaluationNow);
     counts[bucket]++;
-    if (isContainedHealthWarning(entry, evaluationNow)) counts.containedWarn++;
+    const evidence = containmentEvidenceByName.get(name);
+    if (isContainedHealthWarning(entry, evidence, evaluationNow)) {
+      counts.containedWarn++;
+      entry.containmentUntil = new Date(evidence.validUntil).toISOString();
+    }
     if (isPendingHealthEntry(entry, evaluationNow)) counts.pending++;
     if (entry.status === 'EMPTY_ON_DEMAND') counts.onDemandWarn++;
     // STALE_CONTENT = "seeder is fresh but the upstream DATA stopped advancing"
@@ -4281,6 +4296,20 @@ export async function handleHealth(req, ctx, options = {}) {
   // this request's token lets the next caller retry immediately without ever
   // deleting a successor's lock after a slow sweep outlives its lease.
   if (snapshotWriteFailed) console.warn('[health] verdict snapshot write failed');
+
+  // Persistence can cross the evidence deadline. Revoke containment before
+  // returning; cached copies carry that deadline and are rejected on read.
+  if (counts.containedWarn > 0) {
+    const responseNow = snapshotNow();
+    for (const entry of Object.values(checks)) {
+      if (entry.containmentUntil && isExpiredDeadline(entry.containmentUntil, responseNow)) {
+        counts.containedWarn--;
+        delete entry.containmentUntil;
+      }
+    }
+    verdictSnapshot.summary.containedWarn = counts.containedWarn;
+    verdictSnapshot.status = computeOverallStatus(counts, totalChecks).overall;
+  }
 
   // Compact is the public keyless form polled by external uptime MONITORS, so it
   // must NEVER be edge-cached: the prior `s-maxage=60` (#4907, to collapse

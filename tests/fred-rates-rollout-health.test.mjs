@@ -154,7 +154,10 @@ test('missing or malformed durable rollout state fails closed', () => {
   assert.equal(classify({ now: DEPLOYED_AT, rolloutUntil: null }).status, 'EMPTY');
 });
 
-function installHealthPipelineMock(recordCount) {
+function installHealthPipelineMock(recordCount, { metaOverrides = {}, cache = false, onSnapshotWrite } = {}) {
+  const snapshots = new Map();
+  const snapshotWrites = [];
+  let sweepCount = 0;
   let sweepCommands;
   let failureSignature = '';
   let failureLogPushes = 0;
@@ -240,9 +243,17 @@ function installHealthPipelineMock(recordCount) {
   globalThis.fetch = async (_url, init) => {
     const commands = JSON.parse(init.body);
     const isSweep = commands.some(([op, key]) => op === 'SET' && key === FRED_RATES_ROLLOUT_DEADLINE_KEY);
-    if (isSweep) sweepCommands = commands;
+    if (isSweep) { sweepCommands = commands; sweepCount++; }
 
-    const results = commands.map(([op, key, value]) => {
+    const results = commands.map(([op, key, value, , ttl]) => {
+      if (op === 'SET' && String(key).includes('health:verdict') && !String(key).includes('refresh-lock')) {
+        snapshotWrites.push({ key, ttl });
+        onSnapshotWrite?.();
+        if (cache) snapshots.set(key, value);
+      }
+      if (op === 'GET' && metaOverrides[key]) {
+        return { result: JSON.stringify({ ...healthyMeta(key), ...metaOverrides[key] }) };
+      }
       if (op === 'STRLEN') return { result: key === KEY && recordCount == null ? 0 : 128 };
       if (op === 'LLEN') return { result: 1 };
       if (op === 'EXISTS') return { result: key === ACTIVATION_MARKERS[NAME] ? 0 : 1 };
@@ -259,7 +270,7 @@ function installHealthPipelineMock(recordCount) {
       if (op === 'GET' && key === STANDALONE_KEYS.educationAttainment) {
         return { result: JSON.stringify({ countries: educationCountries }) };
       }
-      if (op === 'GET' && String(key).includes('health:verdict')) return { result: null };
+      if (op === 'GET' && String(key).includes('health:verdict')) return { result: snapshots.get(key) ?? null };
       if (op === 'GET' && key === 'health:failure-log-sig') return { result: failureSignature };
       if (op === 'GET') {
         return { result: JSON.stringify(healthyMeta(key)) };
@@ -277,6 +288,8 @@ function installHealthPipelineMock(recordCount) {
   };
   return {
     getSweepCommands: () => sweepCommands,
+    getSweepCount: () => sweepCount,
+    getSnapshotWrites: () => snapshotWrites,
     getFailureLogPushes: () => failureLogPushes,
   };
 }
@@ -368,6 +381,76 @@ test('compact handler contains one metadata-backed warning and dedupes its incid
     assert.equal(second.summary.containedWarn, 1);
     assert.deepEqual(second.problems, first.problems);
     assert.equal(mock.getFailureLogPushes(), 1, 'an unchanged diagnostic signature must not LPUSH twice');
+  } finally {
+    globalThis.fetch = originalFetch;
+    Date.now = originalDateNow;
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value == null) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('handler keeps a shared ECB seeder failure visible and expires cached containment', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDateNow = Date.now;
+  const originalEnv = Object.fromEntries(['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'VERCEL_ENV']
+    .map((key) => [key, process.env[key]]));
+  process.env.UPSTASH_REDIS_REST_URL = 'https://mock-upstash.test';
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'mock-token';
+  process.env.VERCEL_ENV = 'production';
+  let now = DEPLOYED_AT;
+  Date.now = () => now;
+  const pending = [];
+  const read = async () => {
+    const response = await handler(new Request('https://api.worldmonitor.app/api/health?compact=1'),
+      { waitUntil: (promise) => pending.push(Promise.resolve(promise)) });
+    const body = await response.json();
+    await Promise.all(pending.splice(0));
+    return body;
+  };
+  try {
+    installHealthPipelineMock(24, { metaOverrides: {
+      [SEED_META.ecbEstr.key]: { sourceState: 'degraded' },
+    } });
+    const bundle = await read();
+    assert.equal(bundle.status, 'WARNING');
+    assert.equal(bundle.summary.warn, 4);
+    assert.equal(bundle.summary.containedWarn, 4);
+    assert.ok(bundle.summary.warn / bundle.summary.total < 0.03);
+    for (const name of ['ecbEstr', 'ecbEuribor3m', 'ecbEuribor6m', 'ecbEuribor1y']) {
+      assert.equal(bundle.problems[name].status, 'SEED_ERROR');
+    }
+
+    const mock = installHealthPipelineMock(24, { cache: true, metaOverrides: {
+      [SEED_META.earthquakes.key]: { sourceState: 'degraded',
+        fetchedAt: now - SEED_META.earthquakes.maxStaleMin * 60_000 + 20_000 },
+    } });
+    const before = await read();
+    assert.equal(before.status, 'HEALTHY');
+    assert.equal(before.summary.containedWarn, 1);
+    assert.equal(before.problems.earthquakes.containmentUntil, new Date(now + 20_000).toISOString());
+    assert.equal(mock.getSnapshotWrites().length, 2, 'full and compact snapshots are both stored');
+    assert.ok(mock.getSnapshotWrites().every(({ ttl }) => Number(ttl) === 20));
+    now += 19_999;
+    assert.equal((await read()).status, 'HEALTHY');
+    assert.equal(mock.getSweepCount(), 1, 'the cached verdict remains valid before its deadline');
+    now += 1;
+    const expired = await read();
+    assert.equal(expired.status, 'WARNING');
+    assert.equal(expired.summary.containedWarn, 0);
+    assert.equal(expired.problems.earthquakes.status, 'SEED_ERROR');
+    assert.equal(expired.problems.earthquakes.containmentUntil, undefined);
+    assert.equal(mock.getSweepCount(), 2, 'even a retained Redis snapshot is refused at the deadline');
+
+    installHealthPipelineMock(24, { metaOverrides: {
+      [SEED_META.earthquakes.key]: { sourceState: 'degraded',
+        fetchedAt: now - SEED_META.earthquakes.maxStaleMin * 60_000 + 1_000 },
+    }, onSnapshotWrite: () => { now += 1_000; } });
+    const delayed = await read();
+    assert.equal(delayed.status, 'WARNING', 'a slow persistence write cannot extend containment');
+    assert.equal(delayed.summary.containedWarn, 0);
+    assert.equal(delayed.problems.earthquakes.containmentUntil, undefined);
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalDateNow;
