@@ -63,6 +63,13 @@ function firmsDetection(overrides = {}) {
 }
 
 describe('bc live fixture coordinates and status', () => {
+  it('decodes one XML entity layer in incident names', () => {
+    const fixture = kml.replace('Brunswick Creek', 'Creek &amp;lt;north&amp;gt; &amp; south');
+    const parsed = parseBcFireKml(fixture);
+    assert.equal(parsed.fireDetections.find(fire => fire.fireNumber === 'V10742')?.incidentName,
+      'Creek &lt;north&gt; & south');
+  });
+
   it('parses live KML placemark coordinates and fire status/kind', () => {
     const parsed = parseBcFireKml(kml);
     assert.ok(parsed.fireDetections.length >= 4);

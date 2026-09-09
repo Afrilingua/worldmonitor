@@ -79,27 +79,25 @@ export function resolveMarkdownTwinPath(req: Request): string | null {
   return null;
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"',
+};
+
 function decodeHtmlEntities(value: string): string {
-  return value
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/&#(\d+);/g, (_, code) => {
-      const n = Number(code);
-      return Number.isFinite(n) && n >= 32 ? String.fromCharCode(n) : '';
-    });
+  return value.replace(/&(nbsp|amp|lt|gt|quot|#(\d+));/gi, (_, entity: string, code: string | undefined) => {
+    if (code === undefined) return HTML_ENTITIES[entity.toLowerCase()]!;
+    const n = Number(code);
+    return Number.isFinite(n) && n >= 32 ? String.fromCharCode(n) : '';
+  });
 }
 
 function stripTags(value: string): string {
-  return decodeHtmlEntities(value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+  return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 export function htmlToMarkdown(html: string, fallbackTitle: string): string {
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  const title = stripTags(titleMatch?.[1] ?? '') || fallbackTitle;
+  const title = decodeHtmlEntities(stripTags(titleMatch?.[1] ?? '')) || fallbackTitle;
 
   const body = html
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')

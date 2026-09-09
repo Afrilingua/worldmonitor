@@ -13,6 +13,19 @@ import {
   siblingPathFromMarkdown,
 } from '../api/_md-url-twin.ts';
 
+it('preserves escaped text while decoding one entity layer in Markdown', () => {
+  const markdown = htmlToMarkdown(
+    '<main><h1>Literal &lt;name&gt;</h1><p>Nested &amp;lt;name&amp;gt;</p><ul><li>Keep &lt;value&gt;</li></ul></main>',
+    'Fallback',
+  );
+  assert.equal(markdown, '# Literal <name>\n\n Nested &lt;name&gt;\n\n- Keep <value>');
+});
+
+it('does not decode entities produced by numeric ampersands', () => {
+  assert.equal(htmlToMarkdown('<main><p>&#38;amp; &amp;#38; &#38;lt;</p></main>', 'Title'),
+    '# Title\n\n&amp; &#38; &lt;');
+});
+
 /**
  * Sequences sibling responses across a redirect chain. Each entry answers one
  * hop, so a test can assert what the twin does with the LAST hop rather than
