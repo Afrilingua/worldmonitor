@@ -392,6 +392,21 @@ describe('parseWhyMattersV2 — multi-sentence, analyst-path only', () => {
 });
 
 describe('validateNoHallucinatedProperNouns — May 19 regression + class', () => {
+  it('does not treat sentence-opening connective adverbs as invented names', async () => {
+    const { validateNoHallucinatedProperNouns: validate } = await import('../shared/brief-llm-core.js');
+    for (const adverb of ['Simultaneously', 'Concurrently', 'Domestically']) {
+      assert.equal(validate(`${adverb}, Finland faces disruption.`, 'Finland faces disruption.', { failClosed: true }).ok, true);
+      assert.equal(validate(`${adverb}, Tamar faces disruption.`, 'Finland faces disruption.', { failClosed: true }).ok, false);
+      assert.equal(validate(`The company ${adverb} faces disruption.`, 'Finland faces disruption.', { failClosed: true }).ok, false);
+    }
+  });
+  it('treats typographic hyphens in the same source name as equivalent', async () => {
+    const { validateNoHallucinatedProperNouns: validate } = await import('../shared/brief-llm-core.js');
+    for (const hyphen of ['\u2010', '\u2011']) {
+      assert.equal(validate(`The El Niño${hyphen}related flooding continues.`, 'El Niño-related flooding', { failClosed: true }).ok, true);
+      assert.equal(validate(`The El Niño${hyphen}related flooding continues.`, 'Tamar operations resume', { failClosed: true }).ok, false);
+    }
+  });
   let validateNoHallucinatedProperNouns;
   let extractProperNounSequences;
   before(async () => {

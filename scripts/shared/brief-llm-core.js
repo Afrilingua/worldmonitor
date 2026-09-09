@@ -496,6 +496,7 @@ const SENTENCE_START_AMBIGUOUS = new Set([
   'no', 'not', 'yes',
   'breaking', 'live', 'updated', 'latest', 'exclusive', 'just',
   'meanwhile', 'however', 'moreover', 'additionally', 'furthermore', 'still',
+  'simultaneously', 'concurrently', 'domestically',
   'with', 'without', 'on', 'in', 'at', 'by', 'for', 'over', 'under', 'about',
 ]);
 
@@ -574,7 +575,7 @@ function extractProperNounSequencesWithMeta(text) {
 
   // Normalize dotted acronyms BEFORE sentence-splitting so "U.S." isn't
   // misread as a sentence boundary or split into ['U', 'S'].
-  const preprocessed = normalizeDottedAcronyms(text);
+  const preprocessed = normalizeDottedAcronyms(text).replace(/[\u2010\u2011]/g, '-');
 
   // Split into sentences so sentence-start handling can run per-sentence.
   const sentences = preprocessed.split(/[.!?]+\s+|\n+/);
