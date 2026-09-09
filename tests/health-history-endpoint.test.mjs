@@ -71,11 +71,13 @@ describe('api/health diagnostic incident persistence', () => {
     const plan = persistencePlan({ previousSignature: signature });
 
     assert.equal(plan.appendIncident, false);
+    assert.deepEqual(plan.commands[1], ['EXPIRE', 'health:failure-log', 86400 * 7]);
     assert.deepEqual(plan.commands.map(([op, key]) => [op, key]), [
       ['SET', 'health:last-failure'],
+      ['EXPIRE', 'health:failure-log'],
       ['SET', 'health:failure-log-sig'],
     ]);
-    assert.deepEqual(plan.commands[1], [
+    assert.deepEqual(plan.commands[2], [
       'SET', 'health:failure-log-sig', signature, 'EX', 86400,
     ]);
   });

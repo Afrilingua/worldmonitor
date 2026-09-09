@@ -2240,45 +2240,68 @@ test('overall: crit above ~3% of total → UNHEALTHY', () => {
   assert.equal(computeOverallStatus({ warn: 2, onDemandWarn: 0, containedWarn: 2, crit: 20 }, 150).overall, 'UNHEALTHY');
 });
 
-test('only closed serving-degradation statuses with real positive metadata counts are contained', () => {
-  const dataKey = BOOTSTRAP_KEYS.earthquakes;
-  const metadataBacked = classifyKey('earthquakes', dataKey, { allowOnDemand: false }, makeCtx({
-    strens: { [dataKey]: 1024 },
-    metaValues: { [SEED_META.earthquakes.key]: seedMeta({ status: 'error', recordCount: 5 }) },
-  }));
-  assert.equal(metadataBacked.status, 'SEED_ERROR');
-
-  for (const status of [
-    'STALE_SEED', 'SEED_ERROR', 'STALE_CONTENT',
-    'COVERAGE_PARTIAL', 'COVERAGE_DEGRADED', 'CHINA_DEGRADED',
+test('containment evaluates real classifier results and rejects caller-supplied proof', () => {
+  const classify = (over) => classifyKey('earthquakes', BOOTSTRAP_KEYS.earthquakes,
+    { allowOnDemand: false }, makeCtx({
+      strens: { [BOOTSTRAP_KEYS.earthquakes]: 1024 },
+      metaValues: { [SEED_META.earthquakes.key]: seedMeta(over) },
+    }));
+  for (const [expected, meta] of [
+    ['SEED_ERROR', { sourceState: 'degraded' }],
+    ['STALE_SEED', { fetchedAt: NOW - (SEED_META.earthquakes.maxStaleMin + 1) * ONE_MIN_MS }],
+    ['STALE_CONTENT', { newestItemAt: NOW - 180 * ONE_MIN_MS, maxContentAgeMin: 60 }],
   ]) {
-    metadataBacked.status = status;
-    metadataBacked.records = 5;
-    delete metadataBacked.readModelReady;
-    assert.equal(isContainedHealthWarning(metadataBacked, NOW), true, status);
+    const entry = classify(meta);
+    assert.equal(entry.status, expected);
+    assert.equal(isContainedHealthWarning(entry, NOW), true, expected);
+    assert.equal(Object.getOwnPropertySymbols({ ...entry }).length, 0);
+    assert.equal(JSON.stringify(entry).includes('healthMetadataRecordCount'), false);
+    assert.equal(isContainedHealthWarning(JSON.parse(JSON.stringify(entry)), NOW), false);
   }
-  assert.equal(JSON.stringify(metadataBacked).includes('healthMetadataRecordCount'), false,
-    'internal record-count evidence is not part of the public check');
-  for (const symbol of Object.getOwnPropertySymbols(metadataBacked)) {
-    assert.equal(Object.prototype.propertyIsEnumerable.call(metadataBacked, symbol), false,
-      'internal containment evidence must not leak through object enumeration');
+  for (const status of Object.keys(STATUS_COUNTS).concat('UNKNOWN_FUTURE_STATUS')) {
+    assert.equal(isContainedHealthWarning({ status, records: 5 }, NOW), false, status);
   }
-  assert.equal(Object.getOwnPropertySymbols({ ...metadataBacked }).length, 0,
-    'internal containment evidence must not leak through object spread');
+  const error = classify({ sourceState: 'degraded' });
+  error.sourceFailurePendingUntil = new Date(NOW + ONE_MIN_MS).toISOString();
+  assert.equal(isContainedHealthWarning(error, NOW), false);
+  const ready = __testing__.composeScorecardReadModelStatus(classify({ sourceState: 'degraded' }), 1);
+  const unavailable = __testing__.composeScorecardReadModelStatus(classify({ sourceState: 'degraded' }), 0);
+  assert.equal(isContainedHealthWarning(ready, NOW), true);
+  assert.equal(isContainedHealthWarning(unavailable, NOW), false);
+});
 
-  for (const status of ['REDIS_PARTIAL', 'ROLLOUT_PENDING', 'UNKNOWN_FUTURE_STATUS', 'EMPTY']) {
-    metadataBacked.status = status;
-    assert.equal(isContainedHealthWarning(metadataBacked, NOW), false, status);
+test('containment rejects missing proof even when an earlier diagnostic wins', () => {
+  const cases = [
+    ['earthquakes', { fetchedAt: undefined }, 'STALE_SEED'],
+    ['earthquakes', { status: 'error' }, 'SEED_ERROR'],
+    ['earthquakes', { fetchedAt: 'invalid' }, 'STALE_SEED'],
+    ['consumerPricesCoverage', { fetchedAt: NOW - 10_000 * ONE_MIN_MS }, 'STALE_SEED'],
+    ['consumerPricesCoverage', { status: 'error' }, 'SEED_ERROR'],
+    ['supplyChokepointDependencies', { fetchedAt: NOW - 10_000 * ONE_MIN_MS, redistributionPolicyVersion: 0 }, 'STALE_SEED'],
+    ['predictionMarkets', { fetchedAt: NOW - 10_000 * ONE_MIN_MS }, 'STALE_SEED'],
+    ['portwatchPortActivity', { recordCount: 1 }, 'COVERAGE_PARTIAL'],
+    ['consumerPricesCoverage', { coverage: { status: 'partial', completionRatio: 2 } }, 'COVERAGE_PARTIAL'],
+    ['physicalDivergence', { sourceState: 'error', recordCount: 2 }, 'SEED_ERROR'],
+    ['physicalDivergence', { sourceState: 'ok', recordCount: 2, inputFreshUntil: NOW - 1 }, 'SEED_ERROR'],
+    ['resilienceRanking', { recordCount: 196 }, 'STALE_SEED'],
+  ];
+  for (const [name, meta, expected] of cases) {
+    const key = BOOTSTRAP_KEYS[name] ?? STANDALONE_KEYS[name];
+    const entry = classifyKey(name, key, { allowOnDemand: false }, makeCtx({
+      strens: { [key]: 2048 },
+      metaValues: { [SEED_META[name].key]: seedMeta(meta) },
+    }));
+    assert.equal(entry.status, expected, name);
+    assert.equal(isContainedHealthWarning(entry, NOW), false, name);
+    assert.equal(computeOverallStatus({ warn: 1, onDemandWarn: 0,
+      containedWarn: Number(isContainedHealthWarning(entry, NOW)), crit: 0 }, 292).overall, 'WARNING');
   }
+});
 
-  metadataBacked.status = 'COVERAGE_PARTIAL';
-  metadataBacked.readModelReady = false;
-  assert.equal(isContainedHealthWarning(metadataBacked, NOW), false, 'an unusable read model fails closed');
-
-  metadataBacked.status = 'SEED_ERROR';
-  delete metadataBacked.readModelReady;
-  metadataBacked.sourceFailurePendingUntil = new Date(NOW + ONE_MIN_MS).toISOString();
-  assert.equal(isContainedHealthWarning(metadataBacked, NOW), false, 'active pending grace is not containment');
+test('overall rejects invalid containment counts', () => {
+  for (const containedWarn of [undefined, null, -1, 0.5, 2, NaN, Infinity, '1']) {
+    assert.equal(computeOverallStatus({ warn: 1, onDemandWarn: 0, containedWarn, crit: 0 }, 100).overall, 'WARNING');
+  }
 });
 
 test('containment fails closed for invalid or synthetic record counts', () => {
@@ -2287,7 +2310,7 @@ test('containment fails closed for invalid or synthetic record counts', () => {
     strens: { [dataKey]: 1024 },
     metaValues: { [SEED_META.earthquakes.key]: seedMeta({ status: 'error', recordCount: 5 }) },
   }));
-  for (const records of [0, null, undefined, -1, Infinity, NaN, '5']) {
+  for (const records of [0, null, undefined, -1, Infinity, NaN, '5', 6]) {
     metadataBacked.records = records;
     assert.equal(isContainedHealthWarning(metadataBacked, NOW), false, String(records));
   }
@@ -2741,4 +2764,22 @@ test('classifyKey: a key with no activation marker is untouched by the change', 
     makeCtx({ activationStates: IMD_MARKER_ABSENT }),
   );
   assert.equal(entry.status, 'STALE_SEED');
+});
+
+
+test('China composition cannot inherit containment from a healthy summary seed', () => {
+  const now = CHINA_SUMMARY_AT + 240 * ONE_MIN_MS;
+  const key = STANDALONE_KEYS.chinaCoverage;
+  const seed = classifyKey('chinaCoverage', key, { allowOnDemand: false }, {
+    ...makeCtx({ strens: { [key]: 2048 }, metaValues: {
+      [SEED_META.chinaCoverage.key]: JSON.stringify({ fetchedAt: now, recordCount: 1 }),
+    } }), now,
+  });
+  assert.equal(seed.status, 'OK');
+  for (const summary of [chinaSummary(), chinaSummary({ lastHealthyAt: undefined })]) {
+    const entry = __testing__.composeChinaCoverageStatus(seed, summary, false, now);
+    assert.equal(entry.status, 'CHINA_DEGRADED');
+    assert.equal(entry.chinaCoveragePendingUntil, undefined);
+    assert.equal(isContainedHealthWarning(entry, now), false);
+  }
 });

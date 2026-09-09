@@ -2809,11 +2809,6 @@ function classifyKey(name, redisKey, opts, ctx) {
   }
 
   let status;
-  // The public status explains the warning; this private proof says whether
-  // the evidence that selected it was complete enough to call the impact
-  // bounded. Missing required diagnostics still keep their existing warning
-  // status and public fields, but cannot be subtracted from availability.
-  let containmentEvidenceUsable = true;
   // Precedes every fault branch: an adapter this deployment never configured has
   // nothing to be stale, empty, or degraded ABOUT. The producer still writes the
   // key each run (recordCount 0) so operators can see the adapter is dormant, and
@@ -2890,10 +2885,7 @@ function classifyKey(name, redisKey, opts, ctx) {
   else if (
     decisionGroups?.coverageFailureInvalidReason
     || decisionGroups?.staleGroups?.length > 0
-  ) {
-    status = 'COVERAGE_PARTIAL';
-    containmentEvidenceUsable = !decisionGroups.coverageFailureInvalidReason;
-  }
+  ) status = 'COVERAGE_PARTIAL';
   // Coverage threshold: producers that know their canonical shape size can
   // declare minRecordCount. When the writer reports a count below threshold
   // (e.g., 10/13 chokepoints because portwatch dropped some), this degrades
@@ -2902,61 +2894,38 @@ function classifyKey(name, redisKey, opts, ctx) {
   else if (
     seedCfg?.minRecordCount != null &&
     (metaCount == null || metaCount < seedCfg.minRecordCount)
-  ) {
-    status = 'COVERAGE_PARTIAL';
-    containmentEvidenceUsable = metaCount != null;
-  }
+  ) status = 'COVERAGE_PARTIAL';
   else if (
     seedCfg?.minRankableRecordCount != null &&
     (rankableRecordCount == null || rankableRecordCount < seedCfg.minRankableRecordCount)
-  ) {
-    status = 'COVERAGE_PARTIAL';
-    containmentEvidenceUsable = rankableRecordCount != null;
-  }
+  ) status = 'COVERAGE_PARTIAL';
   else if (
     seedCfg?.requireVulnerabilityCoverage
     && (!coverage || Object.entries(seedCfg.requireVulnerabilityCoverage)
       .some(([field, floor]) => (
         !Number.isFinite(coverage[field]) || coverage[field] < floor
       )))
-  ) {
-    status = 'COVERAGE_PARTIAL';
-    containmentEvidenceUsable = Boolean(coverage)
-      && Object.keys(seedCfg.requireVulnerabilityCoverage)
-        .every((field) => Number.isFinite(coverage[field]));
-  }
+  ) status = 'COVERAGE_PARTIAL';
   // Per-pool coverage is independent of aggregate volume. Missing/malformed
   // diagnostics fail closed: without all configured counts health cannot prove
   // that every category consumer has data.
-  else if (hasPoolCoverageShortfall(poolCounts, seedCfg?.minPoolCounts)) {
-    status = 'COVERAGE_PARTIAL';
-    containmentEvidenceUsable = poolCounts !== null;
-  }
+  else if (hasPoolCoverageShortfall(poolCounts, seedCfg?.minPoolCounts)) status = 'COVERAGE_PARTIAL';
   // Success-rate threshold: when the producer writes coverage.completionRatio
   // (consumer-prices publish.ts etc.), flag COVERAGE_DEGRADED if the ratio
   // falls below minSuccessRate. Fires after COVERAGE_PARTIAL so record-count
   // shortfalls take precedence.
-  else if (seedCfg?.requireCoverage && !coverage) {
-    status = 'COVERAGE_DEGRADED';
-    containmentEvidenceUsable = false;
-  }
+  else if (seedCfg?.requireCoverage && !coverage) status = 'COVERAGE_DEGRADED';
   // Per-entity content freshness (#6060). Fails closed BEFORE the staleness
   // verdict is read: a check that declares requireContentFreshness but whose
   // producer wrote no usable block cannot prove anything about its content,
   // and "cannot prove" must never resolve to OK — that is exactly the
   // fresh-transport/complete-cardinality mask this branch exists to remove.
-  else if (seedCfg?.requireContentFreshness && !contentFreshness?.usable && !contentFreshnessPending) {
-    status = 'COVERAGE_DEGRADED';
-    containmentEvidenceUsable = false;
-  }
+  else if (seedCfg?.requireContentFreshness && !contentFreshness?.usable && !contentFreshnessPending) status = 'COVERAGE_DEGRADED';
   else if (
     seedCfg?.minSuccessRate != null
     && coverage
     && (coverage.completionRatio < seedCfg.minSuccessRate || coverage.status === 'degraded')
-  ) {
-    status = 'COVERAGE_DEGRADED';
-    containmentEvidenceUsable = coverageCompletionRatioUsable;
-  }
+  ) status = 'COVERAGE_DEGRADED';
   else if (
     coverage
     // The producer owns the market completion floor. A failed retailer can be
@@ -2972,11 +2941,7 @@ function classifyKey(name, redisKey, opts, ctx) {
   // The opt-in signal is contentAge being non-null in seed-meta (presence of
   // meta.maxContentAgeMin); legacy seeders without it skip this branch.
   // 2026-05-04 health-readiness plan, Sprint 1.
-  else if (contentAge && contentAge.contentStale) {
-    status = 'STALE_CONTENT';
-    containmentEvidenceUsable = contentAge.contentAgeMin !== null
-      && contentAge.contentAgeMin >= 0;
-  }
+  else if (contentAge && contentAge.contentStale) status = 'STALE_CONTENT';
   // Shares STALE_CONTENT with the newestItemAt branch above: both mean "the
   // producer is healthy and correctly sized, but the data itself is older than
   // its content budget". Here the stale unit is a country rather than the
@@ -3116,10 +3081,28 @@ function classifyKey(name, redisKey, opts, ctx) {
       entry.lastSynthesisFailureCode = synthesisFailure.lastSynthesisFailureCode;
     }
   }
+  // Diagnostic precedence must not skip a reader requirement: every required
+  // proof is checked here, even when an earlier stale/error verdict won.
   return attachContainmentEvidence(
     entry,
     hasData ? metaCount : null,
-    containmentEvidenceUsable,
+    Number.isFinite(seedAge) && seedAge >= 0
+      && (seedCfg?.requiredRedistributionPolicyVersion == null
+        || redistributionPolicyVersion === seedCfg.requiredRedistributionPolicyVersion)
+      && !decisionGroups?.coverageFailureInvalidReason
+      && (seedCfg?.minRankableRecordCount == null || rankableRecordCount != null)
+      && (!seedCfg?.requireVulnerabilityCoverage || (coverage
+        && Object.keys(seedCfg.requireVulnerabilityCoverage)
+          .every((field) => Number.isFinite(coverage[field]))))
+      && (!seedCfg?.minPoolCounts || poolCounts !== null)
+      && (!seedCfg?.requireCoverage || coverage !== null)
+      && (!coverage || seedCfg?.minSuccessRate == null || coverageCompletionRatioUsable)
+      && (!seedCfg?.requireContentFreshness || contentFreshness?.usable || contentFreshnessPending)
+      && (!contentAge || (Number.isFinite(contentAge.contentAgeMin) && contentAge.contentAgeMin >= 0))
+      && resilienceCacheState?.ok !== false
+      // These records include missing/stale input placeholders. A positive
+      // count alone cannot prove that the reader serves a usable index.
+      && !seedCfg?.enforceInputFreshUntil,
   );
 }
 
@@ -3196,7 +3179,6 @@ const CONTAINMENT_ELIGIBLE_STATUSES = new Set([
   'STALE_CONTENT',
   'COVERAGE_PARTIAL',
   'COVERAGE_DEGRADED',
-  'CHINA_DEGRADED',
 ]);
 
 function isContainedHealthWarning(entry, now = Date.now()) {
@@ -3679,14 +3661,15 @@ function buildFailureLogPersistencePlan({
     commands.push(
       ['LPUSH', 'health:failure-log', JSON.stringify(entry)],
       ['LTRIM', 'health:failure-log', 0, 49],
-      ['EXPIRE', 'health:failure-log', 86400 * 7],
     );
   }
 
-  // Keep the active signature alive even when it has not changed. Otherwise a
-  // continuous incident lasting longer than 24 hours is appended again when
-  // the dedupe key expires, despite there being no recovery or transition.
-  commands.push(['SET', 'health:failure-log-sig', signature, 'EX', 86400]);
+  // Refresh history and its signature together while an incident is active:
+  // neither duplicate it after 24h nor lose its only history entry after 7d.
+  commands.push(
+    ['EXPIRE', 'health:failure-log', 86400 * 7],
+    ['SET', 'health:failure-log-sig', signature, 'EX', 86400],
+  );
 
   return {
     action: 'persist',
