@@ -922,6 +922,22 @@ jobs:
           path: test-results/
           if-no-files-found: ignore
           retention-days: 14
+      # Named explicitly for the same reason as the gates above: nothing runs
+      # the e2e/ glob, so an unnamed spec would never execute. It reads the same
+      # public/pro/ bytes the build step above produced.
+      - name: Run /pro hero native-animation gate
+        id: pro-hero
+        run: npm run test:e2e:pro-hero
+      # Its own upload: Playwright clears test-results/ when the next run
+      # starts, so a later step would delete this gate's failure trace.
+      - name: Upload /pro hero animation Playwright artifacts
+        if: ${{ !cancelled() && steps.pro-hero.outcome != 'skipped' }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: playwright-pro-hero-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 14
       # WebMCP is exposed only by an enabled Chrome milestone. Keep this probe
       # separate from the bundled-Chromium smoke so an unavailable or stale
       # system Chrome fails the required PR job instead of silently skipping.
