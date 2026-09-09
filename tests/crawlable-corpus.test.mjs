@@ -5665,6 +5665,16 @@ describe('country recent developments', () => {
   });
 
   it('rejects literal markdown emphasis and ISO brief-heading leaks (#7738)', () => {
+    for (const tag of ['h3', 'p']) {
+      assert.throws(() => assertCountryBriefPresentation({
+        pagePath: '/countries/norway/',
+        html: `<main><${tag}>WHAT THIS MEANS FOR NO: Shipping risks remain [1].</${tag}></main>`,
+      }), /heading leaks/);
+      assert.doesNotThrow(() => assertCountryBriefPresentation({
+        pagePath: '/countries/dr-congo/',
+        html: `<main><${tag}>What this means for DR Congo: Shipping risks remain [1].</${tag}></main>`,
+      }));
+    }
     assert.throws(
       () => assertCountryBriefPresentation({
         pagePath: '/countries/norway/',
@@ -7149,4 +7159,36 @@ it('checks rendered brief claims as visible text after HTML escaping', () => {
   const html = '<main><div data-intel-brief><p>The Greece level of &#39;Tomb Raider: Legacy Of Atlantis&#39; was shown. [1]</p></div></main>';
   assert.doesNotThrow(() => assertCountryBriefPresentation({ pagePath: '/countries/greece/', html, sources }));
   assert.throws(() => assertCountryBriefPresentation({ pagePath: '/countries/greece/', html: html.replace('Atlantis', 'Olympus'), sources }), /unsupported citation/);
+});
+
+it('retains API country-name aliases through the final country page renderer', async () => {
+  const { renderSourceBoundCountryBrief } = await import('../server/worldmonitor/intelligence/v1/get-country-intel-brief.ts');
+  const { displayNameForIso2 } = await import('../server/_shared/country-normalize.ts');
+  const data = await loadCorpusData({ rootDir: repoRoot });
+  const capturedAt = new Date(data.livePulse.capturedAt).toISOString();
+  for (const [code, name] of [['HK', 'Hong Kong'], ['CD', 'DR Congo']]) {
+    const country = data.countries.find((entry) => entry.code === code);
+    const sources = [
+      { title: `${name} announces new trade rules`, source: 'Reuters', url: 'https://www.reuters.com/world/trade', publishedAt: capturedAt },
+      { title: `${name} reviews trade rules`, source: 'BBC News', url: 'https://www.bbc.com/news/trade', publishedAt: capturedAt },
+    ];
+    const text = renderSourceBoundCountryBrief(JSON.stringify({
+      situation: [{ text: `${name} announces new trade rules.`, source: 1 }],
+      implications: [], risks: [], outlook: [], watch: [],
+    }), sources, displayNameForIso2(code));
+    assert.ok(text);
+    const livePulse = structuredClone(data.livePulse);
+    livePulse.countries[code].developments = { headlines: sources, brief: { text, sources, model: 'fixture', generatedAt: capturedAt }, timeline: [] };
+    const html = renderCountryPage({
+      country, baseUrl: 'https://www.worldmonitor.app', capturedAt: data.resilience.capturedAt,
+      lastmod: data.lastmod.countries, methodologyFormula: data.resilience.methodologyFormula,
+      rankedCount: data.countries.filter((entry) => entry.rank != null).length,
+      snapshotNote: data.resilience.snapshotNote, snapshotPath: data.sources.resilienceSnapshot,
+      bbox: data.countryBboxByCode.get(code), livePulse,
+      ciiEntry: data.ciiRanking.byCode.get(code),
+    });
+    assert.ok(html.includes('data-intel-brief'), `${code} must retain the API brief`);
+    assert.ok(html.includes(`<h3>What this means for ${name}</h3>`), `${code} must use the page name`);
+    assert.ok(html.includes(`${name} announces new trade rules. [1]`));
+  }
 });
