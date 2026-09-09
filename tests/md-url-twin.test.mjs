@@ -730,3 +730,14 @@ describe('api/md-twin.ts', () => {
     );
   });
 });
+
+it('does not publish script contents with noncanonical closing tags', () => {
+  for (const closing of ['script ', 'script foo="bar"', 'script/']) {
+    assert.equal(htmlToMarkdown(`<main><script>SECRET SCRIPT</${closing}><p>Public text</p></main>`, 'Title'), '# Title\n\nPublic text');
+  }
+});
+
+it('does not treat NBSP as an HTML script end-tag delimiter', () => {
+  const html = '<main><script>const marker="</script\u00a0>";PRIVATE_SCRIPT()</script><p>Public text</p></main>';
+  assert.equal(htmlToMarkdown(html, 'Title'), '# Title\n\nPublic text');
+});

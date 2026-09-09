@@ -100,9 +100,9 @@ export function htmlToMarkdown(html: string, fallbackTitle: string): string {
   const title = decodeHtmlEntities(stripTags(titleMatch?.[1] ?? '')) || fallbackTitle;
 
   const body = html
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script(?:[\t\n\f\r ][^>]*|\/[^>]*)?>/gi, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style(?:[\t\n\f\r ][^>]*|\/[^>]*)?>/gi, ' ')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript(?:[\t\n\f\r ][^>]*|\/[^>]*)?>/gi, ' ');
 
   const main = body.match(/<main\b[\s\S]*?<\/main>/i)?.[0] ?? body;
 
