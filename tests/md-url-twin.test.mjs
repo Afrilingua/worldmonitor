@@ -44,6 +44,17 @@ it('removes only tracking query parameters and separates block links from follow
   assert.doesNotMatch(markdown, /utm_/);
 });
 
+it('preserves functional queries and fragments encoded as numeric HTML entities', () => {
+  for (const separator of ['&#38;', '&#x26;', '&#X26;', '&amp;']) {
+    for (const query of [`q=1${separator}utm_source=a${separator}page=2`, `utm_source=a${separator}q=1${separator}page=2`]) {
+      assert.equal(htmlToMarkdown(`<a href="/x?${query}&#35;results">Results</a>`, 'Title'),
+        '# Title\n\n[Results](/x?q=1&page=2#results)');
+    }
+  }
+  assert.equal(htmlToMarkdown('<a href="/x?q=&amp;lt;value&amp;gt;&amp;utm_source=a">Results</a>', 'Title'),
+    '# Title\n\n[Results](/x?q=&lt;value&gt;)');
+});
+
 // stripTags no longer decodes, so the <title> path carries its own
 // decodeHtmlEntities() call. Dropping that wrapper is an easy refactor mistake
 // and every other <title> fixture in this file is plain text, so pin it here.

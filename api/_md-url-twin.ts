@@ -108,10 +108,10 @@ function withoutTrackingParams(href: string): string {
   const hash = hashIndex < 0 ? '' : href.slice(hashIndex);
   const queryIndex = pathAndQuery.indexOf('?');
   if (queryIndex < 0) return href;
-  // Preserve functional parameters and their encoding, including HTML-escaped separators.
-  const params = pathAndQuery.slice(queryIndex + 1).split(/&(?:amp;)?/i)
+  // Preserve functional parameters and their URL encoding.
+  const params = pathAndQuery.slice(queryIndex + 1).split('&')
     .filter(param => !/^utm_/i.test(new URLSearchParams(param).keys().next().value ?? ''));
-  const query = params.filter(Boolean).join('&amp;');
+  const query = params.join('&');
   return `${pathAndQuery.slice(0, queryIndex)}${query ? `?${query}` : ''}${hash}`;
 }
 
@@ -137,7 +137,11 @@ export function htmlToMarkdown(html: string, fallbackTitle: string): string {
       /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
       (_m, href: string, inner: string) => {
         const label = stripTags(inner) || href;
-        const link = `[${label}](${withoutTrackingParams(href)})`;
+        // Parse decoded separators, then protect the URL from tag stripping and
+        // the document's final entity pass so each reference is decoded once.
+        const target = withoutTrackingParams(decodeHtmlEntities(href))
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const link = `[${label}](${target})`;
         return /<div\b/i.test(inner) ? `\n\n${link}\n\n` : link;
       },
     )
