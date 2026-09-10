@@ -3178,7 +3178,7 @@ function isContainedHealthWarning(entry, evidence, now = Date.now()) {
   return healthStatusBucket(entry, now) === 'warn'
     && CONTAINMENT_ELIGIBLE_STATUSES.has(entry?.status)
     && Number.isFinite(entry?.records)
-    && entry.records > 0
+    && (entry.records > 0 || (entry.records === 0 && evidence?.confirmedEmpty === true))
     && evidence?.status === entry.status
     && evidence.records === entry.records
     && evidence.usable === true
@@ -3231,17 +3231,34 @@ function composeContractsFinderHealth(entry, meta, snapshot, readFailed, now) {
   const attempt = Date.parse(meta?.lastAttemptAt || '');
   const validEpisode = success > 0 && success <= first && first <= attempt && attempt <= now
     && meta.fetchedAt === success && meta.consecutiveFailures === 1;
-  const aligned = source?.state === 'stale' && meta?.sourceState === 'stale'
+  const aggregateFresh = Number.isFinite(snapshot.fetchedAt) && snapshot.fetchedAt > 0
+    && snapshot.fetchedAt <= now && now < snapshot.fetchedAt + 180 * 60_000;
+  const confirmedEmpty = source?.confirmedEmpty === true && meta?.confirmedEmpty === true
+    && sourceRows.length === 0 && source.recordCount === 0 && meta.recordCount === 0
+    && snapshot.sourceStatuses.filter((status) => status?.source === 'contracts-finder').length === 1
+    && snapshot.sourceStatuses.every((status) => status && typeof status.source === 'string' && typeof status.state === 'string')
+    && ['available', 'partial', 'empty'].includes(snapshot.availability)
+    && aggregateFresh && snapshot.tenders.every((tender) => tender
+      && [tender.id, tender.title, tender.source].every((value) => typeof value === 'string' && value.trim())
+      && [tender.countryCode, tender.region, tender.status, tender.buyer, tender.description,
+        tender.publishedAt, tender.updatedAt, tender.deadline, tender.money?.currency]
+        .every((value) => value === undefined || typeof value === 'string')
+      && [tender.categoryCodes, tender.sectors].every((values) => Array.isArray(values)
+        && values.every((value) => typeof value === 'string')));
+  const aligned = (confirmedEmpty ? source.state === 'error' && meta.sourceState === 'error'
+    : source?.state === 'stale' && meta?.sourceState === 'stale')
     && source.lastSuccessfulAt === meta.lastSuccessfulAt && source.fetchedAt === meta.lastAttemptAt
     && source.firstFailureAt === meta.firstFailureAt && source.consecutiveFailures === meta.consecutiveFailures
     && source.recordCount === records.length && meta.recordCount === records.length
     && sourceRows.length === records.length && new Set(records.map((tender) => tender.id)).size === records.length;
-  const deadline = validEpisode && records.length > 0
+  const deadline = validEpisode && (records.length > 0 || confirmedEmpty)
     ? Math.min(first + 90 * 60_000, success + SEED_META.globalTendersContractsFinder.maxStaleMin * 60_000,
+      ...(confirmedEmpty ? [snapshot.fetchedAt + 180 * 60_000] : []),
       ...records.map((tender) => Date.parse(tender.deadline))) : NaN;
   if (entry.status === 'SEED_ERROR' && aligned && now < deadline) {
     entry.containmentUntil = new Date(deadline).toISOString();
     evidence.usable = true;
+    if (confirmedEmpty) evidence.confirmedEmpty = true;
   }
   evidence.status = entry.status;
   evidence.records = entry.records;
