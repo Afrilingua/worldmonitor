@@ -1157,6 +1157,31 @@ describe('api/mcp.ts — resources capability + stability + auth-symmetry', () =
     assert.equal(payload.stale, true, 'preview risk data must use the preview freshness verdict');
   });
 
+  it('withholds cached corridor prose through tools and resource reads', async () => {
+    const capture = JSON.parse(readFileSync(resolve(__dirname, 'fixtures/chokepoints-routing-advice-2026-09-10.json'), 'utf8'));
+    const captured = capture.body.chokepoints.find(cp => cp.id === 'hormuz_strait').transitSummary;
+    for (const advice of [captured.riskReportAction, undefined, null, { route: 'Suez', cost: '$50-80K' }]) {
+      const summary = { ...captured, todayTotal: null, riskSummary: advice, riskReportAction: advice };
+      installMockFetch({ keyOverrides: {
+        'supply_chain:transit-summaries:v1': { summaries: { hormuz_strait: summary }, fetchedAt: capture.retrievedAt },
+      } });
+      for (const request of [
+        callBody('get_chokepoint_status', { chokepoint: 'hormuz_strait' }),
+        readBody('worldmonitor://chokepoints/strait-of-hormuz/status'),
+      ]) {
+        const response = await handler(envKeyReq(request));
+        const body = await response.json();
+        assert.equal(body.error, undefined);
+        const text = body.result.contents?.[0]?.text ?? body.result.content?.[0]?.text;
+        const payload = JSON.parse(text);
+        const served = payload.data['transit-summaries'].summaries.hormuz_strait;
+        assert.deepEqual(served, { ...summary, riskSummary: '', riskReportAction: '' });
+        assert.equal(payload.data['transit-summaries'].fetchedAt, capture.retrievedAt);
+        assert.doesNotMatch(text, /REROUTE|50-80K|Salalah/);
+      }
+    }
+  });
+
   it('resources/read worldmonitor://chokepoints/suez/status returns the transit-summary envelope with cached_at + stale', async () => {
     const res = await handler(envKeyReq(readBody('worldmonitor://chokepoints/suez/status')));
     assert.equal(res.status, 200);
