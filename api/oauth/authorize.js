@@ -4,6 +4,7 @@ import { getClientIp } from '../_rate-limit.js';
 import { timingSafeIncludes, sha256Hex } from '../_crypto.js';
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
+import { checkBootstrapUserApiKeyRateLimit, validateBootstrapUserApiKey } from '../_user-api-key.js';
 
 export const config = { runtime: 'edge' };
 
@@ -322,7 +323,17 @@ export default async function handler(req) {
 
     // Validate API key
     const validKeys = (process.env.WORLDMONITOR_VALID_KEYS || '').split(',').filter(Boolean);
-    if (!await timingSafeIncludes(api_key, validKeys)) {
+    const enterpriseKey = await timingSafeIncludes(api_key, validKeys);
+    let userKey = null;
+    if (!enterpriseKey && api_key.startsWith('wm_')) {
+      const guard = await checkBootstrapUserApiKeyRateLimit(req);
+      if (!guard.ok) return new Response(guard.error, { status: guard.status, headers: guard.headers });
+      userKey = await validateBootstrapUserApiKey(api_key);
+      if (!userKey.ok && userKey.status === 503) {
+        return new Response(userKey.error, { status: 503, headers: userKey.headers });
+      }
+    }
+    if (!enterpriseKey && !userKey?.ok) {
       // Generate and store a fresh nonce; fail closed if storage is unavailable
       const retryNonce = crypto.randomUUID();
       const retryNonceStored = await redisSet(`oauth:nonce:${retryNonce}`, { client_id, redirect_uri, code_challenge, state, created_at: Date.now() }, 600);
@@ -344,6 +355,7 @@ export default async function handler(req) {
     // Issue authorization code — all fields sourced from nonceData
     const code = crypto.randomUUID();
     const codeData = {
+      ...(!enterpriseKey ? { kind: 'user_key' } : {}),
       client_id,
       redirect_uri,
       code_challenge,
