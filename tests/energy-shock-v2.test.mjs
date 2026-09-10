@@ -1108,3 +1108,35 @@ describe('observed oil imports through handler and Decision brief', () => {
     assert.equal((await computeShock({ ...request, fuelMode: 'gas' })).assessment, 'gas cache retained');
   });
 });
+
+
+describe('bilateral Gulf share excludes World totals', () => {
+  for (const partnerCode of [0, '0', '000', '0000']) {
+    it(`does not treat World ${partnerCode} as bilateral evidence`, () => {
+      assert.deepEqual(computeGulfShare([{ partnerCode, tradeValueUsd: 100 }]), { share: 0, hasData: false });
+    });
+  }
+  it('excludes aggregate totals from mixed bilateral denominators', () => {
+    assert.deepEqual(computeGulfShare([{ partnerCode: '000', tradeValueUsd: 200 }, { partnerCode: '682', tradeValueUsd: 100 }, { partnerCode: '840', tradeValueUsd: 100 }]), { share: 0.5, hasData: true });
+    assert.deepEqual(computeGulfShare([{ partnerCode: '840', tradeValueUsd: 100 }]), { share: 0, hasData: true });
+  });
+  it('uses an explicit positive proxy for producer-shaped World data and ignores v5 caches', async (t) => {
+    t.after(restoreEnergyShockEnvironment);
+    installEnergyShockRedis({ ...liveChokepointSeed(),
+      'energy:jodi-oil:v1:CN': { crude: { importsKbd: 100 }, diesel: { demandKbd: 80 } },
+      'comtrade:flows:156:2709': [{ reporterCode: '156', partnerCode: '000', partnerName: 'World', cmdCode: '2709', tradeValueUsd: 100 }],
+      'energy:shock:v5:CN:hormuz_strait:50:l:oil': { dataAvailable: true, comtradeCoverage: true, crudeLossKbd: 0 },
+      'energy:shock:v5:CN:hormuz_strait:50:l:both': { dataAvailable: true, comtradeCoverage: true, crudeLossKbd: 0 },
+    });
+    const request = { countryCode: 'CN', chokepointId: 'hormuz_strait', disruptionPct: 50 };
+    const response = await computeShock({ ...request, fuelMode: 'oil' });
+    assert.equal(response.comtradeCoverage, false);
+    assert.equal(response.crudeLossKbd, 20);
+    assert.ok(response.limitations.some(l => /proxied at 40%/.test(l)));
+    const brief = buildDecisionBrief({ countryCode: 'CN', countryName: 'China', chokepointId: 'hormuz_strait', fuelMode: 'oil', baselinePct: 50, comparisonPct: 50 }, [{ response, retrievedAt: '2026-09-10T10:00:00Z' }, { response, retrievedAt: '2026-09-10T10:00:00Z' }]);
+    assert.equal(brief.evidence.find(e => e.id === 'baseline-route').value, null);
+    assert.match(brief.unknowns.join(' '), /fixed proxy/);
+    assert.equal(brief.results[0].loss, 20);
+    assert.equal((await computeShock({ ...request, fuelMode: 'both' })).crudeLossKbd, 20);
+  });
+});

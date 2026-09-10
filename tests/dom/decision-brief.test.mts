@@ -4,6 +4,14 @@ import { createDecisionBriefOutput, renderDecisionBrief } from '@/components/Cou
 import { buildDecisionBrief } from '@/utils/decision-brief';
 import type { DecisionBriefCapture, DecisionBriefSelection } from '@/types/decision-brief';
 
+import { computeEnergyShockScenario } from '../../server/worldmonitor/intelligence/v1/compute-energy-shock';
+
+const redis = vi.hoisted(() => new Map<string, unknown>());
+vi.mock('../../server/_shared/redis', () => ({
+  getCachedJson: async (key: string) => redis.get(key) ?? null,
+  setCachedJson: async (key: string, value: unknown) => { redis.set(key, value); },
+}));
+
 beforeAll(initTestI18n);
 
 const selection: DecisionBriefSelection = { countryCode: 'DE', countryName: 'Germany', chokepointId: 'hormuz_strait', fuelMode: 'gas', baselinePct: 50, comparisonPct: 100 };
@@ -39,6 +47,39 @@ describe('decision brief preview and exports', () => {
     expect(doc.querySelector('.cdp-decision-action')!.textContent).toBe(data.action.text);
     expect(doc.body.textContent).toContain(data.action.constraint);
     expect(doc.body.textContent).toContain(data.action.trigger);
+  });
+
+  for (const missing of [true, false]) it(`exports real oil handler state with missing imports=${missing}`, async () => {
+    redis.clear();
+    redis.set('energy:chokepoint-flows:v1', { hormuz_strait: { flowRatio: 1 } });
+    redis.set('energy:jodi-oil:v1:DE', { crude: { importsKbd: missing ? null : 100 }, diesel: { demandKbd: 80 } });
+    redis.set('comtrade:flows:276:2709', [{ partnerCode: '000', tradeValueUsd: 100 }]);
+    const oilSelection = { ...selection, fuelMode: 'oil' as const };
+    const captures = await Promise.all([50, 100].map(async disruptionPct => ({
+      retrievedAt: '2026-09-10T10:00:00Z',
+      response: await computeEnergyShockScenario({} as never, { countryCode: 'DE', chokepointId: 'hormuz_strait', disruptionPct, fuelMode: 'oil' }),
+    }))) as [DecisionBriefCapture, DecisionBriefCapture];
+    const data = buildDecisionBrief(oilSelection, captures);
+    expect(data.results.map(r => r.loss)).toEqual(missing ? [null, null] : [20, 40]);
+    expect(data.evidence.find(e => e.id === 'baseline-route')!.value).toBeNull();
+    expect(data.unknowns.join(' ')).toContain('fixed proxy');
+    expect(data.action.text).toContain(missing ? 'Recover the oil import' : "Compare Germany's");
+    const blobs: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(blob => { blobs.push(blob as Blob); return 'blob:test'; });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const root = createDecisionBriefOutput({ code: 'DE', name: 'Germany' }, new AbortController().signal, async () => data, () => {});
+    document.body.append(root);
+    const fuel = root.querySelector('select')!;
+    fuel.value = 'oil'; fuel.dispatchEvent(new Event('change'));
+    click(root, 'Capture / refresh both');
+    await vi.waitFor(() => expect(root.querySelector('.cdp-decision-action')?.textContent).toBe(data.action.text));
+    expect(root.textContent).toContain('fixed proxy');
+    click(root, 'Download decision HTML'); click(root, 'Download decision JSON');
+    const exported = JSON.parse(await blobs[1]!.text());
+    expect(exported).toEqual(data);
+    const doc = new DOMParser().parseFromString(await blobs[0]!.text(), 'text/html');
+    expect(JSON.parse(doc.querySelector('#decision-brief-snapshot')!.textContent!)).toEqual(exported);
+    expect(doc.querySelector('.cdp-decision-paper')!.textContent).toBe(root.querySelector('.cdp-decision-paper')!.textContent);
   });
 
   it('ignores late responses after selection changes, close and panel abort', async () => {
