@@ -1789,6 +1789,7 @@ describe('crawlable corpus generator', () => {
       'scripts/source-catalog-identity.mjs',
       'shared/source-geography.json',
       'shared/publisher-families.js',
+      'shared/crawlable-crises.json',
       'src/config/feeds.ts',
       'server/worldmonitor/news/v1/_feeds.ts',
     ]);
@@ -4966,8 +4967,9 @@ describe('crawlable corpus generator', () => {
         originLastmod: gitFileLastmod(repoRoot, data.sources.sourceOrigin),
         catalogInputLastmods: data.sources.sourceCatalogInputs.map((path) => gitFileLastmod(repoRoot, path)),
         sharedTemplateLastmod: gitFileLastmod(repoRoot, data.sources.sharedPageTemplate),
+        snapshotDate: data.livePulse.capturedAt,
       }),
-      'source-page lastmod must include manifest, renderer, origin, catalog-input, and shared-template changes',
+      'source-page lastmod must include catalog inputs, templates and the pulse snapshot',
     );
     assert.equal(
       data.lastmod.comparisons,
@@ -5265,6 +5267,7 @@ describe('live-pulse snapshot injection (#7533)', () => {
       let data = await loadCorpusData({ rootDir: repoRoot, livePulseSnapshotPath: join(pulseDir, `crawlable-live-pulse-${today}.json`) });
       const latestOther = [
         data.resilience.capturedAt,
+        data.lastmod.sources,
         gitFileLastmod(repoRoot, data.sources.countryRegions),
         gitFileLastmod(repoRoot, data.sources.microstateTerritories),
         ...CHOKEPOINT_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(repoRoot, path)),
@@ -5295,6 +5298,7 @@ describe('live-pulse snapshot injection (#7533)', () => {
           baseUrl: 'https://www.worldmonitor.app',
           livePulseSnapshotPath: join(pulseDir, `crawlable-live-pulse-${pulseDate}.json`),
         });
+        assert.equal(data.lastmod.sources, pulseDate, 'a newer pulse must advance the sources catalog clock');
         const pageFor = (route) => `${route.slice(1)}index.html`;
         for (const route of [manifest.sections.comparisons.index, ...manifest.sections.comparisons.routes]) {
           const document = htmlDocument(read(outDir, pageFor(route)), `https://www.worldmonitor.app${route}`);
@@ -5371,6 +5375,7 @@ describe('live-pulse snapshot injection (#7533)', () => {
               originLastmod: gitFileLastmod(repoRoot, data.sources.sourceOrigin),
               catalogInputLastmods: data.sources.sourceCatalogInputs.map((path) => gitFileLastmod(repoRoot, path)),
               sharedTemplateLastmod: gitFileLastmod(repoRoot, data.sources.sharedPageTemplate),
+              snapshotDate: data.livePulse.capturedAt,
             }),
             pageFor(manifest.sections.sources.index),
           ]],
