@@ -80,6 +80,8 @@ Failed refreshes retain only validated open Contracts Finder records less than 1
 
 `globalTendersContractsFinder` keeps `SEED_ERROR`, the warning count, source error, attempt time, success time, and consecutive failure count visible. Availability can contain the first failed refresh only after reading and checking its records in the canonical tender snapshot. `containmentUntil` is the earliest of 90 minutes after the first failure, 180 minutes after source success, or a retained tender's closing time. The second failed refresh, missing or unreadable canonical data, malformed records, inconsistent metadata, or an expired deadline cannot qualify. Full and compact verdict caches expire at the same deadline; this does not change other sources' health policy.
 
+A failed refresh after a verified empty success can also qualify. The producer records `confirmedEmpty` only when the prior canonical envelope has an explicit zero source count, no source rows, and recent source success evidence. Health requires matching canonical and seed metadata, a fresh usable aggregate, and the same first-failure limits. Its deadline also includes aggregate freshness. Zero records without this proof, or records removed by expiry or validation, cannot qualify. The source remains `error` with `SEED_ERROR`; containment does not report a successful refresh.
+
 ### BC active evacuation lists
 
 `canadaAlertsBcSource` uses successful active-list ingestion with a 45-minute freshness budget. BC orders remain active until their status changes or they are removed. Their event modification age is not an expiry rule. See [BC evacuation guidance](https://www2.gov.bc.ca/gov/content/safety/wildfire-status/partners/evacuation).
