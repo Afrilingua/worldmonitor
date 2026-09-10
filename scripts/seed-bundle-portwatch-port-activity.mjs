@@ -16,12 +16,12 @@
 //   2. Builder: DOCKERFILE, dockerfilePath: Dockerfile.seed-bundle-portwatch-port-activity
 //   3. Root directory: "" (empty) — avoids NIXPACKS auto-detection (see
 //      feedback_railway_dockerfile_autodetect_overrides_builder.md)
-//   4. Cron schedule: "0 */3 * * *" (eight times daily, UTC). Each run caps
+//   4. Cron schedule: "0 */12 * * *" (twice daily, UTC). Each run caps
 //      cold refreshes at 30 countries to stay inside the ArcGIS and container
-//      budgets. Eight slots per day let a complete 174-country sweep finish
-//      before daily upstream advances invalidate earlier batches, including
-//      slots reserved for critical countries. The interval gate prevents
-//      rapid-fire manual retriggers.
+//      budgets. Publish complete rolling coverage using validated country
+//      caches below the seven-day hard expiry, without requiring every country
+//      to match today's upstream date. This lets a sweep finish in about three
+//      days without quadrupling daily activity or proxy fallback work.
 //   5. Env vars (copy from existing seed services):
 //      UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN,
 //      PROXY_URL (for 429 fallback)
@@ -43,9 +43,9 @@ await runBundle('portwatch-port-activity', [
     script: 'seed-portwatch-port-activity.mjs',
     seedMetaKey: 'supply_chain:portwatch-ports',
     canonicalKey: 'supply_chain:portwatch-ports:v1:_countries',
-    // 3h interval gate matches the declared Railway cron and prevents
+    // 12h interval gate matches the declared Railway cron and prevents
     // rapid-fire manual retriggers.
-    intervalMs: 3 * HOUR,
+    intervalMs: 12 * HOUR,
     // 540s section timeout — full budget for the one section. Bundle
     // runner still SIGTERMs if the child hangs, and the seeder's
     // SIGTERM handler releases the lock + extends TTLs.

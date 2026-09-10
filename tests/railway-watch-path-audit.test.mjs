@@ -1507,7 +1507,7 @@ describe('critical ingestion Railway registry contract', () => {
     ['seed-bundle-market-backup', '*/5 * * * *'],
     ['seed-bundle-derived-signals', '*/5 * * * *'],
     ['seed-bundle-portwatch', '0 */1 * * *'],
-    ['seed-bundle-portwatch-port-activity', '0 */3 * * *'],
+    ['seed-bundle-portwatch-port-activity', '0 */12 * * *'],
   ]);
 
   // Closure coverage is DERIVED from the same predicate the audit uses to decide

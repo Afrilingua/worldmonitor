@@ -38,12 +38,12 @@ describe('standalone Railway cron service', () => {
     assert.match(dockerfileSrc, /COPY\s+shared\/\s+\.\/shared\//);
   });
 
-  it('declares the 3-hour recovery cadence and its required credentials', () => {
+  it('declares the 12-hour recovery cadence and its required credentials', () => {
     const registry = JSON.parse(readFileSync(resolve(root, 'scripts/railway-services.json'), 'utf8'));
     const service = registry.find((entry) => entry.service === 'seed-bundle-portwatch-port-activity');
-    assert.equal(service?.cronSchedule, '0 */3 * * *');
-    assert.match(bundleSrc, /intervalMs:\s*3\s*\*\s*HOUR/);
-    assert.equal(PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES, 3 * 60);
+    assert.equal(service?.cronSchedule, '0 */12 * * *');
+    assert.match(bundleSrc, /intervalMs:\s*12\s*\*\s*HOUR/);
+    assert.equal(PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES, 12 * 60);
     assert.deepEqual(service?.requiredEnv, [
       'UPSTASH_REDIS_REST_URL',
       'UPSTASH_REDIS_REST_TOKEN',
@@ -167,7 +167,7 @@ describe('proxyFetch signal propagation (runtime)', () => {
 });
 
 describe('complete PortWatch publication', () => {
-  it('rejects incomplete or stale coverage regardless of cap-mode volume', async () => {
+  it('accepts complete rolling coverage but rejects gaps, failures, and no upstream work', async () => {
     const { shouldAdvanceCanonicalForRun: advance } = await import('../scripts/seed-portwatch-port-activity.mjs');
     const complete = {
       countryCount: 174, referenceCountryCount: 174, upstreamContactCount: 174,
@@ -175,7 +175,8 @@ describe('complete PortWatch publication', () => {
     };
     assert.equal(advance(complete), true);
     assert.equal(advance({ ...complete, countryCount: 60, upstreamContactCount: 34, capTriggered: true }), false);
-    assert.equal(advance({ ...complete, upstreamContactCount: 30 }), false);
+    assert.equal(advance({ ...complete, upstreamContactCount: 30 }), true);
+    assert.equal(advance({ ...complete, upstreamContactCount: 0 }), false);
     assert.equal(advance({ ...complete, referenceCountryCount: 153 }), false);
     assert.equal(advance({ ...complete, coverage: { ...complete.coverage, complete: false } }), false);
     assert.equal(advance({ ...complete, coverage: { ...complete.coverage, refreshFailures: [{ iso2: 'US', code: 'timeout' }] } }), false);
@@ -395,6 +396,11 @@ describe('cold-fetch cap prevents 174-country cliff (WM 2026-05-13)', () => {
     // A payload without a numeric write timestamp cannot be age-checked, so it
     // must not be served as merely stale.
     assert.equal(classifyDeferredPayload({ iso2: 'US' }, 1_000).status, 'missing');
+    for (const ports of [undefined, [], [null], [[]], [{}], [{ portId: '' }]]) {
+      assert.equal(classifyDeferredPayload({ cacheWrittenAt: 0, ports }, 1_000).status, 'missing');
+    }
+    assert.equal(classifyDeferredPayload({ cacheWrittenAt: 0, ports: [], zeroActivity: true }, 1_000).status, 'stale');
+    assert.equal(classifyDeferredPayload({ cacheWrittenAt: 2_000, ports: [{ portId: 'US-1' }] }, 1_000).status, 'missing');
   });
 });
 
