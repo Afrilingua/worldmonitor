@@ -2688,6 +2688,9 @@ describe('crawlable corpus generator', () => {
       const topicWindow = new Window();
       try {
         const requiredPaths = [
+          ...corpusData.chokepoints.map(({ slug }) => [
+            `/chokepoints/${slug}/`, '/blog/posts/what-is-a-maritime-chokepoint/',
+          ]),
           ...Object.entries({
             'suez-canal': ['egypt'],
             'bab-el-mandeb': ['yemen', 'djibouti', 'eritrea'],

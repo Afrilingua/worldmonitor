@@ -88,6 +88,22 @@ function assertNoUnsupportedVendorPrice(post, vendor) {
 }
 
 describe('blog SEO and GEO corpus contract', () => {
+  it('links all thirteen waterways from the maritime explainer and the existing glossary entries', () => {
+    const article = posts.find((post) => post.file === 'what-is-a-maritime-chokepoint.md');
+    const routes = [
+      'strait-of-hormuz', 'strait-of-malacca', 'suez-canal', 'bab-el-mandeb',
+      'panama-canal', 'taiwan-strait', 'cape-of-good-hope', 'strait-of-gibraltar',
+      'bosporus-strait', 'korea-strait', 'dover-strait', 'kerch-strait', 'lombok-strait',
+    ];
+    for (const route of routes) {
+      const href = `https://www.worldmonitor.app/chokepoints/${route}/`;
+      assert.equal(article.body.split(`](${href})`).length - 1, 1, `maritime explainer links ${route} once`);
+    }
+    for (const slug of ['suez-canal', 'strait-of-malacca']) {
+      const term = GLOSSARY_TERMS.find((entry) => entry.slug === slug);
+      assert.equal(term.learnMore?.filter((link) => link.href === `https://www.worldmonitor.app/chokepoints/${slug}/`).length ?? 0, 1);
+    }
+  });
   it('connects the Hormuz glossary, energy article, and methodology to existing trackers and research', () => {
     const tracker = 'https://www.worldmonitor.app/chokepoints/strait-of-hormuz/';
     const report = RESEARCH_REPORTS.find((entry) => entry.focusChokepointId === 'hormuz_strait');
