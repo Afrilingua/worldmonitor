@@ -875,8 +875,6 @@ async function checkClientExists(deps: TokenHandlerDeps, clientId: string): Prom
 async function applyRateLimit(
   req: Request,
   grantType: string | null,
-  clientSecret: string | null,
-  clientId: string | null,
   ctx: WaitUntilCtx | undefined,
 ): Promise<TokenRateLimitDecision> {
   const rl = getRatelimit();
@@ -890,15 +888,8 @@ async function applyRateLimit(
     return { kind: 'degraded' };
   }
   try {
-    let rlKey: string;
-    if (grantType === 'client_credentials' && clientSecret) {
-      rlKey = `cred:${(await sha256Hex(clientSecret)).slice(0, 8)}`;
-    } else if (clientId) {
-      rlKey = `cid:${clientId}`;
-    } else {
-      rlKey = `ip:${getClientIp(req)}`;
-    }
-    const result = await rl.limit(rlKey);
+    // Unvalidated credentials and client IDs must not select their own abuse budget.
+    const result = await rl.limit(`ip:${getClientIp(req)}`);
     // @upstash/ratelimit v2 races Redis against an internal timeout and
     // RESOLVES `{ success: true, reason: 'timeout' }` rather than rejecting,
     // so a slow Redis is indistinguishable from a genuine allow unless we
@@ -944,7 +935,7 @@ export async function tokenHandler(req: Request, deps: TokenHandlerDeps): Promis
   const clientSecret = params.get('client_secret');
   const clientId = params.get('client_id');
 
-  const rateLimit = await applyRateLimit(req, grantType, clientSecret, clientId, deps.ctx);
+  const rateLimit = await applyRateLimit(req, grantType, deps.ctx);
   if (rateLimit.kind === 'limited') {
     emitOAuthTokenUsage(deps.ctx, req, rateLimit.response, startedAt, 'rate_limit_429');
     return rateLimit.response;
