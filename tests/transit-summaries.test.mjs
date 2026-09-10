@@ -395,6 +395,27 @@ describe('seedTransitSummaries (relay)', () => {
     assert.ok(checked >= 13, `expected every canonical chokepoint compared, got ${checked}`);
   });
 
+  it('withholds legacy corridor prose on restart while retaining structured risk and absent counts', async () => {
+    const capture = JSON.parse(readFileSync(resolve(root, 'tests/fixtures/chokepoints-routing-advice-2026-09-10.json'), 'utf8'));
+    const risk = capture.body.chokepoints.find(cp => cp.id === 'hormuz_strait').transitSummary;
+    const writes = [];
+    const seed = buildSeedTransitSummaries({
+      envelopeRead: async key => key === 'supply_chain:portwatch:v1'
+        ? { hormuz_strait: { history: [], wowChangePct: -26.7 } }
+        : { hormuz_strait: risk },
+      envelopeWrite: async (key, data) => { writes.push({ key, data }); return true; },
+      upstashSet: async () => {},
+    });
+    await seed();
+    const summary = writes.find(w => w.key === 'supply_chain:transit-summaries:v1').data.summaries.hormuz_strait;
+    assert.equal(summary.riskReportAction, '');
+    assert.equal(summary.riskSummary, '');
+    assert.equal(summary.riskLevel, 'critical');
+    assert.equal(summary.incidentCount7d, 628);
+    assert.equal(summary.todayTotal, null);
+    assert.equal(summary.dataAvailable, true);
+  });
+
   it('still publishes a real Panama disruptionPct of 0 from corridor risk', async () => {
     const fakePortwatch = {
       panama: { history: makeDays(40, 30, 0), wowChangePct: -10.1 },
