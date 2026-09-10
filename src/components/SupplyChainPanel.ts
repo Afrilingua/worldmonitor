@@ -938,8 +938,11 @@ export class SupplyChainPanel extends Panel {
     ).join(' \u00B7 ');
 
     const taglineParts = [durationStr, closurePctStr, costStr].filter(Boolean).join(' / ');
+    const mapSummary = tpl?.disruptionPct === 0
+      ? 'No physical route disruption is highlighted.'
+      : 'Map highlights disrupted routes.';
     const taglineHtml = taglineParts
-      ? `<div class="sc-scenario-tagline">Simulating ${escapeHtml(taglineParts)} on ${result.affectedChokepointIds.length} chokepoint${result.affectedChokepointIds.length === 1 ? '' : 's'}. Chokepoint card below shows projected score; map highlights disrupted routes.</div>`
+      ? `<div class="sc-scenario-tagline">Simulating ${escapeHtml(taglineParts)} on ${result.affectedChokepointIds.length} chokepoint${result.affectedChokepointIds.length === 1 ? '' : 's'}. Chokepoint card below shows projected score. ${mapSummary}</div>`
       : '';
 
     const coverage = result.coverage;
@@ -948,7 +951,7 @@ export class SupplyChainPanel extends Panel {
     const coverageText = !coverage || coverage.status === 'unknown'
       ? 'Unknown coverage: the country/sector manifest is unavailable. No broad exposure conclusion is supported.'
       : `${coverage.status === 'complete' ? 'Complete within seeded scope' : 'Partial coverage'}: ${count('evaluated')}/${records.length} country/sector records evaluated; ${count('missing')} missing; ${count('malformed')} malformed; ${count('not_seeded')} not seeded. ${records.filter(r => r.basis === 'flow_weighted').length} flow-weighted; ${records.filter(r => r.basis === 'country_route_fallback').length} geographic fallback; ${records.filter(r => r.rawImpact === 0).length} valid zero impacts.`;
-    const details = records.map(r => `<li>${escapeHtml(r.iso2)} / HS ${escapeHtml(r.hs2)}: ${escapeHtml(r.state.replace(/_/g, ' '))}${r.basis ? `, ${r.basis === 'flow_weighted' ? 'flow-weighted' : 'geographic fallback'}` : ''}${r.rawImpact !== undefined ? `, ${r.rawImpact.toFixed(2)} score units` : ''}. Cache date: ${escapeHtml(r.fetchedAt || 'unknown')}; trade observation date: unknown.</li>`).join('');
+
     setTrustedHtml(banner, trustedHtml([
       `<div class="sc-scenario-top">`,
       `<span class="sc-scenario-icon">\u26A0</span>`,
@@ -960,9 +963,17 @@ export class SupplyChainPanel extends Panel {
       taglineHtml,
       `<p>Country scope: ${escapeHtml(result.scopedIso2 || 'All seeded countries')}. Raw impact is a modeled relative score, not currency or lost trade. Duration does not change the score.</p>`,
       `<p class="sc-scenario-coverage">${escapeHtml(coverageText)}</p>`,
-      `<details><summary>Country/sector evidence (${records.length})</summary><ul style="max-height:220px;overflow:auto">${details}</ul></details>`,
+      `<details><summary>Country/sector evidence (${records.length})</summary><ul style="max-height:220px;overflow:auto"></ul></details>`,
       `<button class="sc-scenario-export">Download scenario JSON</button>`,
     ].join(''), "legacy direct innerHTML migration"));
+    const evidenceDetails = banner.querySelector('details')!;
+    evidenceDetails.addEventListener('toggle', () => {
+      const list = evidenceDetails.querySelector('ul')!;
+      if (evidenceDetails.open && !list.childElementCount) {
+        const details = records.map(r => `<li>${escapeHtml(r.iso2)} / HS ${escapeHtml(r.hs2)}: ${escapeHtml(r.state.replace(/_/g, ' '))}${r.basis ? `, ${r.basis === 'flow_weighted' ? 'flow-weighted' : 'geographic fallback'}` : ''}${r.rawImpact !== undefined ? `, ${r.rawImpact.toFixed(2)} score units` : ''}. Cache date: ${escapeHtml(r.fetchedAt || 'unknown')}; trade observation date: unknown.</li>`).join('');
+        setTrustedHtml(list, trustedHtml(details, 'scenario evidence requested by user'));
+      }
+    });
     banner.querySelector('.sc-scenario-export')!.addEventListener('click', () => {
       const exported = { scenarioId, result, units: 'relative score units, not currency or lost trade', durationBasis: 'descriptive only', observationDate: 'unknown', source: 'HS2 chokepoint exposure model; flow_weighted uses recorded Comtrade shares with modeled routes; country_route_fallback uses geography' };
       const url = URL.createObjectURL(new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' }));

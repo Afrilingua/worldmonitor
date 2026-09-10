@@ -69,6 +69,26 @@ describe('SupplyChainPanel scenario controls', () => {
     expect(select().value).toBe('JP');
   });
 
+  it('defers broad evidence rows until expanded and exports every captured record', async () => {
+    const broad = result();
+    broad.coverage.records = Array.from({ length: 3349 }, (_, i) => ({ ...broad.coverage.records[0]!, hs2: String(i) }));
+    panel.showScenarioSummary('hormuz-tanker-blockade', broad);
+    await settle();
+    const details = panel.getElement().querySelector<HTMLDetailsElement>('.sc-scenario-banner details')!;
+    expect(details.querySelectorAll('li')).toHaveLength(0);
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+    expect(details.querySelectorAll('li')).toHaveLength(3349);
+    let exported: Blob | undefined;
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(blob => { exported = blob as Blob; return 'blob:fixture'; });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    panel.getElement().querySelector<HTMLButtonElement>('.sc-scenario-export')!.click();
+    expect(JSON.parse(await exported!.text()).result.coverage.records).toHaveLength(3349);
+    panel.updateShippingRates({ rates: [] } as never); await settle();
+    expect(panel.getElement().querySelectorAll('.sc-scenario-banner li')).toHaveLength(0);
+  });
+
   it('keeps default severity, PRO gating and retry behavior', async () => {
     expect(severity().value).toBe('100');
     mocks.run.mockRejectedValueOnce(new Error('queue unavailable'));
