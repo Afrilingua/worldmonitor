@@ -3340,6 +3340,46 @@ describe('quantified cross-Strait activity (#5575)', () => {
     assert.equal(clock, 20_000);
   });
 
+  it('does not retry a buffered MND proxy body failure as a direct header failure', async () => {
+    const direct: string[] = [];
+    const proxied: string[] = [];
+    const list = mndListWithCount(MND_MAX_DETAIL_REQUESTS_PER_RUN);
+    const snapshot = await fetchCrossStraitActivitySnapshot({
+      now: Date.parse(retrievedAt), proxyUrl: '', mndProxyUrl: 'https://proxy.test',
+      sleepFn: async () => {},
+      fetchFn: async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.includes('mod.go.jp')) return new Response(usableJapanEnglishIndex);
+        direct.push(url);
+        throw new TypeError('fetch failed');
+      },
+      proxyRequestFn: (url, config, options) => {
+        proxied.push(url);
+        return proxyFetch(url, config, {
+          ...options,
+          connectTunnel: async () => ({ socket: {}, destroy: () => {} }),
+          requestFn: (_options, onResponse) => Object.assign(new EventEmitter(), {
+            end() {
+              const body = Object.assign(new PassThrough(), { headers: {}, statusCode: 200 });
+              onResponse(body);
+              if (url.includes('plaactlist')) body.end(list);
+              else body.destroy(new Error('response stream reset'));
+            },
+          }),
+        });
+      },
+    });
+    const mnd = snapshot.sources.find(source => source.id === 'taiwan-mnd');
+    assert.deepEqual(direct, [CROSS_STRAIT_SOURCE_CONTRACTS.taiwanMnd.listUrl]);
+    assert.equal(proxied.length, 1 + MND_MAX_DETAIL_REQUESTS_PER_RUN);
+    assert.equal(new Set(proxied).size, proxied.length);
+    assert.equal(mnd.transportStatus, 'error');
+    assert.equal(mnd.lastSuccessAt, null);
+    assert.deepEqual(mnd.errorCodes, ['SOURCE_ERROR']);
+    assert.equal(mnd.requestDiagnostics.filter(row => row.purpose === 'detail').length,
+      MND_MAX_DETAIL_REQUESTS_PER_RUN);
+  });
+
   it('recovers MND header failures and keeps repeated unusable coverage actionable', async () => {
     const stored = new Map();
     const writer = async (key, value) => { stored.set(key, value); };

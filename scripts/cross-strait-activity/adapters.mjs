@@ -2222,8 +2222,10 @@ function errorCode(error) {
 }
 
 function isMndTransportFailure(code, diagnostic) {
+  // The proxy buffers bodies before returning, so its generic failures have no known stage.
   return code === 'TIMEOUT'
-    || (code === 'SOURCE_ERROR' && diagnostic.stage === 'response_headers'
+    || (code === 'SOURCE_ERROR' && diagnostic.transport !== 'proxy'
+      && diagnostic.stage === 'response_headers'
       && diagnostic.httpStatus === null);
 }
 
