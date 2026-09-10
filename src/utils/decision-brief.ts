@@ -38,6 +38,11 @@ export function buildDecisionBrief(selection: DecisionBriefSelection, captures: 
   });
   const a = captures[0].response.gasSensitivity;
   const b = captures[1].response.gasSensitivity;
+  // `a.modelBasis === b.modelBasis` is defence in depth only: a non-null loss implies
+  // `usable`, which already pins each capture's modelBasis to the same literal, so this
+  // conjunct cannot currently be false. The `dataSource` terms are NOT implied by
+  // `usable` and are load-bearing; note the non-empty check reads the baseline capture
+  // only, which is why the tests mutate captures[0] and captures[1] separately.
   const comparable = gas && results.every(r => r.loss !== null && r.observedAt !== null) && a && b &&
     a.modelBasis === b.modelBasis && typeof a.dataSource === 'string' && a.dataSource.length > 0 && a.dataSource === b.dataSource && a.dataMonth === b.dataMonth &&
     a.lngImportsTj === b.lngImportsTj && a.totalDemandTj === b.totalDemandTj && a.lngShareOfImports === b.lngShareOfImports;

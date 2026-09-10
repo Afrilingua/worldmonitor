@@ -57,13 +57,23 @@ test('second country composes with its own values and missing baseline changes t
   assert.notEqual(missing.action.trigger, good.action.trigger);
 });
 
-for (const change of ['month', 'lng', 'demand', 'source', 'model', 'country', 'route', 'severity', 'unknown-date', 'legacy']) {
+for (const change of ['month', 'lng', 'demand', 'source', 'source-differs', 'source-both-blank', 'share', 'model', 'country', 'route', 'severity', 'unknown-date', 'legacy']) {
   test(`withholds delta for ${change} mismatch`, () => {
     const data = captures(); const r = data[1].response; const g = r.gasSensitivity!;
+    // Both captures blank: equality holds ('' === ''), so the non-empty check is the
+    // only term left that can withhold the delta. Blanking just one capture would trip
+    // the equality term instead and leave this guard untested.
+    if (change === 'source-both-blank') { data[0].response.gasSensitivity!.dataSource = ''; g.dataSource = ''; }
     if (change === 'month') g.dataMonth = '2026-06';
     if (change === 'lng') g.lngImportsTj++;
     if (change === 'demand') g.totalDemandTj++;
     if (change === 'source') g.dataSource = '';
+    // Two provenance bases that are each individually valid but disagree, so the
+    // equality term is exercised by a real mismatch rather than only by a blank value.
+    if (change === 'source-differs') g.dataSource = 'jodi_annual';
+    // Neither capture sets lngShareOfImports in the fixture, so both are undefined and
+    // compare equal; this is the only case that gives that conjunct teeth.
+    if (change === 'share') g.lngShareOfImports = 0.9;
     if (change === 'model') g.modelBasis = 'legacy';
     if (change === 'country') r.countryCode = 'JP';
     if (change === 'route') r.chokepointId = 'suez';

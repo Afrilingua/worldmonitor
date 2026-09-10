@@ -357,8 +357,54 @@ test('decision brief rejects anonymous entry and ignores delayed responses after
   await page.locator('.search-modal .search-input').fill('Japan');
   await page.locator('.search-result-item[data-index]').filter({ hasText: 'Brief: Japan' }).click();
   await expect(panel.locator('.cdp-country-name')).toHaveText('Japan');
-  release();
   await panel.getByRole('button', { name: 'Decision brief', exact: true }).click();
+  // Positive control: a real, live, freshly-built output is mounted and waiting for a
+  // capture before the stale Germany responses land. Without this the checks below
+  // would also hold against an empty panel, which is what made them vacuous.
+  await expect(panel.locator('.cdp-output')).toHaveCount(1);
+  await expect(panel.locator('.cdp-output')).toContainText('Select an energy disruption');
+  release();
   await expect(panel.locator('.cdp-output')).not.toContainText('Germany');
+  await expect(panel.locator('.cdp-decision-paper')).toHaveCount(0);
   await expect(panel.getByRole('button', { name: 'Download decision JSON' })).toBeDisabled();
+});
+
+// Browser-level coverage for invalidation while a capture is in flight: the selection
+// change aborts the request, so the paper must clear, both exports must stay disabled,
+// and Capture must come back enabled (it is disabled for the duration of a capture, and
+// the in-flight handler declines to re-enable a button it no longer owns).
+//
+// This does NOT pin the stale-response generation guard, and no browser test can: the
+// abort rejects the fetch, so the success path is never reached. That guard is pinned by
+// the mocked-load case in tests/dom/decision-brief.test.mts ("ignores late responses
+// after selection changes, close and panel abort"), which resolves despite the abort —
+// verified red by deleting `if (signal.aborted || current !== generation) return;`.
+test('decision brief clears and stays usable when a selection change aborts a capture', async ({ page, countryBrief }) => {
+  void countryBrief;
+  await installDecisionBriefData(page);
+  await page.goto('/dashboard?country=DE');
+  const panel = page.locator('#country-deep-dive-panel');
+  await expect(panel).toHaveAttribute('aria-hidden', 'false');
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let pending = 0;
+  await page.route('**/api/intelligence/v1/compute-energy-shock*', async route => {
+    pending++;
+    await held;
+    await route.fallback();
+  });
+  await panel.getByRole('button', { name: 'Decision brief', exact: true }).click();
+  await panel.getByRole('button', { name: 'Capture / refresh both' }).click();
+  await expect.poll(() => pending).toBe(2);
+  // Invalidate while the capture is still in flight; the output stays in the document,
+  // unlike the close/country-change path above which detaches it outright.
+  await panel.getByLabel('Comparison disruption').selectOption('75');
+  await expect(panel.locator('.cdp-output')).toContainText('Selection changed');
+  release();
+  await expect(panel.locator('.cdp-decision-paper')).toHaveCount(0);
+  await expect(panel.locator('.cdp-output')).toContainText('Selection changed');
+  await expect(panel.getByRole('button', { name: 'Download decision HTML' })).toBeDisabled();
+  await expect(panel.getByRole('button', { name: 'Download decision JSON' })).toBeDisabled();
+  // The aborted capture must leave the control usable, not permanently disabled.
+  await expect(panel.getByRole('button', { name: 'Capture / refresh both' })).toBeEnabled();
 });

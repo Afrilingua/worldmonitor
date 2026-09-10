@@ -1,4 +1,5 @@
 import { t } from '@/services/i18n';
+import { enqueueSentryCall } from '@/bootstrap/sentry-defer';
 import { h } from '@/utils/dom-utils';
 import { WEB_APP_ORIGIN } from '@/config/web-origin';
 import { BRIEF_TOPICS, type BriefTopic, type BriefSectionState } from './country-brief-presentation';
@@ -74,9 +75,13 @@ const reportTheme = `
   *{box-sizing:border-box}body{margin:0;padding:30px;font-family:Arial,sans-serif}.cdp-output-paper{max-width:1100px;margin:auto;overflow-wrap:anywhere}.cdp-output-paper .cdp-expanded-only{display:block}.cdp-output-paper .cdp-summary-only{display:none}.cdp-output-paper [hidden]{display:none}.cdp-output-paper .cdp-card{break-inside:avoid}.cdp-output-paper .cdp-card-body,.cdp-output-paper .cdp-table-scroll,.cdp-output-paper .cdp-maritime-scroll{overflow:visible;max-height:none}.cdp-output-paper table{width:100%;border-collapse:collapse}.cdp-output-paper td,.cdp-output-paper th{padding:10px 8px;border-bottom:1px solid var(--border);text-align:left}.cdp-output-paper .cdp-output-story-slide{break-after:page;padding:32px 0;min-height:500px}.cdp-output-paper .cdp-scorecard-factor-evidence{display:block}.cdp-output-paper .cdp-scorecard-evidence{display:block}.cdp-output-paper .cdp-pro-locked{color:var(--text-muted)}.cdp-output-manifest{font-size:12px;color:var(--text-muted);padding:16px 0;border-bottom:1px solid var(--border);line-height:1.6}h1{font-size:32px}h2{font-size:24px}a{color:var(--green)}@media print{body{padding:0}a{color:inherit}.cdp-output-paper .cdp-card{break-inside:auto}.cdp-card-title{break-after:avoid}}
 `;
 
-function downloadHtml(name: string, article: HTMLElement, title: string): void {
+// `lang` overrides the viewer's locale for documents whose body is not localized.
+// The decision brief renders its headings and narrative in English regardless of
+// the shell locale, so inheriting lang="fr" would make the file misdescribe itself
+// to screen readers and translation tooling.
+function downloadHtml(name: string, article: HTMLElement, title: string, lang?: string): void {
   const doc = document.implementation.createHTMLDocument(title);
-  doc.documentElement.lang = document.documentElement.lang || 'en';
+  doc.documentElement.lang = lang || document.documentElement.lang || 'en';
   doc.head.prepend(h('meta', { charset: 'utf-8' }));
   doc.head.append(h('meta', { name: 'viewport', content: 'width=device-width,initial-scale=1' }),
     h('meta', { 'http-equiv': 'Content-Security-Policy', content: "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; base-uri 'none'; form-action 'none'" }),
@@ -200,13 +205,16 @@ export function createDecisionBriefOutput(
   const severities: [string, string][] = [25, 50, 75, 100].map(n => [String(n), `${n}%`]);
   const baseline = select(t('components.decisionBrief.baseline'), severities, '50');
   const comparison = select(t('components.decisionBrief.comparison'), severities, '100');
-  const refresh = h('button', { type: 'button', className: 'cdp-action-btn' }, t('components.decisionBrief.capture'));
+  const refresh = h('button', { type: 'button', className: 'cdp-action-btn' }, t('components.decisionBrief.capture')) as HTMLButtonElement;
   const html = h('button', { type: 'button', className: 'cdp-action-btn', disabled: true }, t('components.decisionBrief.downloadHtml')) as HTMLButtonElement;
   const json = h('button', { type: 'button', className: 'cdp-action-btn', disabled: true }, t('components.decisionBrief.downloadJson')) as HTMLButtonElement;
   let snapshot: import('@/types/decision-brief').DecisionBriefSnapshot | null = null;
   let request: AbortController | null = null;
   let generation = 0;
-  const invalidate = () => { generation++; request?.abort(); snapshot = null; html.disabled = json.disabled = true; };
+  // Re-enabling refresh here is load-bearing: invalidate() bumps the generation, so
+  // an in-flight capture aborted by a selection change will decline to re-enable the
+  // button it no longer owns, and without this the control would stay dead.
+  const invalidate = () => { generation++; request?.abort(); snapshot = null; html.disabled = json.disabled = true; refresh.disabled = false; };
   signal.addEventListener('abort', invalidate, { once: true });
   close.addEventListener('click', () => { invalidate(); onClose(); });
   for (const input of [fuel, route, baseline, comparison]) input.addEventListener('change', () => {
@@ -216,6 +224,11 @@ export function createDecisionBriefOutput(
     invalidate();
     const current = generation;
     request = new AbortController();
+    // Each capture dispatches two scenario RPCs, and aborting the client does not
+    // stop work already dispatched server-side. Without a busy state on the button
+    // itself (the status line is a separate element) an impatient double-click
+    // silently doubles the cost of every capture.
+    refresh.disabled = true;
     paper.replaceChildren(); status.textContent = t('components.decisionBrief.loading');
     try {
       const result = await load({ countryCode: country.code, countryName: country.name, fuelMode: fuel.value as 'gas' | 'oil', chokepointId: route.value, baselinePct: Number(baseline.value), comparisonPct: Number(comparison.value) }, request.signal);
@@ -223,13 +236,25 @@ export function createDecisionBriefOutput(
       snapshot = result;
       paper.replaceChildren(renderDecisionBrief(result)); html.disabled = json.disabled = false;
       status.textContent = t('components.decisionBrief.captured');
-    } catch {
+    } catch (error) {
       if (signal.aborted || current !== generation) return;
+      // premiumFetch only reports resolved 5xx responses, so a rejected fetch or a
+      // logic bug in the capture/build path would otherwise be invisible.
+      console.warn('[CountryBriefOutput] decision brief capture failed', error);
+      enqueueSentryCall((Sentry) => {
+        Sentry.captureException?.(error instanceof Error ? error : new Error(String(error)), {
+          tags: { surface: 'country-deep-dive', widget: 'decision-brief' },
+          extra: { countryCode: country.code },
+        });
+      });
       status.textContent = t('components.decisionBrief.failed');
+    } finally {
+      // A superseded generation must not re-enable a button the newer request owns.
+      if (current === generation) refresh.disabled = false;
     }
   });
   html.addEventListener('click', () => {
-    if (snapshot) downloadHtml(`${country.code.toLowerCase()}-decision.html`, renderDecisionBrief(snapshot), `${country.name} Decision brief`);
+    if (snapshot) downloadHtml(`${country.code.toLowerCase()}-decision.html`, renderDecisionBrief(snapshot), `${country.name} Decision brief`, 'en');
   });
   json.addEventListener('click', () => {
     if (!snapshot) return;

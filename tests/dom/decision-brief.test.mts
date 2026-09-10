@@ -115,6 +115,24 @@ describe('decision brief preview and exports', () => {
     expect(renderDecisionBrief(data).textContent).toContain('<0.1 TJ');
   });
 
+  // The three states must stay visibly distinct: unavailable, too small to state, and
+  // a genuine recorded zero. Collapsing fmt's `value !== 0 &&` guard would render a
+  // measured zero as "<0.1" — the exact unknown-vs-zero confusion this feature exists
+  // to prevent — and every other assertion in this file would still pass.
+  it('renders a recorded zero as 0.0, not <0.1 or Unknown', () => {
+    const data = snapshot(); data.results[0]!.loss = 0;
+    const text = renderDecisionBrief(data).textContent!;
+    expect(text).toContain('0.0 TJ');
+    expect(text).not.toContain('<0.1 TJ');
+  });
+
+  it('renders an unavailable modeled loss as Unknown', () => {
+    const data = snapshot(); data.results[0]!.loss = null;
+    const text = renderDecisionBrief(data).textContent!;
+    expect(text).toContain('Unknown');
+    expect(text).not.toContain('0.0 TJ');
+  });
+
   it('escapes embedded snapshot markup', () => {
     const data = snapshot(); data.action.text = '</script><img src=x onerror=alert(1)>';
     const paper = renderDecisionBrief(data);

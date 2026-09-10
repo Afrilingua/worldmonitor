@@ -2843,7 +2843,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     decisionButton.type = 'button';
     decisionButton.addEventListener('click', () => {
       if (!hasPremiumAccess(getAuthState())) {
-        trackGateHit('evidence-export');
+        trackGateHit('decision-brief');
         showToast(t('components.decisionBrief.locked'));
         return;
       }

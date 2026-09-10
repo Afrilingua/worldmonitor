@@ -1077,6 +1077,10 @@ describe('observed oil imports through handler and Decision brief', () => {
         const response = await computeShock({ countryCode: 'DE', chokepointId: 'hormuz_strait', disruptionPct, fuelMode: 'oil' });
         assert.equal(response.jodiOilCoverage, true);
         assert.equal(response.dataAvailable, available);
+        // coverage_level must agree with data_available. jodi_oil_coverage stays true
+        // (the row exists), so keying coverage off row presence reports "full"/"partial"
+        // here and paints a coverage badge beside the insufficient-data assessment.
+        if (!available) assert.equal(response.coverageLevel, 'unsupported');
         if (!available) assert.match(response.assessment, /insufficient/i);
         captures.push({ response, retrievedAt: '2026-09-10T10:00:00Z' });
       }
