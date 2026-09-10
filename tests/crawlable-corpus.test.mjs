@@ -2688,6 +2688,33 @@ describe('crawlable corpus generator', () => {
       const topicWindow = new Window();
       try {
         const requiredPaths = [
+          ...Object.entries({
+            'suez-canal': ['egypt'],
+            'bab-el-mandeb': ['yemen', 'djibouti', 'eritrea'],
+            'strait-of-malacca': ['malaysia', 'indonesia', 'singapore'],
+            'panama-canal': ['panama'],
+            'taiwan-strait': ['taiwan', 'china'],
+            'strait-of-gibraltar': ['spain', 'morocco'],
+            'bosporus-strait': ['turkey'],
+            'korea-strait': ['south-korea', 'japan'],
+            'dover-strait': ['united-kingdom', 'france'],
+            'kerch-strait': ['ukraine', 'russia'],
+            'lombok-strait': ['indonesia'],
+            'cape-of-good-hope': ['south-africa'],
+          }).flatMap(([waterway, countries]) => countries.flatMap((country) => [
+            [`/chokepoints/${waterway}/`, `/countries/${country}/`],
+            [`/countries/${country}/`, `/chokepoints/${waterway}/`],
+          ])),
+          ...[
+            ['bab-el-mandeb', 'red-sea-security'],
+            ['kerch-strait', 'ukraine-war'],
+            ['suez-canal', 'red-sea-security'],
+            ['bosporus-strait', 'ukraine-war'],
+            ['strait-of-hormuz', 'iran-israel-escalation'],
+          ].flatMap(([waterway, crisis]) => [
+            [`/chokepoints/${waterway}/`, `/crises/${crisis}/`],
+            [`/crises/${crisis}/`, `/chokepoints/${waterway}/`],
+          ]),
           ...['iran', 'oman', 'bahrain', 'kuwait', 'qatar', 'saudi-arabia', 'united-arab-emirates'].flatMap((slug) => [
             [`/countries/${slug}/`, '/chokepoints/strait-of-hormuz/'],
             ['/chokepoints/strait-of-hormuz/', `/countries/${slug}/`],

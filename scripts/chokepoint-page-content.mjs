@@ -45,6 +45,8 @@ export const EIA_OIL_TRANSIT_BASELINES = buildEiaOilTransitBaselines();
 
 export const CHOKEPOINT_CONTENT = {
   suez: {
+    countryCodes: ['EG'],
+    crisisSlugs: ['red-sea-security'],
     region: 'Mediterranean ↔ Red Sea',
     glossarySlug: 'suez-canal',
     blurb:
@@ -68,6 +70,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   malacca_strait: {
+    countryCodes: ['MY', 'ID', 'SG'],
     region: 'Indian Ocean ↔ South China Sea',
     glossarySlug: 'strait-of-malacca',
     whyHeading: 'Why is the Strait of Malacca East Asia’s default energy and container gate?',
@@ -92,7 +95,7 @@ export const CHOKEPOINT_CONTENT = {
   },
   hormuz_strait: {
     countryCodes: ['IR', 'OM', 'BH', 'KW', 'QA', 'SA', 'AE'],
-    crisisSlugs: ['hormuz-gulf-security'],
+    crisisSlugs: ['hormuz-gulf-security', 'iran-israel-escalation'],
     editorialLinks: [
       { href: '/blog/posts/energy-shock-monitoring-chokepoints-worldmonitor/', label: 'How to monitor energy shocks across chokepoints, fuel, and markets' },
     ],
@@ -119,6 +122,8 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   bab_el_mandeb: {
+    countryCodes: ['YE', 'DJ', 'ER'],
+    crisisSlugs: ['red-sea-security'],
     region: 'Red Sea ↔ Gulf of Aden',
     whyHeading: 'Why do Suez sailings also have to clear Bab el-Mandeb?',
     blurb:
@@ -141,6 +146,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   panama: {
+    countryCodes: ['PA'],
     region: 'Atlantic ↔ Pacific',
     whyHeading: 'Why can drought close the Panama Canal when both oceans are open?',
     blurb:
@@ -163,6 +169,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   taiwan_strait: {
+    countryCodes: ['TW', 'CN'],
     region: 'East China Sea ↔ South China Sea',
     whyHeading: 'Why does military tension in the Taiwan Strait hit containers first?',
     blurb:
@@ -185,6 +192,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   cape_of_good_hope: {
+    countryCodes: ['ZA'],
     region: 'Atlantic ↔ Indian Ocean',
     whyHeading: 'When is the Cape of Good Hope a chokepoint rather than just a longer road?',
     blurb:
@@ -207,6 +215,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   gibraltar: {
+    countryCodes: ['ES', 'MA'],
     region: 'Atlantic ↔ Mediterranean',
     whyHeading: 'Why does every Suez–Europe loop still have to use Gibraltar?',
     blurb:
@@ -229,6 +238,8 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   bosphorus: {
+    countryCodes: ['TR'],
+    crisisSlugs: ['ukraine-war'],
     region: 'Black Sea ↔ Sea of Marmara',
     whyHeading: 'Why can the Montreux Convention close the Bosporus to more than grain?',
     blurb:
@@ -251,6 +262,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   korea_strait: {
+    countryCodes: ['KR', 'JP'],
     region: 'East China Sea ↔ Sea of Japan',
     whyHeading: 'Why watch the Korea Strait if no modelled trade corridor is mapped?',
     blurb:
@@ -273,6 +285,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   dover_strait: {
+    countryCodes: ['GB', 'FR'],
     region: 'English Channel ↔ North Sea',
     whyHeading: 'Why is Dover among the busiest lanes if World Monitor maps no corridor row?',
     blurb:
@@ -295,6 +308,8 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   kerch_strait: {
+    countryCodes: ['UA', 'RU'],
+    crisisSlugs: ['ukraine-war'],
     region: 'Black Sea ↔ Sea of Azov',
     whyHeading: 'Why does control of the Kerch Strait gate Azov-basin trade?',
     blurb:
@@ -317,6 +332,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   lombok_strait: {
+    countryCodes: ['ID'],
     region: 'Indian Ocean ↔ Java Sea',
     whyHeading: 'When do ships choose Lombok instead of Malacca?',
     blurb:
