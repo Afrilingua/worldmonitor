@@ -739,6 +739,8 @@ here, and who would feel it?**
 <a id="corpus-what-a-chokepoint-row-tells-you"></a>
 ### What a chokepoint row tells you
 
+Open the [Strait of Hormuz tracker](https://www.worldmonitor.app/chokepoints/strait-of-hormuz/) for a worked example. Read its published disruption score, available inputs, and observation dates alongside the method below.
+
 Each waterway carries four separate readings, and it is worth keeping them
 apart:
 
@@ -1290,6 +1292,8 @@ An energy shock rarely starts as a chart. It starts as a closure rumor, a tanker
 WorldMonitor helps energy analysts watch the chain before it becomes one number on a terminal: maritime chokepoints, fuel shortages, energy disruptions, commodity prices, country risk, news intelligence, and policy response. For the route side of the problem, start with the guide to [tracking chokepoints and freight costs](/blog/posts/tracking-global-trade-routes-chokepoints-freight-costs/); for the market side, pair it with [real-time market intelligence for traders](/blog/posts/real-time-market-intelligence-for-traders-and-analysts/).
 
 This is a practical workflow for monitoring energy-shock risk.
+
+For a worked example, open the [Strait of Hormuz tracker](https://www.worldmonitor.app/chokepoints/strait-of-hormuz/) to inspect its latest published transit and disruption readings. The [historical Strait of Hormuz Transit Report for July 2026](https://www.worldmonitor.app/research/strait-of-hormuz-transit-report-2026-07/) provides a dated comparison with Suez, Bab el-Mandeb, and the Cape of Good Hope. Its figures describe that report's observation period, not current traffic.
 
 <a id="corpus-what-is-energy-shock-monitoring"></a>
 ## What is energy shock monitoring?
