@@ -1446,6 +1446,30 @@ export function isTransientProxyError(message) {
   return /HTTP 5\d{2}|522|timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|socket (disconnected|hang up)|TLS connection|tls_get_more_records|packet length too long|SSL routines|secure TLS connection/i.test(message || '');
 }
 
+// Whether the ORIGIN refused this particular egress IP — a failure that a
+// different sticky exit can actually fix. FRED rate-limits and blocks by IP,
+// which is the whole reason the proxy leg exists, so a 403/429 served through a
+// healthy tunnel is the most exit-specific failure there is.
+//
+// Deliberately separate from isTransientProxyError rather than folded into it:
+// that predicate is shared by other seeders whose retry budgets are tuned to
+// their own upstreams, and widening it would change their behaviour too. Kept
+// status-based rather than message-based because proxyConnectTunnel and
+// httpsProxyFetchRaw both collapse to `HTTP <status>` text, and only the
+// structured fields tell the two apart.
+//
+// Gateway-layer rejections are excluded: proxyConnectTunnel marks its own
+// failures `proxyConnect: true` for exactly this decision — see its comment in
+// _proxy-utils.cjs, "only the origin case can be helped by a different exit". A
+// 407, or a gateway 403 for a port outside the account's allocation, means the
+// credentials or plan are wrong and no exit fixes that. Other origin 4xx are
+// excluded too: every exit answers a bad series id identically, so rotating on
+// one would just burn the proxy budget before the direct leg gets its turn.
+export function isExitRefusalError(error) {
+  if (!error || error.proxyConnect) return false;
+  return error.status === 403 || error.status === 429;
+}
+
 const FRED_JSON_HEADERS = { Accept: 'application/json', 'User-Agent': CHROME_UA };
 
 // FRED's own edge returns sporadic 5xx on individual series. Observed
@@ -1513,8 +1537,12 @@ export async function fredFetchJson(url, proxyAuth) {
         return await httpsProxyFetchJson(url, proxyAuth, attempt - 1);
       } catch (proxyErr) {
         lastProxyErr = proxyErr;
-        const transient = isTransientProxyError(proxyErr.message);
-        if (attempt < 3 && transient) {
+        // Two different reasons to try the next exit: the hop broke (transient),
+        // or this exit's IP is the thing FRED is refusing (403/429). The second
+        // is what the rotation above is FOR, and it used to break the loop after
+        // one attempt because the transient predicate matches no 4xx.
+        const rotatable = isTransientProxyError(proxyErr.message) || isExitRefusalError(proxyErr);
+        if (attempt < 3 && rotatable) {
           await new Promise((r) => setTimeout(r, 400 * attempt + Math.random() * 300));
           continue;
         }

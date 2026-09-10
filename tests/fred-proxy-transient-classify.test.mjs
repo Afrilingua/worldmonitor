@@ -80,6 +80,60 @@ test('FRED does not retry a permanent proxy authentication failure', async (t) =
   assert.equal(proxy.mock.calls[0].arguments[1].port, 10001);
 });
 
+// FRED rate-limits and blocks BY IP — that is the entire reason the proxy leg
+// exists. So a 403/429 the origin returns through a healthy tunnel is the most
+// exit-specific failure there is: this exit is unwelcome, and the next sticky
+// exit may well be fine. Before this, rotation was gated solely on
+// isTransientProxyError, which matches no 4xx at all, so the retry loop broke
+// after ONE attempt and fell to the direct leg — from the Railway datacenter IP
+// that FRED blocks hardest. The rotation added in #7963 never fired for it.
+//
+// The gateway case is deliberately excluded. proxyConnectTunnel marks its own
+// rejections `proxyConnect: true` precisely so the two can be told apart; its
+// comment already says "only the origin case can be helped by a different
+// exit". A 407 means our credentials are wrong and no exit fixes that.
+test('FRED rotates to a new exit when the origin refuses this one (403/429)', async (t) => {
+  for (const status of [403, 429]) {
+    const ports = [];
+    const mocked = t.mock.method(proxyUtils, 'proxyFetch', async (_url, config) => {
+      ports.push(config.port);
+      if (config.port === 10001) throw Object.assign(new Error(`HTTP ${status}`), { status });
+      return { ok: true, buffer: Buffer.from('{"observations":[{"value":"7"}]}') };
+    });
+    const direct = t.mock.method(globalThis, 'fetch', async () => { throw new Error('direct must not be needed'); });
+    const result = await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:10001');
+    assert.deepEqual(ports, [10001, 10002], `origin ${status} must move to the next exit`);
+    assert.equal(result.observations[0].value, '7');
+    assert.equal(direct.mock.callCount(), 0, `origin ${status} must not reach the direct leg`);
+    mocked.mock.restore();
+    direct.mock.restore();
+  }
+});
+
+test('FRED does not rotate on a gateway rejection — no exit fixes bad credentials', async (t) => {
+  // Same 403 status, but raised by the CONNECT hop rather than by FRED.
+  const proxy = t.mock.method(proxyUtils, 'proxyFetch', async () => {
+    throw Object.assign(new Error('Proxy CONNECT: HTTP/1.1 403 Forbidden'), { status: 403, proxyConnect: true });
+  });
+  t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
+  await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:10001');
+  assert.equal(proxy.mock.callCount(), 1, 'a gateway rejection must still fail fast');
+});
+
+test('FRED still does not rotate on an origin 4xx that every exit answers alike', async (t) => {
+  // A bad series id is not exit-attributable — 400 and 404 fail identically on
+  // every exit, so rotating just burns the budget before the direct leg.
+  for (const status of [400, 404]) {
+    const proxy = t.mock.method(proxyUtils, 'proxyFetch', async () => {
+      throw Object.assign(new Error(`HTTP ${status}`), { status });
+    });
+    t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
+    await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:10001');
+    assert.equal(proxy.mock.callCount(), 1, `origin ${status} must fail fast`);
+    proxy.mock.restore();
+  }
+});
+
 test('the proxy-exhaustion warning names every exit it tried', async (t) => {
   // Rotation can silently no-op: parseProxyConfigForAttempt returns the route
   // untouched for any host outside its sticky map (us.decodo.com, an ISP or
