@@ -5,6 +5,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { computeStats, validateCategoryExplainerCopy } from '../scripts/docs-stats.mjs';
+import { GLOSSARY_TERMS } from '../blog-site/src/data/glossary.ts';
+import { CHOKEPOINT_REGISTRY } from '../src/config/chokepoint-registry.ts';
+import { RESEARCH_REPORTS } from '../shared/research-reports/index.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '..');
@@ -85,6 +88,21 @@ function assertNoUnsupportedVendorPrice(post, vendor) {
 }
 
 describe('blog SEO and GEO corpus contract', () => {
+  it('connects the Hormuz glossary, energy article, and methodology to existing trackers and research', () => {
+    const tracker = 'https://www.worldmonitor.app/chokepoints/strait-of-hormuz/';
+    const report = RESEARCH_REPORTS.find((entry) => entry.focusChokepointId === 'hormuz_strait');
+    assert.ok(CHOKEPOINT_REGISTRY.some((entry) => entry.id === report.focusChokepointId));
+    const term = GLOSSARY_TERMS.find((entry) => entry.slug === 'strait-of-hormuz');
+    assert.equal(term.learnMore.filter((link) => link.href === tracker).length, 1);
+    const article = posts.find((post) => post.file === 'energy-shock-monitoring-chokepoints-worldmonitor.md');
+    const reportUrl = `https://www.worldmonitor.app/research/${report.slug}/`;
+    for (const href of [tracker, reportUrl]) {
+      assert.ok(article.body.includes(`](${href})`), `article content links ${href}`);
+    }
+    assert.match(article.body, /historical.*July 2026/i);
+    const methodology = readFileSync(join(root, 'docs/methodology/chokepoints.mdx'), 'utf8');
+    assert.ok(methodology.includes(`](${tracker})`));
+  });
   it('keeps every post complete, unique, current, and answer-first', () => {
     assert.ok(posts.length >= 53, 'expected the complete published blog corpus');
     const titles = new Set();

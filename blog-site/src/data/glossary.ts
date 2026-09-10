@@ -228,6 +228,7 @@ export const GLOSSARY_TERMS: GlossaryTerm[] = [
     ],
     related: ['maritime-chokepoint', 'ais', 'chokepoint-congestion'],
     learnMore: [
+      { label: 'Strait of Hormuz tracker', href: 'https://www.worldmonitor.app/chokepoints/strait-of-hormuz/' },
       { label: 'Energy shock monitoring (blog)', href: 'https://www.worldmonitor.app/blog/posts/energy-shock-monitoring-chokepoints-worldmonitor/' },
     ],
   },

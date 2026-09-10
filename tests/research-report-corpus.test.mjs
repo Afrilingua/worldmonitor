@@ -271,6 +271,29 @@ describe('research report corpus (#5668)', () => {
     }), /contextChokepointId bab_el_mandeb.*chokepoint registry/);
   });
 
+  it('keeps one backlink when a focus waterway also appears as comparison context', async () => {
+    const duplicateOut = mkdtempSync(join(tmpdir(), 'wm-research-duplicate-'));
+    const originalIds = report.contextChokepointIds;
+    try {
+      report.contextChokepointIds = [...originalIds, report.focusChokepointId, ...originalIds];
+      await buildCorpus({ rootDir: repoRoot, outDir: duplicateOut });
+      const window = new Window();
+      try {
+        window.document.write(readFileSync(join(duplicateOut, 'chokepoints/strait-of-hormuz/index.html'), 'utf8'));
+        const links = window.document.querySelectorAll(`main a[href="/research/${report.slug}/"]`);
+        assert.equal(links.length, 1);
+        assert.match(links[0].parentElement.textContent, /Focus in historical research/);
+        window.document.body.innerHTML = readFileSync(join(duplicateOut, 'research', report.slug, 'index.html'), 'utf8');
+        assert.equal(window.document.querySelectorAll('main table a[href="/chokepoints/suez-canal/"]').length, 1);
+      } finally {
+        window.close();
+      }
+    } finally {
+      report.contextChokepointIds = originalIds;
+      rmSync(duplicateOut, { recursive: true, force: true });
+    }
+  });
+
   it('separates evidence layers and states failure modes in plain language', () => {
     for (const label of ['Observed transport data', 'Derived analysis', 'News context', 'Methodology']) {
       assert.ok(html.includes(label), `missing evidence-layer label: ${label}`);

@@ -1254,7 +1254,7 @@ function normalizeChokepoints(entries) {
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
-export function buildChokepointPageLinks({ chokepoints, countries, crises, content = CHOKEPOINT_CONTENT }) {
+export function buildChokepointPageLinks({ chokepoints, countries, crises, blogPostPaths = new Set(), content = CHOKEPOINT_CONTENT }) {
   const countryByCode = new Map(countries.map((country) => [country.code, country]));
   const crisisBySlug = new Map(crises.map((crisis) => [crisis.slug, crisis]));
   const byChokepointId = new Map();
@@ -1262,6 +1262,15 @@ export function buildChokepointPageLinks({ chokepoints, countries, crises, conte
   const byCrisisSlug = new Map();
   for (const chokepoint of chokepoints) {
     const declaration = content[chokepoint.id] || {};
+    const editorialLinks = declaration.editorialLinks ?? [];
+    if (!Array.isArray(editorialLinks)) throw new Error(`${chokepoint.id}: editorialLinks must be an array`);
+    const editorial = new Map();
+    for (const link of editorialLinks) {
+      if (!blogPostPaths.has(link?.href) || typeof link.label !== 'string' || !link.label.trim()) {
+        throw new Error(`${chokepoint.id}: editorialLinks requires a canonical blog post path and label: ${link?.href}`);
+      }
+      if (!editorial.has(link.href)) editorial.set(link.href, link);
+    }
     const resolve = (field, targets, inverse) => {
       const ids = declaration[field] ?? [];
       if (!Array.isArray(ids)) throw new Error(`${chokepoint.id}: ${field} must be an array`);
@@ -1277,6 +1286,7 @@ export function buildChokepointPageLinks({ chokepoints, countries, crises, conte
     byChokepointId.set(chokepoint.id, {
       countries: resolve('countryCodes', countryByCode, byCountryCode),
       crises: resolve('crisisSlugs', crisisBySlug, byCrisisSlug),
+      editorial: [...editorial.values()],
     });
   }
   return { byChokepointId, byCountryCode, byCrisisSlug };
@@ -4123,6 +4133,7 @@ function renderChokepointPage({
   chokepoint,
   relatedCountries = [],
   relatedCrises = [],
+  editorialLinks = [],
   baseUrl,
   lastmod,
   tradeRoutesById,
@@ -4171,6 +4182,9 @@ function renderChokepointPage({
     relatedItems.push(`<a href="/blog/glossary/${content.glossarySlug}/">${escapeHtml(chokepoint.displayName)} in the glossary</a>`);
   }
   relatedItems.push('<a href="/blog/glossary/maritime-chokepoint/">What is a maritime chokepoint?</a>');
+  for (const link of editorialLinks) {
+    relatedItems.push(`<a href="${escapeHtml(link.href)}">${escapeHtml(link.label)}</a>`);
+  }
 
   const pulse = livePulse?.chokepoints?.[chokepoint.id] || null;
   const hasPulse = hasObservedValue(pulse?.disruptionScore, { coverage: pulse != null });
@@ -5111,7 +5125,12 @@ export async function buildCorpus({
 } = {}) {
   const data = await loadCorpusData({ rootDir, livePulseSnapshotPath });
   const countrySlugByCode = new Map(data.countries.map((country) => [country.code, country.slug]));
-  const chokepointPageLinks = buildChokepointPageLinks(data);
+  const chokepointPageLinks = buildChokepointPageLinks({
+    ...data,
+    blogPostPaths: new Set(readdirSync(join(rootDir, 'blog-site/src/content/blog'))
+      .filter((file) => file.endsWith('.md'))
+      .map((file) => `/blog/posts/${file.slice(0, -3)}/`)),
+  });
   if (clean) {
     for (const dir of GENERATED_DIRS) {
       rmSync(join(outDir, dir), { recursive: true, force: true });
@@ -5319,6 +5338,7 @@ export async function buildCorpus({
         chokepoint,
         relatedCountries: chokepointPageLinks.byChokepointId.get(chokepoint.id).countries,
         relatedCrises: chokepointPageLinks.byChokepointId.get(chokepoint.id).crises,
+        editorialLinks: chokepointPageLinks.byChokepointId.get(chokepoint.id).editorial,
         baseUrl,
         lastmod: data.lastmod.chokepoints,
         tradeRoutesById: data.tradeRoutesById,
