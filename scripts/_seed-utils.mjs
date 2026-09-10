@@ -1446,6 +1446,47 @@ export function isTransientProxyError(message) {
   return /HTTP 5\d{2}|522|timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|socket (disconnected|hang up)|TLS connection|tls_get_more_records|packet length too long|SSL routines|secure TLS connection/i.test(message || '');
 }
 
+// Whether the ORIGIN refused this particular egress IP — a failure that a
+// different sticky exit can actually fix. FRED blocks datacenter IPs, which is
+// why the proxy leg exists at all (#2911), so a 403 served through a healthy
+// tunnel says "this exit is unwelcome" and the next sticky exit may be fine.
+//
+// 403 ONLY, deliberately. 429 was in the first draft and came out under review.
+// Nothing in this repo establishes that FRED's rate limit is scoped to the
+// source IP — #2911 cites direct-fetch TIMEOUTS as the observed motivation, not
+// IP-keyed 429s — and `api_key` travels in the query string (_fred-seeder.mjs),
+// which is how quota is conventionally scoped. If the limit is per-key,
+// rotating exits cannot clear it and merely triples the request count against a
+// quota that is already exhausted, while the Retry-After FRED sends is
+// discarded anyway because httpsProxyFetchRaw drops `result.headers` when it
+// throws. Widen to 429 only with evidence that FRED's 429 is IP-scoped, and
+// plumb Retry-After first — _proxy-utils.cjs already preserves those headers
+// through the tunnel for exactly this reason (#6241).
+//
+// Deliberately separate from isTransientProxyError rather than folded into it:
+// that predicate is shared by other seeders whose retry budgets are tuned to
+// their own upstreams, and widening it would change their behaviour too. Kept
+// status-based rather than message-based because proxyConnectTunnel and
+// httpsProxyFetchRaw both collapse to `HTTP <status>` text, and only the
+// structured fields tell the two apart.
+//
+// Gateway-layer rejections are excluded: proxyConnectTunnel marks its own
+// failures `proxyConnect: true` for exactly this decision — see its comment in
+// _proxy-utils.cjs, "only the origin case can be helped by a different exit". A
+// 407, or a gateway 403 for a port outside the account's allocation, means the
+// credentials or plan are wrong and no exit fixes that. Other origin 4xx are
+// excluded too: every exit answers a bad series id identically, so rotating on
+// one would just burn the proxy budget before the direct leg gets its turn.
+//
+// Takes the ERROR OBJECT, not a message string — it reads structured fields, so
+// a mistaken isExitRefusalError(err.message) would silently return false
+// forever and quietly disable rotation. The typeof guard makes that loud-ish
+// rather than accidental, and a regression test pins it.
+export function isExitRefusalError(error) {
+  if (!error || typeof error !== 'object' || error.proxyConnect) return false;
+  return error.status === 403;
+}
+
 const FRED_JSON_HEADERS = { Accept: 'application/json', 'User-Agent': CHROME_UA };
 
 // FRED's own edge returns sporadic 5xx on individual series. Observed
@@ -1513,8 +1554,12 @@ export async function fredFetchJson(url, proxyAuth) {
         return await httpsProxyFetchJson(url, proxyAuth, attempt - 1);
       } catch (proxyErr) {
         lastProxyErr = proxyErr;
-        const transient = isTransientProxyError(proxyErr.message);
-        if (attempt < 3 && transient) {
+        // Two different reasons to try the next exit: the hop broke (transient),
+        // or this exit's IP is the thing FRED is refusing (403/429). The second
+        // is what the rotation above is FOR, and it used to break the loop after
+        // one attempt because the transient predicate matches no 4xx.
+        const rotatable = isTransientProxyError(proxyErr.message) || isExitRefusalError(proxyErr);
+        if (attempt < 3 && rotatable) {
           await new Promise((r) => setTimeout(r, 400 * attempt + Math.random() * 300));
           continue;
         }

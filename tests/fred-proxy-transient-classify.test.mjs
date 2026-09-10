@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
-import { CHROME_UA, fredFetchJson, httpsProxyFetchRaw, isTransientProxyError } from '../scripts/_seed-utils.mjs';
+import { CHROME_UA, fredFetchJson, httpsProxyFetchRaw, isExitRefusalError, isTransientProxyError } from '../scripts/_seed-utils.mjs';
 
 // fredFetchJson retries the Decodo proxy only when the error is classified
 // transient; otherwise it breaks to a direct FRED fetch, which a datacenter IP
@@ -78,6 +78,94 @@ test('FRED does not retry a permanent proxy authentication failure', async (t) =
   // the configured port either way — so pin that the single attempt really did
   // use the operator's exit rather than a rotated one.
   assert.equal(proxy.mock.calls[0].arguments[1].port, 10001);
+});
+
+// FRED blocks datacenter IPs — that is the entire reason the proxy leg exists
+// (#2911). So a 403 the origin returns through a healthy tunnel is the most
+// exit-specific failure there is: this exit is unwelcome, and the next sticky
+// exit may well be fine. Before this, rotation was gated solely on
+// isTransientProxyError, which matches no 4xx at all, so the retry loop broke
+// after ONE attempt and fell to the direct leg — from the Railway datacenter IP
+// that FRED blocks hardest. The rotation added in #7963 never fired for it.
+//
+// The mock RESOLVES `{ ok: false, status }` rather than throwing a pre-tagged
+// error. That matters: `.status` is attached by httpsProxyFetchRaw, and a mock
+// that throws its own tagged error supplies the very field whose production
+// construction this test is supposed to prove — stripping that attachment left
+// the whole suite green. Resolving here routes through the real seam.
+test('FRED rotates to a new exit when the origin refuses this one (403)', async (t) => {
+  const ports = [];
+  t.mock.method(proxyUtils, 'proxyFetch', async (_url, config) => {
+    ports.push(config.port);
+    if (config.port === 10001) return { ok: false, status: 403, buffer: Buffer.from('blocked'), contentType: 'text/plain' };
+    return { ok: true, buffer: Buffer.from('{"observations":[{"value":"7"}]}') };
+  });
+  const direct = t.mock.method(globalThis, 'fetch', async () => { throw new Error('direct must not be needed'); });
+  const result = await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:10001');
+  assert.deepEqual(ports, [10001, 10002], 'an origin 403 must move to the next exit');
+  assert.equal(result.observations[0].value, '7');
+  assert.equal(direct.mock.callCount(), 0, 'an origin 403 must not reach the direct leg');
+});
+
+// 429 is NOT rotated on. Nothing establishes that FRED's rate limit is
+// IP-scoped, `api_key` rides in the query string, and rotating would triple the
+// request count against an already-exhausted quota while Retry-After is
+// discarded. If that premise is ever evidenced, this test is the thing to flip.
+test('FRED does not rotate on a 429 — the quota is not known to follow the exit', async (t) => {
+  const ports = [];
+  t.mock.method(proxyUtils, 'proxyFetch', async (_url, config) => {
+    ports.push(config.port);
+    return { ok: false, status: 429, buffer: Buffer.from('slow down'), contentType: 'text/plain' };
+  });
+  const direct = t.mock.method(globalThis, 'fetch', async () => new Response('{"observations":[]}'));
+  await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:10001');
+  assert.deepEqual(ports, [10001], 'a 429 must not burn extra exits');
+  assert.equal(direct.mock.callCount(), 1, 'a 429 falls through to the direct leg immediately');
+});
+
+// isExitRefusalError is exported, so pin it directly rather than only through
+// fredFetchJson. The black-box assertions cannot distinguish "this predicate
+// returned false" from "isTransientProxyError already excluded every 4xx".
+test('isExitRefusalError keys on the origin status and ignores gateway rejections', () => {
+  assert.equal(isExitRefusalError(Object.assign(new Error('HTTP 403'), { status: 403 })), true);
+  assert.equal(isExitRefusalError(Object.assign(new Error('HTTP 429'), { status: 429 })), false, '429 is out until the quota is shown to follow the exit');
+  assert.equal(isExitRefusalError(Object.assign(new Error('CONNECT 403'), { status: 403, proxyConnect: true })), false, 'a gateway rejection is not exit-attributable');
+  for (const status of [400, 404, 500, 502, undefined]) {
+    assert.equal(isExitRefusalError(Object.assign(new Error('x'), { status })), false, `status=${String(status)}`);
+  }
+  // The footgun this signature invites: it takes the ERROR, while its neighbour
+  // isTransientProxyError takes the MESSAGE. Passing a string must not silently
+  // read as "not a refusal" by accident of property lookup.
+  for (const notAnError of ['HTTP 403', null, undefined, 403]) {
+    assert.equal(isExitRefusalError(notAnError), false, `non-error input ${String(notAnError)}`);
+  }
+});
+
+test('FRED does not rotate on a gateway rejection — no exit fixes bad credentials', async (t) => {
+  // Same 403 status, but raised by the CONNECT hop rather than by FRED.
+  const proxy = t.mock.method(proxyUtils, 'proxyFetch', async () => {
+    throw Object.assign(new Error('Proxy CONNECT: HTTP/1.1 403 Forbidden'), { status: 403, proxyConnect: true });
+  });
+  t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
+  await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:10001');
+  assert.equal(proxy.mock.callCount(), 1, 'a gateway rejection must still fail fast');
+});
+
+test('FRED still does not rotate on an origin 4xx that every exit answers alike', async (t) => {
+  // A bad series id is not exit-attributable — 400 and 404 fail identically on
+  // every exit, so rotating just burns the budget before the direct leg.
+  for (const status of [400, 404]) {
+    const proxy = t.mock.method(proxyUtils, 'proxyFetch', async () => {
+      throw Object.assign(new Error(`HTTP ${status}`), { status });
+    });
+    const direct = t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
+    await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:10001');
+    assert.equal(proxy.mock.callCount(), 1, `origin ${status} must fail fast`);
+    // Restore BOTH per iteration. Leaving the fetch mock installed stacked a
+    // second mock on the first on the next pass through the loop.
+    proxy.mock.restore();
+    direct.mock.restore();
+  }
 });
 
 test('the proxy-exhaustion warning names every exit it tried', async (t) => {
