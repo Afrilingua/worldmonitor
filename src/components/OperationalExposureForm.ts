@@ -51,8 +51,13 @@ export function createOperationalExposureForm(onChange: (snapshot: OperationalSn
   let snapshot: OperationalSnapshot | null = null;
   let revision = 0;
   let importGeneration = 0;
+  const setNumber = (field: HTMLInputElement, value: number | null) => {
+    field.value = value === null || Number.isNaN(value) ? '' : String(value);
+    field.setCustomValidity(Number.isNaN(value) ? 'Enter a valid number.' : '');
+  };
   const input = (label: string, type: string, parent: HTMLElement, value = '') => {
     const field = h('input', { type, value, 'aria-label': label, ...(type === 'number' ? { min: 0, max: 1e6, step: 'any' } : {}) }) as HTMLInputElement;
+    if (type === 'number') setNumber(field, value === '' ? null : Number(value));
     parent.append(h('label', {}, label, field));
     return field;
   };
@@ -66,7 +71,7 @@ export function createOperationalExposureForm(onChange: (snapshot: OperationalSn
   const stock = input('Starting usable stock', 'number', fields);
   const demand = input('Daily demand', 'number', fields);
   const alternativeDemand = input('Alternative daily demand (blank keeps baseline)', 'number', fields);
-  const numeric = (field: HTMLInputElement) => field.value === '' ? null : Number(field.value);
+  const numeric = (field: HTMLInputElement) => field.validity.badInput || field.validity.customError ? NaN : field.value === '' ? null : Number(field.value);
   const rows = (parent: HTMLElement) => Array.from(parent.children).map(row => {
     const [date, quantity, cost] = Array.from(row.querySelectorAll('input'));
     return { date: date!.value, quantity: numeric(quantity!), unit: unit.value.trim(), costUsd: numeric(cost!) };
@@ -95,10 +100,10 @@ export function createOperationalExposureForm(onChange: (snapshot: OperationalSn
   };
   const populate = (data: OperationalDraft) => {
     basis = data.basis; operation.value = data.operation; unit.value = data.unit; start.value = data.startDate;
-    horizon.value = data.horizonDays === null ? '' : String(data.horizonDays);
-    stock.value = data.startingStock === null ? '' : String(data.startingStock);
-    demand.value = data.dailyDemand === null ? '' : String(data.dailyDemand);
-    alternativeDemand.value = data.alternativeDailyDemand === null ? '' : String(data.alternativeDailyDemand);
+    setNumber(horizon, data.horizonDays);
+    setNumber(stock, data.startingStock);
+    setNumber(demand, data.dailyDemand);
+    setNumber(alternativeDemand, data.alternativeDailyDemand);
     baselineRows.replaceChildren(); alternativeRows.replaceChildren();
     data.deliveries.forEach(row => addRow(baselineRows, 'Baseline delivery', row));
     data.alternativeDeliveries.forEach(row => addRow(alternativeRows, 'Alternative delivery', row));
@@ -112,7 +117,7 @@ export function createOperationalExposureForm(onChange: (snapshot: OperationalSn
   root.prepend(h('h2', {}, 'Operational what-if worksheet'),
     h('p', {}, 'Editable example. Actual operating data is optional. Inputs stay in browser memory until page reload; export JSON to keep them. Use one unit for all quantities. Changing the unit relabels all quantities; it does not convert them. Up to 90 days and 30 deliveries per list. Quantities and costs allow 0-1 million with up to 6 decimal places.'), fields);
   root.addEventListener('input', event => {
-    if (event.target instanceof HTMLInputElement && event.target.type !== 'file') { basis = 'user'; update(); }
+    if (event.target instanceof HTMLInputElement && event.target.type !== 'file') { event.target.setCustomValidity(''); basis = 'user'; update(); }
   });
   const file = input('Import worksheet JSON', 'file', root);
   file.accept = '.json,application/json';
