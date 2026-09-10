@@ -129,6 +129,7 @@ export const SOURCE_CATALOG_LASTMOD_PATHS = Object.freeze([
   'scripts/source-catalog-identity.mjs',
   'shared/source-geography.json',
   'shared/publisher-families.js',
+  CRISIS_REGISTRY_PATH,
   ...FEED_DECLARATION_FILES,
 ]);
 export const CHOKEPOINT_PAGE_LASTMOD_PATHS = Object.freeze([
@@ -174,7 +175,7 @@ const AVAILABLE_EVIDENCE_LIMIT = 6;
 // docs/methodology/country-resilience-index.mdx#supported-readings-on-unranked-country-pages.
 export const SUPPORTED_READING_MIN_COVERAGE = 0.5;
 export const CHOKEPOINT_PAGE_CONTENT_VERSION = '2026-09-04';
-const SOURCES_PAGE_CONTENT_VERSION = '2026-08-20';
+const SOURCES_PAGE_CONTENT_VERSION = '2026-09-10';
 // Dataset schema versions stamp Dataset JSON-LD shape changes, per family. They
 // must NOT fold into every family's sitemap/page lastmod — that made ~90% of main
 // sitemap entries share one schema-bump date (#7382). A family's stamp advances
@@ -524,6 +525,7 @@ export function sourcePageLastmod({
   originLastmod,
   catalogInputLastmods = [],
   sharedTemplateLastmod,
+  snapshotDate,
   generatorContentVersion = CORPUS_GENERATOR_CONTENT_VERSION,
   pageContentVersion = SOURCES_PAGE_CONTENT_VERSION,
 }) {
@@ -533,6 +535,7 @@ export function sourcePageLastmod({
     originLastmod,
     ...catalogInputLastmods,
     sharedTemplateLastmod,
+    snapshotDate,
     generatorContentVersion,
     pageContentVersion,
   );
@@ -1774,6 +1777,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
     originLastmod: gitFileLastmod(rootDir, SOURCE_ORIGIN_PATH),
     catalogInputLastmods: SOURCE_CATALOG_LASTMOD_PATHS.map((path) => gitFileLastmod(rootDir, path)),
     sharedTemplateLastmod: gitFileLastmod(rootDir, SHARED_PAGE_TEMPLATE_PATH),
+    snapshotDate: livePulse.capturedAt,
   });
 
   return {
@@ -4379,6 +4383,26 @@ ${crises.map((crisis) => `        <a class="card" href="/crises/${escapeHtml(cri
   });
 }
 
+function crisisDatasetMetadata(crisis, baseUrl, pulse) {
+  const hasPulse = pulse != null && OBSERVATION_PERIOD_RE.test(String(pulse.referencePeriod ?? ''));
+  const description = hasPulse
+    ? `A bounded World Monitor crisis tracker for ${crisis.title}, with the maintained ${pulse.referencePeriod} HAPI/HDX country summaries across ${crisis.coverage.map((country) => country.name).join(', ')}.`
+    : `A bounded World Monitor crisis tracker reference for ${crisis.title}, defining the maintained geographic scope across ${crisis.coverage.map((country) => country.name).join(', ')}.`;
+  const path = `/crises/${crisis.slug}/`;
+  const url = absoluteUrl(baseUrl, path);
+  return {
+    '@type': 'Dataset',
+    '@id': `${url}#crisis-dataset`,
+    name: `World Monitor crisis tracker reference: ${crisis.shortTitle || crisis.title}`,
+    description,
+    url,
+    keywords: ['crisis tracker', crisis.shortTitle || crisis.title, 'humanitarian conflict', ...crisis.coverage.map((country) => country.name)],
+    distribution: [dataDownload(absoluteUrl(baseUrl, datasetDownloadHref(path, CRISIS_DATASET_DOWNLOAD)))],
+    creator: { ...WORLD_MONITOR_ORG },
+    license: DATASET_LICENSE,
+  };
+}
+
 function renderCrisisPage({
   crisis,
   baseUrl,
@@ -4482,9 +4506,6 @@ ${snapshotSection}
   }));
   // Dataset.spatialCoverage must stay a literal Place for Google; WebPage.about keeps Country.
   const coverageSpatial = coveragePlaces.map((place) => ({ ...place, '@type': 'Place' }));
-  const distribution = [
-    dataDownload(absoluteUrl(baseUrl, datasetDownloadHref(path, CRISIS_DATASET_DOWNLOAD))),
-  ];
   const variableMeasured = [
     {
       '@type': 'PropertyValue',
@@ -4523,9 +4544,6 @@ ${snapshotSection}
       },
     ] : []),
   ];
-  const datasetDescription = hasPulse
-    ? `A bounded World Monitor crisis tracker for ${crisis.title}, with the maintained ${pulse.referencePeriod} HAPI/HDX country summaries across ${crisis.coverage.map((country) => country.name).join(', ')}.`
-    : `A bounded World Monitor crisis tracker reference for ${crisis.title}, defining the maintained geographic scope across ${crisis.coverage.map((country) => country.name).join(', ')}.`;
   return pageDocument({
     baseUrl,
     path,
@@ -4542,15 +4560,8 @@ ${snapshotSection}
         inLanguage: 'en-US',
         about: coveragePlaces,
         mainEntity: {
-          '@type': 'Dataset',
-          '@id': `${absoluteUrl(baseUrl, path)}#crisis-dataset`,
-          name: `World Monitor crisis tracker reference: ${crisis.shortTitle || crisis.title}`,
-          description: datasetDescription,
-          url: absoluteUrl(baseUrl, path),
+          ...crisisDatasetMetadata(crisis, baseUrl, pulse),
           identifier: `crisis-tracker-${crisis.slug}`,
-          keywords: ['crisis tracker', crisis.shortTitle || crisis.title, 'humanitarian conflict', ...crisis.coverage.map((country) => country.name)],
-          creator: { ...WORLD_MONITOR_ORG },
-          license: DATASET_LICENSE,
           datePublished: publishedDate,
           dateModified: laterDate(
             hasPulse ? pulseDateOnly(pulse.asOf, lastmod) : lastmod,
@@ -4562,7 +4573,6 @@ ${snapshotSection}
           variableMeasured,
           measurementTechnique: 'Monthly country-level HAPI/HDX humanitarian conflict summaries; combined totals are published only when covered countries share a reference period.',
           spatialCoverage: coverageSpatial.length === 1 ? coverageSpatial[0] : coverageSpatial,
-          distribution,
         },
       },
       dataCatalogLd(baseUrl),
@@ -4620,13 +4630,29 @@ function renderToolsIndex({ baseUrl, lastmod, crisisCount, chokepointCount }) {
   });
 }
 
+function signalConvergenceDatasetMetadata(signalConvergence, baseUrl) {
+  const metricName = signalConvergence.metricName || 'Geographic Convergence Score';
+  const path = '/tools/signal-convergence/';
+  const url = absoluteUrl(baseUrl, path);
+  return {
+    '@type': 'Dataset',
+    '@id': `${url}#signal-convergence-dataset`,
+    name: `World Monitor ${metricName} reference`,
+    description: `World Monitor's ${metricName} (0-100) names when protests, military flights, naval vessels, and earthquakes co-occur in the same 1° cell.`,
+    url,
+    keywords: ['signal convergence', 'geographic convergence', 'event correlation', 'geopolitical signals'],
+    distribution: [dataDownload(absoluteUrl(baseUrl, datasetDownloadHref(path, CONVERGENCE_DATASET_DOWNLOAD)))],
+    creator: { ...WORLD_MONITOR_ORG },
+    license: DATASET_LICENSE,
+  };
+}
+
 function renderSignalConvergencePage({ signalConvergence, baseUrl, lastmod, snapshotPath }) {
   const path = '/tools/signal-convergence/';
   const metricName = signalConvergence.metricName || 'Geographic Convergence Score';
-  const description = `World Monitor's ${metricName} (0-100) names when protests, military flights, naval vessels, and earthquakes co-occur in the same 1° cell.`;
+  const datasetMetadata = signalConvergenceDatasetMetadata(signalConvergence, baseUrl);
+  const { description } = datasetMetadata;
   const downloadHref = datasetDownloadHref(path, CONVERGENCE_DATASET_DOWNLOAD);
-  const datasetUrl = absoluteUrl(baseUrl, path);
-  const datasetId = `${datasetUrl}#signal-convergence-dataset`;
   const examples = (signalConvergence.referenceExamples || []).map((example) => (
     `        <article class="card">
           <p class="eyebrow">${escapeHtml(example.kind === 'methodology-example' ? 'Methodology example' : 'Reference')}</p>
@@ -4683,15 +4709,8 @@ ${examples}
         url: absoluteUrl(baseUrl, path),
         inLanguage: 'en-US',
         mainEntity: {
-          '@type': 'Dataset',
-          '@id': datasetId,
-          name: `World Monitor ${metricName} reference`,
-          description,
-          url: datasetUrl,
+          ...datasetMetadata,
           identifier: 'signal-convergence-reference',
-          keywords: ['signal convergence', 'geographic convergence', 'event correlation', 'geopolitical signals'],
-          creator: { ...WORLD_MONITOR_ORG },
-          license: DATASET_LICENSE,
           // This reference is a formula plus documentation-derived examples. It
           // has no observation window, so it carries no temporalCoverage; when
           // available, datePublished identifies the source snapshot. The family
@@ -4709,7 +4728,6 @@ ${examples}
           ],
           measurementTechnique: 'type_score = event_types × 25; count_boost = min(25, total_events × 2); convergence_score = min(100, type_score + count_boost)',
           citation: absoluteUrl(baseUrl, '/docs/geographic-convergence'),
-          distribution: [dataDownload(absoluteUrl(baseUrl, downloadHref))],
         },
       },
       dataCatalogLd(baseUrl),
@@ -5058,16 +5076,11 @@ export async function buildCorpus({
     }
   }
 
-  // Flagship downloadable datasets for the /sources/ DataCatalog node: every
-  // entry references the detail-page Dataset with its generated download.
-  // Keep the body on that page so shared identities cannot diverge.
+  // Google validates catalog entries in this document, including bare @id
+  // references. Share self-describing metadata with the canonical detail pages.
   const sourcesCatalogDatasets = [
-    ...data.crises.map((crisis) => ({
-      '@id': `${absoluteUrl(baseUrl, `/crises/${crisis.slug}/`)}#crisis-dataset`,
-    })),
-    {
-      '@id': `${absoluteUrl(baseUrl, '/tools/signal-convergence/')}#signal-convergence-dataset`,
-    },
+    ...data.crises.map((crisis) => crisisDatasetMetadata(crisis, baseUrl, data.livePulse.crises?.[crisis.slug])),
+    signalConvergenceDatasetMetadata(data.livePulse.signalConvergence, baseUrl),
   ];
 
   const sourcePages = buildSourcePages(data.sourceCatalog);
