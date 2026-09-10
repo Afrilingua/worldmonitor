@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createCountryResolvers } from '../scripts/_country-resolver.mjs';
+import { PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES } from '../scripts/_portwatch-content-freshness.mjs';
 import { __testing__ } from '../api/health.js';
 import { getCountryPortActivity } from '../server/worldmonitor/intelligence/v1/get-country-port-activity';
 import { installRedis } from './helpers/fake-upstash-redis.mts';
@@ -35,7 +36,7 @@ function fixtures() {
 
 // Execute the real entry point with only HTTP/Redis and the clock substituted.
 // A minimal child environment excludes local credentials and proxy transports.
-function runProducer(input: Record<string, any>, mode = 'complete', now = NOW) {
+function runProducer(input: Record<string, any>, mode = 'complete', now = NOW, corruptRaw?: string) {
   const code = `
     import { installRedis } from './tests/helpers/fake-upstash-redis.mts';
     const now = ${now};
@@ -52,13 +53,22 @@ function runProducer(input: Record<string, any>, mode = 'complete', now = NOW) {
     const state = installRedis(${JSON.stringify(input)});
     const countries = ${JSON.stringify(countries)};
     const mode = ${JSON.stringify(mode)};
+    const corruptRaw = ${JSON.stringify(corruptRaw) ?? 'undefined'};
+    if (corruptRaw !== undefined) state.redis.set('${PREFIX}' + countries[0][1], corruptRaw);
+    const currentDate = mode === 'moving'
+      ? new RealDate(now - 86400000).toISOString().slice(0, 10) : '2026-09-09';
     const requests = [];
     globalThis.fetch = async (url, init) => {
       const u = new URL(url);
       if (u.origin === 'https://redis.example') {
-        if (mode === 'cache-read-failure' && u.pathname === '/pipeline'
+        if (mode.startsWith('cache-read-') && u.pathname === '/pipeline'
           && JSON.parse(init.body).some(([verb]) => verb === 'GET')) {
-          return Response.json([{ error: 'ERR read failed' }]);
+          const replies = JSON.parse(init.body).map(() => ({ result: null }));
+          if (mode === 'cache-read-short') return Response.json(replies.slice(1));
+          if (mode === 'cache-read-envelope') return Response.json({ result: replies });
+          replies[0] = mode === 'cache-read-missing' ? {}
+            : mode === 'cache-read-type' ? { result: 42 } : { error: 'ERR read failed' };
+          return Response.json(replies);
         }
         return state.fetchImpl(url, init);
       }
@@ -74,19 +84,23 @@ function runProducer(input: Record<string, any>, mode = 'complete', now = NOW) {
       const where = u.searchParams.get('where');
       const iso3 = where.match(/ISO3='([^']+)'/)[1];
       const iso2 = countries.find(([code]) => code === iso3)[1];
-      if (u.searchParams.has('outStatistics')) return Response.json({ features: [{ attributes: { max_date: mode === 'zero' ? null : '2026-09-09' } }] });
+      if (u.searchParams.has('outStatistics')) return Response.json({ features: [{ attributes: { max_date: mode === 'zero' ? null : currentDate } }] });
+      if (mode === 'corrupt-failure' && iso3 === countries[0][0]) return Response.json({ features: [null] });
       if (mode === 'zero') return Response.json({ features: [], exceededTransferLimit: false });
       if (mode === 'activity-page' && iso3 === countries[0][0] && !where.includes('<=')) {
         if (offset > 0) return Response.json({ features: [], exceededTransferLimit: true });
         return Response.json({ features: [{ attributes: { portid: iso2, date: '2026-09-09', portcalls_tanker: 99 } }], exceededTransferLimit: true });
       }
-      return Response.json({ features: [{ attributes: { portid: iso2, ISO3: iso3, date: where.includes('<=') ? '2026-08-01' : '2026-09-09', portcalls_tanker: 1, import_tanker: 0, export_tanker: 0 } }], exceededTransferLimit: false });
+      return Response.json({ features: [{ attributes: { portid: iso2, ISO3: iso3, date: where.includes('<=') ? new RealDate(now - 40 * 86400000).toISOString().slice(0, 10) : currentDate, portcalls_tanker: 1, import_tanker: 0, export_tanker: 0 } }], exceededTransferLimit: false });
     };
     const producer = await import('./scripts/seed-portwatch-port-activity.mjs');
     let error = null;
     try { await producer.main(); } catch (e) { error = e.message; }
     console.log('RESULT ' + JSON.stringify({ error, requests,
-      redis: Object.fromEntries([...state.redis].map(([key, value]) => [key, JSON.parse(value)])),
+      rawRedis: Object.fromEntries(state.redis),
+      redis: Object.fromEntries([...state.redis].map(([key, value]) => {
+        try { return [key, JSON.parse(value)]; } catch { return [key, value]; }
+      })),
     }));
   `;
   const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', code], {
@@ -187,13 +201,85 @@ test('a bad second activity page retains the entire country payload and success 
   assert.equal((await readCountry(t, result.redis, code)).ports[0].tankerCalls30d, 12);
 });
 
-test('cache read failure cannot erase an unreadable last-good country', () => {
+for (const mode of ['cache-read-failure', 'cache-read-short', 'cache-read-envelope', 'cache-read-missing', 'cache-read-type']) {
+  test(`${mode} cannot erase an unreadable last-good country`, () => {
+    const input = fixtures();
+    const result = runProducer(input, mode);
+    assert.match(result.error, /cache read/);
+    for (const [, code] of countries) assert.deepEqual(result.redis[`${PREFIX}${code}`], input[`${PREFIX}${code}`]);
+    assert.equal(result.redis[META].fetchedAt, input[META].fetchedAt);
+    assert.equal(result.redis[META].sourceState, 'error');
+  });
+}
+
+for (const raw of ['{broken', 'null', '[]']) {
+  test(`confirmed corrupt country ${raw} is replaced only after validated recovery`, () => {
+    const input = fixtures();
+    const key = `${PREFIX}${countries[0][1]}`;
+    const failed = runProducer(input, 'corrupt-failure', NOW, raw);
+    assert.match(failed.error, /Incomplete PortWatch coverage/);
+    assert.equal(failed.rawRedis[key], raw, 'failed repair must preserve original bytes');
+    assert.equal(failed.redis[META].fetchedAt, input[META].fetchedAt);
+    assert.ok(countries.some(([, code]) => code !== countries[0][1]
+      && failed.redis[`${PREFIX}${code}`].cacheWrittenAt === NOW), 'other countries must refresh');
+    const repaired = runProducer(failed.redis, 'complete', NOW + DAY / 8, raw);
+    assert.equal(repaired.redis[key].cacheWrittenAt, NOW + DAY / 8);
+    assert.ok(repaired.redis[key].ports.length > 0);
+  });
+}
+
+test('deferred corrupt countries retain their exact stored value', () => {
   const input = fixtures();
-  const result = runProducer(input, 'cache-read-failure');
-  assert.match(result.error, /cache read/);
-  for (const [, code] of countries) assert.deepEqual(result.redis[`${PREFIX}${code}`], input[`${PREFIX}${code}`]);
-  assert.equal(result.redis[META].fetchedAt, input[META].fetchedAt);
-  assert.equal(result.redis[META].sourceState, 'error');
+  for (const [, code] of countries) input[`${PREFIX}${code}`] = [];
+  const result = runProducer(input);
+  const deferred = countries.filter(([, code]) => Array.isArray(result.redis[`${PREFIX}${code}`]));
+  assert.equal(deferred.length, 144);
+  for (const [, code] of deferred) assert.equal(result.rawRedis[`${PREFIX}${code}`], '[]');
+});
+
+test('one persistently corrupt country cannot stop healthy country recovery', () => {
+  const input = fixtures();
+  for (const [, code] of countries) input[`${PREFIX}${code}`].asof = '2026-09-08';
+  const key = `${PREFIX}${countries[0][1]}`;
+  input[key] = [];
+  let state = input;
+  for (let run = 0; run < 7; run++) {
+    const now = NOW + run * PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES * 60_000;
+    const result = runProducer(state, 'corrupt-failure', now);
+    state = result.redis;
+    assert.equal(result.rawRedis[key], '[]');
+    assert.deepEqual(state[CANONICAL], input[CANONICAL]);
+    assert.equal(state[META].fetchedAt, input[META].fetchedAt);
+  }
+  for (const [, code] of countries.slice(1)) {
+    assert.ok(state[`${PREFIX}${code}`].cacheWrittenAt >= NOW, `${code} must recover`);
+  }
+});
+
+test('recovery publishes complete snapshots while upstream dates advance daily', () => {
+  let state = fixtures();
+  const completedDays = new Set<number>();
+  const cadenceMs = PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES * 60_000;
+  const runsPerDay = DAY / cadenceMs;
+  for (let run = 0; run < 3 * runsPerDay; run++) {
+    // Reserve one missed slot each day for interval gating or a failed run.
+    if (run % runsPerDay === 0) continue;
+    const now = NOW + run * cadenceMs;
+    const result = runProducer(state, 'moving', now);
+    if (result.error) {
+      assert.deepEqual(result.redis[CANONICAL], state[CANONICAL]);
+      assert.equal(result.redis[META].fetchedAt, state[META].fetchedAt);
+    } else {
+      completedDays.add(Math.floor(run / runsPerDay));
+      assert.equal(result.redis[META].recordCount, 174);
+      assert.equal(result.redis[META].coverage.complete, true);
+      assert.deepEqual(result.redis[META].coverage.refreshFailures, []);
+      const currentDate = new Date(now - DAY).toISOString().slice(0, 10);
+      for (const [, code] of countries) assert.equal(result.redis[`${PREFIX}${code}`].asof, currentDate);
+    }
+    state = result.redis;
+  }
+  assert.deepEqual([...completedDays], [0, 1, 2], 'each daily update must reach complete publication');
 });
 
 test('durable rotation replaces the snapshot only after complete validated recovery', () => {
@@ -201,7 +287,7 @@ test('durable rotation replaces the snapshot only after complete validated recov
   let state = input;
   let recovered = false;
   for (let run = 0; run < 6; run++) {
-    const now = NOW + run * DAY / 2;
+    const now = NOW + run * PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES * 60_000;
     const result = runProducer(state, 'complete', now);
     state = result.redis;
     if (result.error) {

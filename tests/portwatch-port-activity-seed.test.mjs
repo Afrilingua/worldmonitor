@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES } from '../scripts/_portwatch-content-freshness.mjs';
 import {
   classifyDeferredPayload,
   MAX_CACHE_AGE_MS,
@@ -37,10 +38,12 @@ describe('standalone Railway cron service', () => {
     assert.match(dockerfileSrc, /COPY\s+shared\/\s+\.\/shared\//);
   });
 
-  it('declares the 12-hour recovery cadence and its required credentials', () => {
+  it('declares the 3-hour recovery cadence and its required credentials', () => {
     const registry = JSON.parse(readFileSync(resolve(root, 'scripts/railway-services.json'), 'utf8'));
     const service = registry.find((entry) => entry.service === 'seed-bundle-portwatch-port-activity');
-    assert.equal(service?.cronSchedule, '0 */12 * * *');
+    assert.equal(service?.cronSchedule, '0 */3 * * *');
+    assert.match(bundleSrc, /intervalMs:\s*3\s*\*\s*HOUR/);
+    assert.equal(PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES, 3 * 60);
     assert.deepEqual(service?.requiredEnv, [
       'UPSTASH_REDIS_REST_URL',
       'UPSTASH_REDIS_REST_TOKEN',

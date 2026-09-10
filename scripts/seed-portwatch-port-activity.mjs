@@ -41,7 +41,7 @@ const META_KEY = 'seed-meta:supply_chain:portwatch-ports';
 const LOCK_DOMAIN = 'supply_chain:portwatch-ports';
 // 60 min — covers the widest realistic run of this standalone service.
 const LOCK_TTL_MS = 60 * 60 * 1000;
-const TTL = 259_200; // 3 days — 6× the 12h cron interval
+const TTL = 259_200; // 3 days — 24× the 3h cron interval
 // PortWatch currently has 174 ISO2-mapped countries with port references.
 // This is the issue #3613 health target. Runs below this count must stay
 // non-green in /api/health and /api/seed-health. Only a complete validated
@@ -1018,10 +1018,13 @@ export async function publishPortActivitySnapshot(
   return results;
 }
 
+const CORRUPT_COUNTRY_CACHE = Symbol('corrupt country cache');
+
 // MGET-style batch read via the Upstash REST /pipeline endpoint. Returns an
 // array aligned with `keys` where each element is either the parsed JSON
-// payload or null (only for explicit misses). Read errors are fatal. Primes the
-// per-country cache lookup in one round-trip instead of 174 sequential GETs.
+// payload, explicit miss, or confirmed corrupt value. Transport/envelope errors
+// remain fatal: only a validated upstream replacement may overwrite corruption.
+// Primes the per-country cache lookup in one round-trip instead of 174 GETs.
 async function redisMgetJson(keys) {
   if (keys.length === 0) return [];
   const commands = keys.map((k) => ['GET', k]);
@@ -1033,11 +1036,13 @@ async function redisMgetJson(keys) {
     if (r?.error || !Object.hasOwn(r ?? {}, 'result')) throw new Error('PortWatch cache read failed');
     if (r.result === null) return null;
     if (typeof r.result !== 'string') throw new Error('PortWatch cache read returned invalid result');
-    const payload = JSON.parse(r.result);
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-      throw new Error('PortWatch cache read returned invalid payload');
+    try {
+      const payload = JSON.parse(r.result);
+      return payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload : CORRUPT_COUNTRY_CACHE;
+    } catch {
+      return CORRUPT_COUNTRY_CACHE;
     }
-    return payload;
   });
 }
 
@@ -1326,8 +1331,9 @@ export async function fetchAll(progress, { signal, expectedCountries = [] } = {}
   // per-run cap, refresh the oldest-attempt subset and serve the rest from
   // prior cache marked staleAsof=true. Prevents the catastrophic "everything
   // stale → 174 cold-fetches → bundle SIGTERM" failure mode that produced
-  // 37h of stale data after a single upstream-advance event. A full attempt
-  // sweep completes in ceil(174/30) = 6 runs = 3 days at 12h cadence.
+  // 37h of stale data after a single upstream-advance event. A nominal attempt
+  // sweep takes ceil(174/30) = 6 runs (18h); allow a seventh run when
+  // critical countries reserve repeat slots.
   let servedStaleCount = 0;
   let droppedTooOldCount = 0;
   let droppedNoCacheCount = 0;
@@ -1405,7 +1411,11 @@ export async function fetchAll(progress, { signal, expectedCountries = [] } = {}
     // A transient refresh failure must not discard still-usable data.
     // refreshAttemptedAt advances rotation fairness; cacheWrittenAt remains
     // unchanged, so the hard-expiry decision stays truthful.
-    retainPriorState(item.iso2, state, attemptedAt);
+    // A corrupt stored value was read successfully but is not usable state.
+    // Keep its original bytes if repair fails; never replace it with a marker.
+    retainPriorState(item.iso2,
+      item.prevPayload === CORRUPT_COUNTRY_CACHE ? item.prevPayload : state,
+      attemptedAt);
   };
 
   const completedFetches = new Set();

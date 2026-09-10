@@ -669,4 +669,13 @@ describe('PortWatch atomic publication', () => {
       /transaction: 1\/5 commands failed/,
     );
   });
+
+  it('rejects a shortened transaction acknowledgement', async () => {
+    await assert.rejects(portwatchSeed.publishPortActivitySnapshot(publicationInput(), {
+      fetchFn: async (_url, init) => Response.json(
+        JSON.parse(init.body).slice(1).map(() => ({ result: 'OK' })),
+      ),
+      credentials: { url: 'https://redis.example.test', token: 'token' },
+    }), /Redis transaction failed: invalid response/);
+  });
 });
