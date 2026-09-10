@@ -267,7 +267,11 @@ describe('ScenarioService handlers', () => {
         scenarioId: 'taiwan-strait-full-closure',
         template: { name: 'taiwan_strait', disruptionPct: 100, durationDays: 30, costShockMultiplier: 1.45 },
         affectedChokepointIds: ['taiwan_strait'],
+        // Retired field. Still present in results a pre-#7968 worker cached, which stay
+        // readable for their 24h TTL across the rollout — pinned here so the handler
+        // drops it rather than echoing it back.
         currentDisruptionScores: { taiwan_strait: 42 },
+        // No evaluatedRecords/requestedRecords either: an older worker did not emit them.
         topImpactCountries: [{ iso2: 'JP', totalImpact: 1500, impactPct: 100 }],
       };
       globalThis.fetch = async () =>
@@ -286,6 +290,13 @@ describe('ScenarioService handlers', () => {
       assert.equal(res.result.topImpactCountries[0].impactPct, 100);
       assert.equal(res.result.template?.disruptionPct, 100);
       assert.equal(res.result.coverage.status, 'unknown');
+      assert.equal('currentDisruptionScores' in res.result, false);
+      // A legacy result carries no per-country evidence counts. They must default to 0
+      // WITHOUT flipping partialEvidence on, which would mark every legacy country as a
+      // lower bound and misreport a complete historical run.
+      assert.equal(res.result.topImpactCountries[0].evaluatedRecords, 0);
+      assert.equal(res.result.topImpactCountries[0].requestedRecords, 0);
+      assert.equal(res.result.topImpactCountries[0].partialEvidence, false);
     });
 
     it('marks malformed coverage unknown instead of dropping records from a complete result', async () => {

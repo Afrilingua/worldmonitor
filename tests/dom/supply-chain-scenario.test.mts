@@ -113,4 +113,77 @@ describe('SupplyChainPanel scenario controls', () => {
     button().click(); await settle();
     expect(panel.getElement().textContent).toContain('Unknown coverage');
   });
+  // Positive control for the render-vs-DOM-mutation fix. The change handler used to set
+  // button.disabled/textContent directly, which desynced Panel's committed-HTML snapshot;
+  // a later identical render then short-circuited and could never repair the button.
+  it('re-enables the button through a render when a control returns to the active params', async () => {
+    change(select(), 'DE'); change(severity(), '50');
+    button().click(); await settle();
+    expect(button().disabled).toBe(true);
+    // Away and back with no intervening run: the snapshot and the DOM must still agree.
+    change(select(), 'JP');
+    expect(button().disabled).toBe(false);
+    change(select(), 'DE');
+    expect(button().disabled).toBe(true);
+    change(select(), 'JP');
+    expect(button().disabled).toBe(false);
+    expect(button().textContent).toContain('Simulate Closure');
+    // And it must actually be clickable, not merely painted enabled.
+    mocks.poll.mockResolvedValue({ status: 'done', result: result('JP', 50) });
+    button().click(); await settle();
+    expect(mocks.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a cancelled run re-enable the button a newer run owns', async () => {
+    let releaseFirst: (value: unknown) => void = () => {};
+    mocks.poll.mockReturnValueOnce(new Promise(r => { releaseFirst = r; }));
+    button().click(); await settle();
+    expect(button().disabled).toBe(true);
+    // Second run starts and takes ownership of the shared abort controller.
+    change(select(), 'JP');
+    mocks.poll.mockReturnValue(new Promise(() => {}));
+    button().click(); await settle();
+    expect(button().disabled).toBe(true);
+    // The FIRST run now unblocks and walks its abort path. It must not touch the button.
+    releaseFirst({ status: 'done', result: result('DE') });
+    await settle();
+    expect(button().disabled).toBe(true);
+    expect(button().textContent).not.toContain('Simulate Closure');
+  });
+
+  it('sends an explicit zero severity and reports no route disruption', async () => {
+    change(severity(), '0');
+    mocks.poll.mockResolvedValue({ status: 'done', result: result('DE', 0) });
+    change(select(), 'DE');
+    button().click(); await settle();
+    expect(mocks.run.mock.calls[0]![0]).toEqual({ scenarioId: 'hormuz-tanker-blockade', iso2: 'DE', disruptionPct: 0 });
+    expect(panel.getElement().textContent).toContain('No physical route disruption is highlighted.');
+    expect(panel.getElement().textContent).toContain('0% closure');
+  });
+
+  it('restores a cleared severity box to the template default instead of an explicit zero', async () => {
+    change(severity(), '');
+    expect(severity().value).toBe('100');
+    change(select(), 'DE');
+    button().click(); await settle();
+    expect(mocks.run.mock.calls[0]![0]!.disruptionPct).toBe(100);
+  });
+
+  it('marks a country aggregated from partial evidence as a lower bound', async () => {
+    const partial = result('DE', 50);
+    partial.topImpactCountries = [{ iso2: 'DE', totalImpact: 42, impactPct: 100, evaluatedRecords: 1, requestedRecords: 2, partialEvidence: true }] as never;
+    panel.showScenarioSummary('hormuz-tanker-blockade', partial);
+    await settle();
+    expect(panel.getElement().textContent).toContain('partial evidence');
+    expect(panel.getElement().textContent).toContain('\u226542.00 score units');
+  });
+
+  it('offers unseeded countries as disabled options rather than silent dead ends', () => {
+    const options = [...select().querySelectorAll('option')];
+    const seeded = options.find(o => o.value === 'DE')!;
+    const unseeded = options.find(o => o.value === 'PR')!;
+    expect(seeded.disabled).toBe(false);
+    expect(unseeded.disabled).toBe(true);
+    expect(unseeded.textContent).toContain('not seeded');
+  });
 });

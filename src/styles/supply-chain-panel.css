@@ -54,3 +54,14 @@
   .sc-scenario-trigger select, .sc-scenario-trigger input,
   .sc-scenario-btn, .sc-scenario-export, .sc-scenario-dismiss { min-height: 44px; }
 }
+
+/* Scenario controls. Sizes use the panel scale variable like every other row in this
+   file — the markup previously carried these as inline style attributes. */
+.sc-scenario-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.sc-scenario-control { display: block; }
+.sc-scenario-control--country { flex: 1; min-width: 140px; }
+.sc-scenario-control select { display: block; width: 100%; }
+.sc-scenario-control input { display: block; width: 100px; }
+.sc-scenario-control option:disabled { color: #64748b; }
+.sc-scenario-hint { font-size: calc(11px * var(--wm-panel-effective-scale, 1)); color: #94a3b8; }
+.sc-scenario-partial { color: #fbbf24; font-style: normal; }

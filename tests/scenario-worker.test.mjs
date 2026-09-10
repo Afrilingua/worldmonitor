@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeScenario, physicalImpact } from '../scripts/scenario-worker.mjs';
+import { computeScenario, physicalImpact, EXPOSURE_BATCH_SIZE } from '../scripts/scenario-worker.mjs';
 
 const originalFetch = globalThis.fetch;
 const originalEnv = { ...process.env };
@@ -90,7 +90,7 @@ describe('scenario worker manifest and evidence', () => {
       ['JP', '29', 'evaluated', 0],
     ]);
     assert.equal(result.coverage.status, 'partial');
-    assert.deepEqual(result.topImpactCountries, [{ iso2: 'JP', totalImpact: 0, impactPct: 0 }]);
+    assert.deepEqual(result.topImpactCountries.map(c => [c.iso2, c.totalImpact, c.impactPct]), [['JP', 0, 0]]);
   });
 
   it('reports unknown coverage after manifest GET rejection without pipeline reads', async () => {
@@ -110,14 +110,84 @@ describe('scenario worker manifest and evidence', () => {
     assert.equal(batches.length, 0);
   });
 
-  it('reports unknown coverage for absent, old, invalid or failed manifest without guessing keys', async () => {
-    for (const value of [null, {}, { ...manifest(), status: 'error' }, { ...manifest(), countryIds: ['DE', 'DE'] }, { ...manifest(), hs2Codes: ['../../key'] }]) {
+  it('reports unknown coverage for absent, old or invalid manifest without guessing keys', async () => {
+    for (const value of [null, {}, { ...manifest(), manifestVersion: 2 }, { ...manifest(), countryIds: ['DE', 'DE'] }, { ...manifest(), hs2Codes: ['../../key'] }, { ...manifest(), countryIds: [] }, { ...manifest(), hs2Codes: [] }]) {
       cache.set('seed-meta:supply_chain:chokepoint-exposure', value);
       const result = await computeScenario('hormuz-tanker-blockade', null);
       assert.equal(result.coverage.status, 'unknown');
       assert.deepEqual(result.topImpactCountries, []);
     }
     assert.equal(batches.length, 0);
+  });
+
+  // A failed seed run invalidates per-key FRESHNESS, which the per-record 'missing' state
+  // already reports. It does not invalidate the country/sector UNIVERSE, which comes from
+  // static config. Gating on status:'ok' turned any single seeder failure into a total
+  // feature blackout while the exposure keys it describes stayed TTL-extended and valid.
+  it('still evaluates a manifest whose last seed run failed', async () => {
+    cache.set('seed-meta:supply_chain:chokepoint-exposure', { ...manifest(['DE'], ['27']), status: 'error', recordCount: 0 });
+    cache.set(key('DE', '27'), record('DE', '27', 40));
+    const result = await computeScenario('hormuz-tanker-blockade', 'DE', 100);
+    assert.notEqual(result.coverage.status, 'unknown');
+    assert.equal(result.coverage.records[0].state, 'evaluated');
+    assert.equal(result.topImpactCountries[0].totalImpact, 84);
+  });
+
+  // The producer's literal outputs, so a shape change in the seeder reds this file.
+  it('accepts the exact metadata shapes the seeder writes on both paths', async () => {
+    const universe = { manifestVersion: 1, countryIds: ['DE'], hs2Codes: ['27', '29'] };
+    for (const status of ['ok', 'error']) {
+      cache.set('seed-meta:supply_chain:chokepoint-exposure', { fetchedAt: 1789000000000, recordCount: status === 'ok' ? 4290 : 0, status, ...universe });
+      cache.set(key('DE', '27'), record('DE', '27', 40));
+      cache.set(key('DE', '29'), record('DE', '29', 10));
+      const result = await computeScenario('hormuz-tanker-blockade', 'DE', 100);
+      assert.equal(result.coverage.status, 'complete', `status=${status}`);
+      assert.equal(result.topImpactCountries[0].totalImpact, 105, `status=${status}`);
+    }
+  });
+
+  // Positive control for the all-affected-chokepoints requirement. Without this, deleting
+  // the `affected.length !== template.affectedChokepointIds.length` branch keeps the suite
+  // green, because every other fixture uses a single-chokepoint or tariff template.
+  it('flags a record missing one of a multi-chokepoint template as incomplete_routes', async () => {
+    cache.set('seed-meta:supply_chain:chokepoint-exposure', manifest(['DE'], ['27']));
+    cache.set(key('DE', '27'), {
+      iso2: 'DE', hs2: '27', coverage: 'flow_weighted', fetchedAt: '2026-09-09T00:00:00Z',
+      vulnerabilityIndex: 10,
+      // suez-bab-simultaneous disrupts suez AND bab_el_mandeb; only suez is present.
+      exposures: [{ chokepointId: 'suez', exposureScore: 40 }],
+    });
+    const result = await computeScenario('suez-bab-simultaneous', 'DE', 100);
+    assert.equal(result.coverage.records[0].state, 'incomplete_routes');
+    assert.equal(result.coverage.records[0].rawImpact, undefined);
+    assert.deepEqual(result.topImpactCountries, []);
+    // Distinct from 'malformed': the cache entry itself is well-formed.
+    assert.notEqual(result.coverage.records[0].state, 'malformed');
+
+    cache.set(key('DE', '27'), {
+      iso2: 'DE', hs2: '27', coverage: 'flow_weighted', fetchedAt: '2026-09-09T00:00:00Z',
+      vulnerabilityIndex: 10,
+      exposures: [{ chokepointId: 'suez', exposureScore: 40 }, { chokepointId: 'bab_el_mandeb', exposureScore: 20 }],
+    });
+    const complete = await computeScenario('suez-bab-simultaneous', 'DE', 100);
+    assert.equal(complete.coverage.records[0].state, 'evaluated');
+  });
+
+  it('marks a country aggregated from partial evidence as a lower bound', async () => {
+    cache.set('seed-meta:supply_chain:chokepoint-exposure', manifest(['DE'], ['27', '29']));
+    cache.set(key('DE', '27'), record('DE', '27', 0));  // genuine evaluated zero
+    // DE/29 absent -> 'missing'. The country total is therefore built from 1 of 2 records.
+    const result = await computeScenario('hormuz-tanker-blockade', 'DE', 100);
+    const de = result.topImpactCountries[0];
+    assert.equal(de.totalImpact, 0);
+    assert.equal(de.evaluatedRecords, 1);
+    assert.equal(de.requestedRecords, 2);
+    assert.equal(de.partialEvidence, true, 'a zero built from partial evidence must not read as a genuine zero');
+
+    cache.set(key('DE', '29'), record('DE', '29', 0));
+    const full = await computeScenario('hormuz-tanker-blockade', 'DE', 100);
+    assert.equal(full.topImpactCountries[0].partialEvidence, false);
+    assert.equal(full.topImpactCountries[0].evaluatedRecords, 2);
   });
 
   it('distinguishes a country or sector outside the manifest from a missing seeded key', async () => {
@@ -140,18 +210,65 @@ describe('scenario worker manifest and evidence', () => {
     }
   });
 
-  it('bounds reads to 100 keys per batch', async () => {
-    const countries = Array.from({ length: 12 }, (_, i) => `A${String.fromCharCode(65 + i)}`);
-    const sectors = Array.from({ length: 11 }, (_, i) => String(i + 1).padStart(2, '0'));
+  it('bounds reads to EXPOSURE_BATCH_SIZE keys per batch', async () => {
+    // Derived from the constant, not a hardcoded literal: raising the batch size to cut
+    // round-trips must not require editing a magic number in two places.
+    const total = EXPOSURE_BATCH_SIZE + 32;
+    const sectors = Array.from({ length: 8 }, (_, i) => String(i + 1).padStart(2, '0'));
+    const countries = Array.from({ length: Math.ceil(total / sectors.length) }, (_, i) =>
+      `${String.fromCharCode(65 + Math.floor(i / 26))}${String.fromCharCode(65 + (i % 26))}`);
     cache.set('seed-meta:supply_chain:chokepoint-exposure', manifest(countries, sectors));
     const result = await computeScenario('panama-drought-50pct', null);
-    assert.deepEqual(batches.map(b => b.length), [100, 32]);
-    assert.equal(result.coverage.records.length, 132);
+    const expected = countries.length * sectors.length;
+    assert.equal(result.coverage.records.length, expected);
+    assert.equal(batches.length, Math.ceil(expected / EXPOSURE_BATCH_SIZE));
+    assert.ok(batches.every(b => b.length <= EXPOSURE_BATCH_SIZE), 'no batch may exceed the constant');
+    assert.equal(batches.reduce((n, b) => n + b.length, 0), expected);
   });
 
   it('fails on Redis transport errors instead of declaring missing evidence', async () => {
     globalThis.fetch = async url => String(url).endsWith('/pipeline')
       ? new Response('unavailable', { status: 503 }) : Response.json({ result: JSON.stringify(manifest()) });
     await assert.rejects(computeScenario('hormuz-tanker-blockade', null), /HTTP 503/);
+  });
+
+  // The 503 case above throws at the earlier !resp.ok check, so neither arm of the
+  // pipeline-integrity guard was reachable from the suite before these two.
+  it('rejects a pipeline response with fewer entries than keys requested', async () => {
+    const fetchFixture = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).endsWith('/pipeline')) return fetchFixture(url, init);
+      const commands = JSON.parse(init.body);
+      return Response.json(commands.slice(1).map(() => ({ result: null })));
+    };
+    await assert.rejects(computeScenario('hormuz-tanker-blockade', null), /Incomplete Redis exposure pipeline/);
+  });
+
+  it('rejects a pipeline response carrying a per-entry error', async () => {
+    const fetchFixture = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).endsWith('/pipeline')) return fetchFixture(url, init);
+      const commands = JSON.parse(init.body);
+      return Response.json(commands.map((_, i) =>
+        i === 0 ? { error: 'ERR unknown command' } : { result: null }));
+    };
+    await assert.rejects(computeScenario('hormuz-tanker-blockade', null), /Incomplete Redis exposure pipeline/);
+  });
+
+  it('retries a transient pipeline failure rather than failing the whole job', async () => {
+    const fetchFixture = globalThis.fetch;
+    let pipelineCalls = 0;
+    cache.set('seed-meta:supply_chain:chokepoint-exposure', manifest(['DE'], ['27']));
+    cache.set(key('DE', '27'), record('DE', '27', 40));
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).endsWith('/pipeline')) return fetchFixture(url, init);
+      pipelineCalls++;
+      if (pipelineCalls === 1) return new Response('flap', { status: 503 });
+      return fetchFixture(url, init);
+    };
+    const result = await computeScenario('hormuz-tanker-blockade', 'DE', 100);
+    assert.ok(pipelineCalls > 1, 'expected a retry after the transient failure');
+    assert.equal(result.coverage.records[0].state, 'evaluated');
+    assert.equal(result.topImpactCountries[0].totalImpact, 84);
   });
 });

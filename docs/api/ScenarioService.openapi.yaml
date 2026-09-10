@@ -739,6 +739,20 @@ components:
                         Impact as a 0-100 share of max(maxReturnedTotalImpact, 1), capped at 100.
                          Because of the denominator floor, the top country can be below 100 when
                          all returned totalImpact values are below 1.
+                evaluatedRecords:
+                    type: integer
+                    format: int32
+                    description: Country/sector records that actually produced total_impact.
+                requestedRecords:
+                    type: integer
+                    format: int32
+                    description: Country/sector records requested for this country.
+                partialEvidence:
+                    type: boolean
+                    description: |-
+                        True when evaluated_records < requested_records. total_impact is then a LOWER
+                         BOUND over the evidence that was available, not the country's impact, and must
+                         not be read as low exposure.
             description: ScenarioImpactCountry carries a single country's relative scenario impact score.
         ScenarioResultTemplate:
             type: object
@@ -752,7 +766,9 @@ components:
                 disruptionPct:
                     type: integer
                     format: int32
-                    description: 0-100 percent of chokepoint capacity blocked.
+                    description: |-
+                        0-100 percent of chokepoint capacity blocked. The EFFECTIVE severity: the
+                         caller's RunScenarioRequest.disruption_pct when supplied, else the registry default.
                 durationDays:
                     type: integer
                     format: int32
@@ -762,9 +778,9 @@ components:
                     format: double
                     description: Freight cost multiplier applied on top of bypass corridor costs.
             description: |-
-                ScenarioResultTemplate carries template parameters echoed into the worker's
-                 computed result so clients can render them without re-looking up the
-                 template registry.
+                ScenarioResultTemplate carries the EFFECTIVE run parameters, so clients can render
+                 them without re-looking up the template registry. All fields except disruption_pct
+                 are registry values; disruption_pct is the caller's override when one was supplied.
         ScenarioCoverage:
             type: object
             properties:
@@ -799,7 +815,11 @@ components:
                     description: Requested 2-digit HS chapter; paired with iso2 as the record reference.
                 state:
                     type: string
-                    description: evaluated, missing, malformed, or not_seeded.
+                    description: |-
+                        evaluated, missing, malformed, incomplete_routes, or not_seeded.
+                         incomplete_routes means the cached record was well-formed but did not carry an
+                         entry for every chokepoint this scenario disrupts — seeder/template registry
+                         drift, NOT corrupt cache data.
                 basis:
                     type: string
                     description: flow_weighted or country_route_fallback, only for evaluated records.

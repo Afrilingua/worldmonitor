@@ -37,6 +37,9 @@ export interface ScenarioImpactCountry {
   iso2: string;
   totalImpact: number;
   impactPct: number;
+  evaluatedRecords: number;
+  requestedRecords: number;
+  partialEvidence: boolean;
 }
 
 export interface ScenarioResultTemplate {

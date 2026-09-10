@@ -14,7 +14,7 @@
  */
 
 import { pathToFileURL } from 'node:url';
-import { getRedisCredentials, loadEnvFile } from './_seed-utils.mjs';
+import { getRedisCredentials, loadEnvFile, withRetry } from './_seed-utils.mjs';
 
 loadEnvFile(import.meta.url);
 
@@ -22,6 +22,16 @@ const QUEUE_KEY = 'scenario-queue:pending';
 const PROCESSING_KEY = 'scenario-queue:processing';
 const RESULT_TTL_SECONDS = 86_400; // 24 h
 const BLMOVE_TIMEOUT_SECONDS = 30;  // block for up to 30s waiting for a job
+
+// Keys per exposure pipeline request. A full-scope run reads
+// len(countryIds) x len(hs2Codes) keys (197 x 17 = 3,349 today), so this sets how many
+// sequential Upstash round-trips the job costs: 3,349 / 350 = 10 rather than 34.
+// tests/scenario-worker.test.mjs derives its expected batch sizes from this constant.
+export const EXPOSURE_BATCH_SIZE = 350;
+// Wall-clock budget for computeScenario. The panel polls 60 x 1s before giving up
+// (src/components/SupplyChainPanel.ts), so a job that outlives that window only stalls
+// the single-threaded queue for jobs behind it. Landing inside it keeps the result useful.
+const COMPUTE_BUDGET_MS = 45_000;
 
 /** @typedef {{ jobId: string; scenarioId: string; iso2: string | null; disruptionPct?: number; enqueuedAt: number }} ScenarioJob */
 
@@ -160,30 +170,35 @@ async function redisLrem(key, value) {
  */
 async function redisPipelineGet(keys) {
   if (keys.length === 0) return [];
-  const { url, token } = getCredentials();
-  const pipeline = keys.map(k => ['GET', k]);
-  const resp = await fetch(`${url}/pipeline`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(pipeline),
-    signal: AbortSignal.timeout(30_000),
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => '');
-    throw new Error(`Redis pipeline HTTP ${resp.status}: ${text.slice(0, 200)}`);
-  }
-  const results = /** @type {Array<{ result: string | null }>} */ (await resp.json());
-  if (!Array.isArray(results) || results.length !== keys.length || results.some(r => r?.error)) {
-    throw new Error('Incomplete Redis exposure pipeline');
-  }
-  return results.map(r => {
-    if (r.result === null) return null;
-    try { return JSON.parse(r.result) ?? {}; }
-    catch { return {}; }
-  });
+  // Retried: this pipeline is now fail-closed (a short array or any per-entry error
+  // aborts the whole job), and a full-scope run makes several sequential requests, so
+  // one transient blip would otherwise fail the entire scenario with no recourse.
+  return withRetry(async () => {
+    const { url, token } = getCredentials();
+    const pipeline = keys.map(k => ['GET', k]);
+    const resp = await fetch(`${url}/pipeline`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(pipeline),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`Redis pipeline HTTP ${resp.status}: ${text.slice(0, 200)}`);
+    }
+    const results = /** @type {Array<{ result: string | null }>} */ (await resp.json());
+    if (!Array.isArray(results) || results.length !== keys.length || results.some(r => r?.error)) {
+      throw new Error('Incomplete Redis exposure pipeline');
+    }
+    return results.map(r => {
+      if (r.result === null) return null;
+      try { return JSON.parse(r.result) ?? {}; }
+      catch { return {}; }
+    });
+  }, 2, 250);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -215,7 +230,12 @@ export async function computeScenario(scenarioId, iso2, disruptionPct) {
   const validIds = (values, pattern, limit) => Array.isArray(values) && values.length > 0
     && values.length <= limit && values.every(v => typeof v === 'string' && pattern.test(v))
     && new Set(values).size === values.length;
-  const manifestKnown = manifest?.manifestVersion === 1 && manifest.status === 'ok'
+  // Deliberately NOT gated on `manifest.status === 'ok'`. The manifest's country/sector
+  // arrays describe the seeder's static universe, not the outcome of its last run — a
+  // failed run leaves them true while invalidating per-key freshness, which the per-record
+  // `missing` state already reports. Requiring 'ok' here turned any single seeder failure
+  // into a total feature blackout even though the exposure keys stay TTL-extended.
+  const manifestKnown = manifest?.manifestVersion === 1
     && validIds(manifest.countryIds, /^[A-Z]{2}$/, 250)
     && validIds(manifest.hs2Codes, /^(0[1-9]|[1-9][0-9])$/, 99);
   const countryIds = iso2 ? [iso2] : manifestKnown ? manifest.countryIds : [];
@@ -223,9 +243,13 @@ export async function computeScenario(scenarioId, iso2, disruptionPct) {
   const records = [];
   const pending = [];
   if (manifestKnown) {
+    // Set lookups: the double loop runs len(countryIds) x len(hs2Codes) times
+    // (197 x 17 = 3,349 at current cardinality) and Array.includes is O(n).
+    const seededCountries = new Set(manifest.countryIds);
+    const seededHs2 = new Set(manifest.hs2Codes);
     for (const country of countryIds) {
       for (const hs2 of hs2Codes) {
-        const seeded = manifest.countryIds.includes(country) && manifest.hs2Codes.includes(hs2);
+        const seeded = seededCountries.has(country) && seededHs2.has(hs2);
         const record = { iso2: country, hs2, state: seeded ? 'missing' : 'not_seeded', basis: '', fetchedAt: '' };
         records.push(record);
         if (seeded) pending.push(record);
@@ -234,8 +258,20 @@ export async function computeScenario(scenarioId, iso2, disruptionPct) {
   }
   const validScore = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
   const byCountry = new Map();
-  for (let offset = 0; offset < pending.length; offset += 100) {
-    const batch = pending.slice(offset, offset + 100);
+  // Per-country evidence tally, so an aggregate built from incomplete evidence is not
+  // presented as that country's impact. Keyed by iso2 -> { evaluated, requested }.
+  const byCountryEvidence = new Map();
+  for (const record of records) {
+    const tally = byCountryEvidence.get(record.iso2) ?? { evaluated: 0, requested: 0 };
+    tally.requested++;
+    byCountryEvidence.set(record.iso2, tally);
+  }
+  const deadline = Date.now() + COMPUTE_BUDGET_MS;
+  for (let offset = 0; offset < pending.length; offset += EXPOSURE_BATCH_SIZE) {
+    // Unread records keep their pre-set 'missing' state, so an exhausted budget
+    // reports partial coverage truthfully rather than silently returning fewer countries.
+    if (Date.now() > deadline) break;
+    const batch = pending.slice(offset, offset + EXPOSURE_BATCH_SIZE);
     const values = await redisPipelineGet(batch.map(r => `supply-chain:exposure:${r.iso2}:${r.hs2}:v1`));
     for (let i = 0; i < batch.length; i++) {
       const record = batch[i];
@@ -248,7 +284,15 @@ export async function computeScenario(scenarioId, iso2, disruptionPct) {
         || data.exposures.some(e => !e || typeof e.chokepointId !== 'string' || !validScore(e.exposureScore))
         || new Set(data.exposures.map(e => e.chokepointId)).size !== data.exposures.length) continue;
       const affected = data.exposures.filter(e => template.affectedChokepointIds.includes(e.chokepointId));
-      if (isTariffShock ? !validScore(data.vulnerabilityIndex) : affected.length !== template.affectedChokepointIds.length) continue;
+      if (isTariffShock && !validScore(data.vulnerabilityIndex)) continue;
+      // A shortfall here is NOT corrupt cache: both seeder builders emit one entry per
+      // registry chokepoint, so a missing entry means the seeder's chokepoint registry and
+      // this file's SCENARIO_TEMPLATES have drifted. Report that as its own state instead
+      // of blaming the cache.
+      if (!isTariffShock && affected.length !== template.affectedChokepointIds.length) {
+        record.state = 'incomplete_routes';
+        continue;
+      }
       const rawImpact = isTariffShock
         ? data.vulnerabilityIndex * template.costShockMultiplier
         : affected.reduce((sum, e) => sum + physicalImpact(e.exposureScore, severity, template.costShockMultiplier), 0);
@@ -257,6 +301,8 @@ export async function computeScenario(scenarioId, iso2, disruptionPct) {
         fetchedAt: typeof data.fetchedAt === 'string' && Number.isFinite(Date.parse(data.fetchedAt)) ? data.fetchedAt : '',
       });
       byCountry.set(record.iso2, (byCountry.get(record.iso2) ?? 0) + rawImpact);
+      const tally = byCountryEvidence.get(record.iso2);
+      if (tally) tally.evaluated++;
     }
   }
   const sorted = [...byCountry.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 20);
@@ -270,14 +316,26 @@ export async function computeScenario(scenarioId, iso2, disruptionPct) {
       costShockMultiplier: template.costShockMultiplier,
     },
     affectedChokepointIds: template.affectedChokepointIds,
-    topImpactCountries: sorted.map(([countryIso2, totalImpact]) => ({
-      iso2: countryIso2, totalImpact,
-      impactPct: Math.min(Math.round((totalImpact / maxImpact) * 100), 100),
-    })),
+    topImpactCountries: sorted.map(([countryIso2, totalImpact]) => {
+      const tally = byCountryEvidence.get(countryIso2) ?? { evaluated: 0, requested: 0 };
+      return {
+        iso2: countryIso2, totalImpact,
+        impactPct: Math.min(Math.round((totalImpact / maxImpact) * 100), 100),
+        // A total built from part of the requested evidence is a lower-bound subtotal,
+        // not the country's impact. Consumers must not read it as low exposure.
+        evaluatedRecords: tally.evaluated,
+        requestedRecords: tally.requested,
+        partialEvidence: tally.evaluated < tally.requested,
+      };
+    }),
     scopedIso2: iso2 ?? '',
     computedAt: new Date().toISOString(),
     coverage: {
-      status: !manifestKnown ? 'unknown' : records.every(r => r.state === 'evaluated') ? 'complete' : 'partial',
+      // `records.length > 0` guard: every() is vacuously true on an empty array, which
+      // would report "complete" for a run that evaluated nothing.
+      status: !manifestKnown ? 'unknown'
+        : records.length > 0 && records.every(r => r.state === 'evaluated') ? 'complete'
+        : 'partial',
       countryIds, hs2Codes, records,
       manifestFetchedAt: manifestKnown && typeof manifest.fetchedAt === 'number' && Number.isFinite(manifest.fetchedAt)
         && Math.abs(manifest.fetchedAt) <= 8.64e15 ? new Date(manifest.fetchedAt).toISOString() : '',
