@@ -399,6 +399,7 @@ export function sourceHealthMeta(status) {
       lastSuccessfulAt: status.lastSuccessfulAt || '',
       consecutiveFailures: status.consecutiveFailures,
       firstFailureAt: status.firstFailureAt,
+      ...(status.confirmedEmpty === true ? { confirmedEmpty: true } : {}),
       ...(status.error ? { error: status.error } : {}),
     } : {}),
   };
