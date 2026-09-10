@@ -8882,18 +8882,21 @@ components:
                 lngShareOfImports:
                     type: number
                     format: double
+                    description: Fraction, not percent. Absent when the measurement is unavailable.
                 lngImportsTj:
                     type: number
                     format: double
                 lngDisruptionTj:
                     type: number
                     format: double
+                    description: Assumed monthly LNG loss against the route baseline, independent of current shipping flow.
                 totalDemandTj:
                     type: number
                     format: double
                 deficitPct:
                     type: number
                     format: double
+                    description: Assumed loss as percent of recorded demand, not an actual supply-shortage estimate.
                 dataAvailable:
                     type: boolean
                 assessment:
@@ -8902,6 +8905,12 @@ components:
                     $ref: '#/components/schemas/GasStorageBuffer'
                 dataSource:
                     type: string
+                dataMonth:
+                    type: string
+                    description: JODI observation month (YYYY-MM), or empty when unknown. Availability does not imply freshness.
+                modelBasis:
+                    type: string
+                    description: '"assumed_route_sensitivity". No country-specific supplier exposure is measured.'
         GasStorageBuffer:
             type: object
             properties:
@@ -8914,6 +8923,7 @@ components:
                 bufferDays:
                     type: number
                     format: double
+                    description: Retained for compatibility. Omitted because stock divided by marginal loss is not endurance.
                 trend:
                     type: string
                 date:

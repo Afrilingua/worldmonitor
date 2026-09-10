@@ -24,22 +24,30 @@ message ProductImpact {
 message GasStorageBuffer {
   double fill_pct    = 1;
   double gas_twh     = 2;
-  double buffer_days = 3;
+  // Retained for compatibility. Omitted because stock divided by marginal loss is not endurance.
+  optional double buffer_days = 3 [deprecated = true];
   string trend       = 4;
   string date        = 5;
   string scope       = 6;
 }
 
 message GasImpact {
-  double lng_share_of_imports = 1;
+  // Fraction, not percent. Absent when the measurement is unavailable.
+  optional double lng_share_of_imports = 1;
   double lng_imports_tj       = 2;
+  // Assumed monthly LNG loss against the route baseline, independent of current shipping flow.
   double lng_disruption_tj    = 3;
   double total_demand_tj      = 4;
+  // Assumed loss as percent of recorded demand, not an actual supply-shortage estimate.
   double deficit_pct          = 5;
   bool   data_available       = 6;
   string assessment           = 7;
   GasStorageBuffer storage    = 8;
   string data_source          = 9;
+  // JODI observation month (YYYY-MM), or empty when unknown. Availability does not imply freshness.
+  string data_month           = 10;
+  // "assumed_route_sensitivity". No country-specific supplier exposure is measured.
+  string model_basis          = 11;
 }
 
 message ComputeEnergyShockScenarioResponse {

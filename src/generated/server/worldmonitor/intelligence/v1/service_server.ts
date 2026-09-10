@@ -773,7 +773,7 @@ export interface ProductImpact {
 }
 
 export interface GasImpact {
-  lngShareOfImports: number;
+  lngShareOfImports?: number;
   lngImportsTj: number;
   lngDisruptionTj: number;
   totalDemandTj: number;
@@ -782,12 +782,14 @@ export interface GasImpact {
   assessment: string;
   storage?: GasStorageBuffer;
   dataSource: string;
+  dataMonth: string;
+  modelBasis: string;
 }
 
 export interface GasStorageBuffer {
   fillPct: number;
   gasTwh: number;
-  bufferDays: number;
+  bufferDays?: number;
   trend: string;
   date: string;
   scope: string;
