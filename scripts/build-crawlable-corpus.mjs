@@ -148,7 +148,7 @@ export const COMPARISON_PAGE_LASTMOD_PATHS = Object.freeze([
 // families take the later of this version and their own committed source date,
 // so template changes are reflected without pretending every deploy is fresh.
 export const CORPUS_GENERATOR_CONTENT_VERSION = '2026-09-01';
-export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-08';
+export const COUNTRY_PAGE_CONTENT_VERSION = '2026-09-10';
 export const CII_COUNTRY_PAGE_CONTENT_VERSION = '2026-09-03';
 // Exported so the #7533 guard test can recompute every family clock without
 // re-implementing the version constants themselves.
@@ -1252,6 +1252,42 @@ function normalizeChokepoints(entries) {
     }))
     .filter((entry) => entry.id && entry.displayName)
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+export function buildChokepointPageLinks({ chokepoints, countries, crises, content = CHOKEPOINT_CONTENT }) {
+  const countryByCode = new Map(countries.map((country) => [country.code, country]));
+  const crisisBySlug = new Map(crises.map((crisis) => [crisis.slug, crisis]));
+  const byChokepointId = new Map();
+  const byCountryCode = new Map();
+  const byCrisisSlug = new Map();
+  for (const chokepoint of chokepoints) {
+    const declaration = content[chokepoint.id] || {};
+    const resolve = (field, targets, inverse) => {
+      const ids = declaration[field] ?? [];
+      if (!Array.isArray(ids)) throw new Error(`${chokepoint.id}: ${field} must be an array`);
+      return [...new Set(ids)].map((id) => {
+        const target = targets.get(id);
+        if (!target) throw new Error(`${chokepoint.id}: ${field} contains unknown target ${id}`);
+        const entries = inverse.get(id) || [];
+        entries.push(chokepoint);
+        inverse.set(id, entries);
+        return target;
+      });
+    };
+    byChokepointId.set(chokepoint.id, {
+      countries: resolve('countryCodes', countryByCode, byCountryCode),
+      crises: resolve('crisisSlugs', crisisBySlug, byCrisisSlug),
+    });
+  }
+  return { byChokepointId, byCountryCode, byCrisisSlug };
+}
+
+function renderRelatedChokepoints(chokepoints) {
+  if (!chokepoints.length) return '';
+  return `      <h2>Related chokepoint trackers</h2>
+      <ul class="related">
+${chokepoints.map((chokepoint) => `        <li><a href="/chokepoints/${escapeHtml(chokepoint.slug)}/">${escapeHtml(chokepoint.displayName)} tracker</a></li>`).join('\n')}
+      </ul>`;
 }
 
 function normalizeCountry(item, sourceStatus, seen, reverseNames) {
@@ -3494,6 +3530,7 @@ export function snapshotAttemptedCountryIndex(livePulse) {
 
 export function renderCountryPage({
   country,
+  relatedChokepoints = [],
   baseUrl,
   capturedAt,
   lastmod,
@@ -3597,6 +3634,7 @@ ${renderCountryDevelopments({ countryCode: country.code, countryName: country.na
         <div class="metric"><span>Confidence</span><strong>${country.lowConfidence ? 'Low' : 'Standard'}</strong></div>
       </section>${scoreDisclosure}
 ${analysis.html}
+${renderRelatedChokepoints(relatedChokepoints)}
 ${analysis.readingGuide ? `      <h2>How to use this evidence</h2>
       <p>${escapeHtml(analysis.readingGuide)} <a href="/docs/methodology/country-resilience-index">Full CRI method</a> · <a href="/docs/corrections">revision log</a>.</p>` : `      <h2>How to read this page</h2>
       <p>The 0-100 index records the ${escapeHtml(prettyDate(capturedAt))} snapshot under ${escapeHtml(methodologyFormula)}. See the <a href="/docs/methodology/country-resilience-index">Country Resilience Index methodology</a> for dimensions, sources and confidence rules. Published revisions that affect ${escapeHtml(country.name)} are in the <a href="/docs/corrections">corrections log</a>.</p>
@@ -4083,6 +4121,8 @@ function optionalChokepointMetric(label, attribute, value, available) {
 
 function renderChokepointPage({
   chokepoint,
+  relatedCountries = [],
+  relatedCrises = [],
   baseUrl,
   lastmod,
   tradeRoutesById,
@@ -4231,6 +4271,14 @@ ${liveGrid}
 ${tiles}
       </section>
 ${analysis.html}
+${relatedCountries.length ? `      <h2>Related country profiles</h2>
+      <ul class="related">
+${relatedCountries.map((country) => `        <li><a href="/countries/${escapeHtml(country.slug)}/">${escapeHtml(country.name)} country profile</a></li>`).join('\n')}
+      </ul>` : ''}
+${relatedCrises.length ? `      <h2>Crisis context</h2>
+      <ul class="related">
+${relatedCrises.map((crisis) => `        <li><a href="/crises/${escapeHtml(crisis.slug)}/">${escapeHtml(crisis.title)}</a></li>`).join('\n')}
+      </ul>` : ''}
       <h2>Related</h2>
       <ul class="related">
 ${relatedItems.map((item) => `        <li>${item}</li>`).join('\n')}
@@ -4385,6 +4433,7 @@ ${crises.map((crisis) => `        <a class="card" href="/crises/${escapeHtml(cri
 function renderCrisisPage({
   crisis,
   countrySlugByCode,
+  relatedChokepoints = [],
   baseUrl,
   lastmod,
   livePulse = null,
@@ -4480,6 +4529,7 @@ ${countryRows}
 ${snapshotSection}
       <h2>Coverage boundary</h2>
       <p>${escapeHtml(crisis.coverage.map((country) => `${country.name} (${country.code})`).join(', '))}. Events outside this list are not included in the live totals on this page.</p>
+${renderRelatedChokepoints(relatedChokepoints)}
       <h2>How to read this tracker</h2>
       <p>Use these monthly country summaries as a bounded pulse, then inspect the dashboard for event-level context, map layers, and other independent signals. The figures are not forecasts and should not be interpreted as a complete casualty or incident ledger.</p>
       <p class="source">Download: <a href="${escapeHtml(datasetDownloadHref(path, CRISIS_DATASET_DOWNLOAD))}">${CRISIS_DATASET_DOWNLOAD}</a>. Scope source: <a href="${CRISIS_REGISTRY_URL}">${CRISIS_REGISTRY_PATH}</a>. Maintained metrics: HAPI/HDX humanitarian conflict summaries from the UN OCHA <a href="https://data.humdata.org/hapi">Humanitarian API</a>.</p>`;
@@ -5061,6 +5111,7 @@ export async function buildCorpus({
 } = {}) {
   const data = await loadCorpusData({ rootDir, livePulseSnapshotPath });
   const countrySlugByCode = new Map(data.countries.map((country) => [country.code, country.slug]));
+  const chokepointPageLinks = buildChokepointPageLinks(data);
   if (clean) {
     for (const dir of GENERATED_DIRS) {
       rmSync(join(outDir, dir), { recursive: true, force: true });
@@ -5178,6 +5229,7 @@ export async function buildCorpus({
       routeFile(pagePath),
       renderCountryPage({
         country,
+        relatedChokepoints: chokepointPageLinks.byCountryCode.get(country.code),
         baseUrl,
         capturedAt: data.resilience.capturedAt,
         lastmod: ciiEntry
@@ -5265,6 +5317,8 @@ export async function buildCorpus({
       routeFile(pagePath),
       renderChokepointPage({
         chokepoint,
+        relatedCountries: chokepointPageLinks.byChokepointId.get(chokepoint.id).countries,
+        relatedCrises: chokepointPageLinks.byChokepointId.get(chokepoint.id).crises,
         baseUrl,
         lastmod: data.lastmod.chokepoints,
         tradeRoutesById: data.tradeRoutesById,
@@ -5380,6 +5434,7 @@ export async function buildCorpus({
       renderCrisisPage({
         crisis,
         countrySlugByCode,
+        relatedChokepoints: chokepointPageLinks.byCrisisSlug.get(crisis.slug),
         baseUrl,
         lastmod: data.lastmod.crises,
         livePulse: data.livePulse,

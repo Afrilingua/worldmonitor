@@ -2663,6 +2663,32 @@ describe('crawlable corpus generator', () => {
         }
       }
       assert.deepEqual([...unavailableCoverage], ['PS']);
+      const topicWindow = new Window();
+      try {
+        const requiredPaths = [
+          ['/countries/iran/', '/chokepoints/strait-of-hormuz/'],
+          ['/countries/oman/', '/chokepoints/strait-of-hormuz/'],
+          ['/chokepoints/strait-of-hormuz/', '/countries/iran/'],
+          ['/chokepoints/strait-of-hormuz/', '/countries/oman/'],
+          ['/chokepoints/strait-of-hormuz/', '/crises/hormuz-gulf-security/'],
+          ['/crises/hormuz-gulf-security/', '/chokepoints/strait-of-hormuz/'],
+        ];
+        for (const [source, target] of requiredPaths) {
+          const html = read(outDir, `${source}index.html`);
+          topicWindow.document.body.innerHTML = html;
+          const links = topicWindow.document.querySelectorAll(`main a[href="${target}"]`);
+          assert.equal(links.length, 1, `${source} links ${target} once in content`);
+          assert.ok(existsSync(join(outDir, target, 'index.html')));
+          assert.equal(links[0].hasAttribute('target'), false);
+          assert.equal(links[0].closest('[data-nosnippet]'), null);
+          assert.ok(htmlToMarkdown(html).includes(`](${target})`));
+        }
+        topicWindow.document.body.innerHTML = read(outDir, 'countries/norway/index.html');
+        assert.equal(topicWindow.document.querySelector('main a[href="/chokepoints/strait-of-hormuz/"]'), null);
+        assert.doesNotMatch(topicWindow.document.querySelector('main').textContent, /Related chokepoint trackers/);
+      } finally {
+        topicWindow.close();
+      }
       const microstateCohort = JSON.parse(readFileSync(
         join(repoRoot, 'server/worldmonitor/resilience/v1/cohorts/microstate-territories.json'),
         'utf8',
@@ -4455,7 +4481,7 @@ describe('crawlable corpus generator', () => {
       });
       assert.equal(
         redSeaDataset.dateModified,
-        laterDate(corpus.livePulse.capturedAt, DATASET_SCHEMA_CONTENT_VERSION.crisis),
+        laterDate(corpus.livePulse.crises['red-sea-security'].asOf.slice(0, 10), DATASET_SCHEMA_CONTENT_VERSION.crisis),
         'page links must not advance the crisis Dataset observation clock',
       );
       assert.equal(
@@ -5511,7 +5537,7 @@ describe('live-pulse snapshot injection (#7533)', () => {
   // #7533-allowlist: 2026-08-29 x5 — STORY_CAPTURED_AT synthetic story clock and static snapshot-path fixtures
   // #7533-allowlist: 2026-09-01 x4 — CORPUS_GENERATOR_CONTENT_VERSION and synthetic development fixtures
   // #7533-allowlist: 2026-09-02 x17 — synthetic developments timestamps (incl. the nofollow index-row render fixture, #7748)
-  // #7533-allowlist: 2026-09-03 x15 — genuinely static: research lastmod, DataCatalog and ItemList render fixtures, datasetObservationCoverage fixtures
+  // #7533-allowlist: 2026-09-03 x14. Static DataCatalog and ItemList render fixtures, datasetObservationCoverage fixtures.
   it('rejects undocumented calendar-date literals in this file', () => {
     const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
     assert.ok(calendarDateAllowances(source).size >= 20, 'the #7533-allowlist comment must stay populated');

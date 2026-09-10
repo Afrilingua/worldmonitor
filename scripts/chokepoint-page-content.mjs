@@ -91,6 +91,8 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   hormuz_strait: {
+    countryCodes: ['IR', 'OM'],
+    crisisSlugs: ['hormuz-gulf-security'],
     region: 'Persian Gulf ↔ Gulf of Oman',
     glossarySlug: 'strait-of-hormuz',
     whyHeading: 'Why is the Strait of Hormuz the most watched energy chokepoint?',
