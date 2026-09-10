@@ -1940,7 +1940,7 @@ export async function readSeedSnapshot(canonicalKey, { strict = false, includeEn
   if (!url || !token) return null;
   try {
     const resp = await fetch(`${url}/get/${encodeURIComponent(canonicalKey)}`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, 'User-Agent': CHROME_UA },
       signal: AbortSignal.timeout(5_000),
     });
     if (!resp.ok) {
