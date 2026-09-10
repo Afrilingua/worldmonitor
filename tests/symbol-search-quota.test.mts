@@ -30,7 +30,7 @@ it('shares the cold-query budget across unique queries and callers, with cache h
   const identifiers = new Set<string>();
   globalThis.fetch = async (input, init) => {
     const url = String(input);
-    if (url.startsWith('https://quota-redis.test')) {
+    if (new URL(url).origin === 'https://quota-redis.test') {
       if (!init?.body) return Response.json({ result: url.includes('cached') ? JSON.stringify({ results: [] }) : null });
       const commands = JSON.parse(String(init.body));
       return Response.json(commands.map((command: unknown[]) => {

@@ -18,8 +18,8 @@ it('limits portal sessions per authenticated user before the relay, across token
   const buckets = new Map<string, number>();
   globalThis.fetch = async (input, init) => {
     const url = String(input);
-    if (url.startsWith('https://clerk.portal.test')) return Response.json({ keys: [jwk] });
-    if (url.startsWith('https://portal-redis.test')) {
+    if (new URL(url).origin === 'https://clerk.portal.test') return Response.json({ keys: [jwk] });
+    if (new URL(url).origin === 'https://portal-redis.test') {
       const commands = JSON.parse(String(init?.body));
       return Response.json(commands.map((command: unknown[]) => {
         const key = String(command[3]);
@@ -45,7 +45,7 @@ it('limits portal sessions per authenticated user before the relay, across token
   assert.equal(relayCalls, 5);
   const healthyFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
-    if (String(input).startsWith('https://portal-redis.test')) throw new Error('Redis unavailable');
+    if (new URL(String(input)).origin === 'https://portal-redis.test') throw new Error('Redis unavailable');
     return healthyFetch(input, init);
   };
   const token = await new SignJWT({ sub: 'other_user', plan: 'pro' })
