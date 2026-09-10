@@ -1432,8 +1432,12 @@ export async function httpsProxyFetchRaw(url, proxyAuth, { accept = '*/*', timeo
   return { buffer: result.buffer, contentType: result.contentType };
 }
 
-// Whether a proxy error should be retried (the Decodo proxy rotates exit IP per
-// attempt). Covers 5xx/522, DNS/socket errors, AND mid-handshake TLS tears — the
+// Whether a proxy error should be retried. A retry reaches a DIFFERENT exit IP
+// only because the caller advances its attempt index (see fredFetchJson) — a
+// Decodo sticky port pins one exit for the life of the session and never
+// rotates on its own. Reading it the other way round is what let three retries
+// pile onto one dead exit during the 2026-09-10 outage (#7963).
+// Covers 5xx/522, DNS/socket errors, AND mid-handshake TLS tears — the
 // last group is load-bearing: if a TLS-tear isn't classified transient, the
 // retry loop breaks on attempt 1 and falls to a direct FRED fetch, which a
 // datacenter IP gets rate-limited/blocked on → the whole batch fails. Exported
@@ -1492,8 +1496,19 @@ export async function fredFetchJson(url, proxyAuth) {
     // Advance Decodo sticky ports before falling back direct. Reusing port
     // 10001 kept all retries on the failed exit during the 2026-09-10 outage.
     // isTransientProxyError covers TLS-handshake tears — see its doc comment.
+    //
+    // The exits are recorded so the warning below can name them. Rotation
+    // no-ops silently for any host outside parseProxyConfigForAttempt's sticky
+    // map (us.decodo.com, an ISP or city-targeted endpoint) or any port outside
+    // its range, and a healthy run looks identical whether rotation engaged or
+    // the configured exit simply recovered. Three identical ports in that line
+    // is the operator's one-line proof the rotation is inert for the deployed
+    // PROXY_URL — without it the next outage reads exactly like the last one.
+    const { parseProxyConfigForAttempt } = createRequire(import.meta.url)('./_proxy-utils.cjs');
+    const triedExits = [];
     let lastProxyErr;
     for (let attempt = 1; attempt <= 3; attempt++) {
+      triedExits.push(parseProxyConfigForAttempt(proxyAuth, attempt - 1)?.port ?? '?');
       try {
         return await httpsProxyFetchJson(url, proxyAuth, attempt - 1);
       } catch (proxyErr) {
@@ -1506,7 +1521,7 @@ export async function fredFetchJson(url, proxyAuth) {
         break;
       }
     }
-    console.warn(`  [fredFetch] proxy failed after retries (${lastProxyErr?.message}) — retrying direct`);
+    console.warn(`  [fredFetch] proxy failed after retries on exits [${triedExits.join(', ')}] (${lastProxyErr?.message}) — retrying direct`);
     try {
       return await fredDirectFetchJson(url);
     } catch (directErr) {

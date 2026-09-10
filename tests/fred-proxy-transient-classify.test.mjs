@@ -2,14 +2,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
-import { CHROME_UA, fredFetchJson, isTransientProxyError } from '../scripts/_seed-utils.mjs';
+import { CHROME_UA, fredFetchJson, httpsProxyFetchRaw, isTransientProxyError } from '../scripts/_seed-utils.mjs';
 
-// fredFetchJson retries the (IP-rotating) Decodo proxy only when the error is
-// classified transient; otherwise it breaks to a direct FRED fetch, which a
-// datacenter IP gets rate-limited/blocked on → the whole seed-economy batch
-// fails and fredBatch/economicStress/macroSignals go stale. The TLS-handshake
-// tear signatures below are the EXACT strings seen in the failing-run logs and
-// MUST be retried — they did not match the original 5xx/timeout-only regex.
+// fredFetchJson retries the Decodo proxy only when the error is classified
+// transient; otherwise it breaks to a direct FRED fetch, which a datacenter IP
+// gets rate-limited/blocked on → the whole seed-economy batch fails and
+// fredBatch/economicStress/macroSignals go stale. The TLS-handshake tear
+// signatures below are the EXACT strings seen in the failing-run logs and MUST
+// be retried — they did not match the original 5xx/timeout-only regex.
+//
+// The exit does NOT rotate on its own. A Decodo sticky port pins one exit for
+// the life of the session, so a retry lands on a different IP only because the
+// CALLER advances the attempt index (#7963). Reading it the other way round is
+// what let three retries pile onto one dead exit during the 2026-09-10 outage.
 //
 // Run: node --test tests/fred-proxy-transient-classify.test.mjs
 
@@ -43,6 +48,12 @@ test('FRED exhausts three distinct sticky exits then retains the direct fallback
 });
 
 test('FRED leaves non-sticky and other-provider routes unchanged on retry', async (t) => {
+  // The direct leg is stubbed even though the proxy leg is meant to succeed on
+  // attempt 2. This suite exists to catch isTransientProxyError
+  // misclassification, and that is exactly the regression that would exhaust
+  // the proxy leg instead — at which point fredDirectFetchJson calls the real
+  // global fetch and this test starts reaching api.stlouisfed.org from CI.
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('direct must not be needed'); });
   for (const proxy of ['http://fake:secret@gate.decodo.com:7000', 'http://fake:secret@proxy.test:10001']) {
     const routes = [];
     const mocked = t.mock.method(proxyUtils, 'proxyFetch', async (_url, config) => {
@@ -58,11 +69,55 @@ test('FRED leaves non-sticky and other-provider routes unchanged on retry', asyn
   }
 });
 
-test('FRED does not rotate or retry a permanent proxy authentication failure', async (t) => {
+test('FRED does not retry a permanent proxy authentication failure', async (t) => {
   const proxy = t.mock.method(proxyUtils, 'proxyFetch', async () => { throw new Error('HTTP 407'); });
   t.mock.method(globalThis, 'fetch', async () => new Response('{}'));
   await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:10001');
   assert.equal(proxy.mock.callCount(), 1);
+  // One call cannot demonstrate the ABSENCE of rotation — attempt 0 resolves to
+  // the configured port either way — so pin that the single attempt really did
+  // use the operator's exit rather than a rotated one.
+  assert.equal(proxy.mock.calls[0].arguments[1].port, 10001);
+});
+
+test('the proxy-exhaustion warning names every exit it tried', async (t) => {
+  // Rotation can silently no-op: parseProxyConfigForAttempt returns the route
+  // untouched for any host outside its sticky map (us.decodo.com, an ISP or
+  // city-targeted endpoint) or any port outside the range, with no warning. A
+  // healthy run looks identical whether rotation engaged or the original exit
+  // simply recovered, so the failure log is the only place an operator can see
+  // which it was. Three identical ports here is the proof it is inert.
+  const warnings = [];
+  t.mock.method(console, 'warn', (line) => { warnings.push(String(line)); });
+  t.mock.method(proxyUtils, 'proxyFetch', async () => {
+    throw new Error('Proxy CONNECT: HTTP/1.1 522 Server Error');
+  });
+  t.mock.method(globalThis, 'fetch', async () => new Response('{"observations":[]}'));
+  await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:49999');
+  const exhaustion = warnings.find((line) => line.includes('[fredFetch]'));
+  assert.ok(exhaustion, 'the proxy leg must announce that it fell through to direct');
+  assert.match(
+    exhaustion,
+    /49999.*10001.*10002/,
+    'the warning must name the exits actually tried, in attempt order',
+  );
+});
+
+test('httpsProxyFetchRaw with no options bag keeps the configured sticky exit', async (t) => {
+  // #7963 swapped this helper's resolver from parseProxyConfig to
+  // parseProxyConfigForAttempt for EVERY caller. About 15 seeders pass no
+  // proxyAttempt, so the `proxyAttempt = 0` default is the only thing holding
+  // their egress exit still — and nothing exercised it, because
+  // httpsProxyFetchJson always threads the index explicitly. A regression to a
+  // non-zero default would silently move every non-FRED proxy seeder onto a
+  // different exit with the whole FRED suite still green.
+  const routes = [];
+  t.mock.method(proxyUtils, 'proxyFetch', async (_url, config) => {
+    routes.push(config);
+    return { ok: true, buffer: Buffer.from('{}') };
+  });
+  await httpsProxyFetchRaw('https://example.test/x', 'https://fake:secret@gate.decodo.com:10001');
+  assert.deepEqual(routes.map((route) => route.port), [10001]);
 });
 
 // The direct leg is the LAST leg — when it drops a series, that series is gone
