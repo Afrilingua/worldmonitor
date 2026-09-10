@@ -267,6 +267,39 @@ describe('docs entity-graph rewrite (#7459d)', () => {
     );
   });
 
+  // #7980: the methodology family is editorial judgment a named human owns —
+  // weights chosen, thresholds set, limitations written — and each page renders
+  // a maintainer byline saying so. Organization is the honest author everywhere
+  // the docs are generated or unbylined product documentation; Person is the
+  // honest author here, and it is the Expertise signal the scored pages lean on.
+  it('attributes the methodology family to the canonical Person (#7980)', () => {
+    const PERSON = {
+      '@id': 'https://www.worldmonitor.app/blog/authors/elie-habib/#person',
+      '@type': 'Person',
+      name: 'Elie Habib',
+    };
+    const authorFor = (pathname: string) => {
+      const seed = articleSeed.replace('/docs/about#article', `${pathname}#article`);
+      const graph = jsonLdBlocks(rewriteDocsLocaleHtml(seed, pathname))
+        .find((block) => Array.isArray(block['@graph']))?.['@graph'] as Record<string, unknown>[];
+      return graph.find((node) => Array.isArray(node['@type']))?.author;
+    };
+
+    for (const pathname of ['/docs/methodology/cii-risk-scores', '/docs/methodology/chokepoints']) {
+      assert.deepEqual(authorFor(pathname), PERSON, pathname);
+    }
+    // The Chinese mirror is the same editorial work under a locale prefix.
+    assert.deepEqual(authorFor('/docs/zh/methodology/cii-risk-scores'), PERSON);
+    // Everything outside the family keeps the Organization attribution.
+    for (const pathname of ['/docs/about', '/docs/getting-started', '/docs/corrections']) {
+      assert.deepEqual(
+        authorFor(pathname),
+        { '@id': 'https://www.worldmonitor.app/#organization' },
+        pathname,
+      );
+    }
+  });
+
   it('does not attribute a non-Article node', () => {
     const graph = jsonLdBlocks(rewriteDocsLocaleHtml(mintlifySeed, '/docs/getting-started'))
       .find((block) => Array.isArray(block['@graph']))?.['@graph'] as Record<string, unknown>[];

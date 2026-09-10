@@ -46,6 +46,47 @@ const PERSON_ENTITY_SAME_AS = [
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
+/**
+ * The generated corpus, built once and shared by every test below. CI does not
+ * prebuild it, so the real generator runs in a temporary directory; the build
+ * costs seconds, so memoize rather than paying it per test.
+ */
+let generatedCorpusPromise: Promise<Map<string, string>> | null = null;
+function generatedCorpusDocuments(): Promise<Map<string, string>> {
+  generatedCorpusPromise ??= (async () => {
+    const documents = new Map<string, string>();
+    const corpusDir = mkdtempSync(join(tmpdir(), 'wm-schema-corpus-'));
+    try {
+      await buildCorpus({ outDir: corpusDir });
+      for (const path of readdirSync(corpusDir, { recursive: true }) as string[]) {
+        if (path.endsWith('.html')) documents.set(`public/${path}`, readFileSync(join(corpusDir, path), 'utf8'));
+      }
+    } finally {
+      rmSync(corpusDir, { recursive: true, force: true });
+    }
+    return documents;
+  })();
+  return generatedCorpusPromise;
+}
+
+/**
+ * Nodes that stand for the page itself, as opposed to the Dataset/Place/
+ * Question nodes hanging off them. Article-family types are here because the
+ * docs surface states its page body that way, and `WebApplication` because
+ * the two live-tool pages state theirs that way.
+ */
+const PAGE_BODY_TYPES = [
+  'WebPage',
+  'CollectionPage',
+  'ItemPage',
+  'WebApplication',
+  'Article',
+  'TechArticle',
+  'BlogPosting',
+  'NewsArticle',
+  'Report',
+];
+
 // Single quotes, mixed case, and whitespace around `=` are all valid on the
 // type attribute. A double-quote-only matcher lets a conflicting block hide
 // from the producer discovery below simply by being written differently, so
@@ -283,15 +324,7 @@ describe('canonical schema graph', () => {
   it('serves consistent product, Organization and Dataset bodies across every surface (#7611, #7861)', async () => {
     const documents = new Map(jsonLdDocumentPaths().map((path) => [path, read(path)]));
     // CI does not prebuild the corpus. Exercise its real generator in isolation.
-    const corpusDir = mkdtempSync(join(tmpdir(), 'wm-schema-corpus-'));
-    try {
-      await buildCorpus({ outDir: corpusDir });
-      for (const path of readdirSync(corpusDir, { recursive: true }) as string[]) {
-        if (path.endsWith('.html')) documents.set(`public/${path}`, readFileSync(join(corpusDir, path), 'utf8'));
-      }
-    } finally {
-      rmSync(corpusDir, { recursive: true, force: true });
-    }
+    for (const [path, html] of await generatedCorpusDocuments()) documents.set(path, html);
     const docsOrganization = JSON.parse(read('docs/docs.json')).seo.organization;
     const { id, logo, ...properties } = docsOrganization;
     const docsHtml = `<html><head><script type="application/ld+json">${JSON.stringify({
@@ -391,6 +424,40 @@ describe('canonical schema graph', () => {
         }
       }
     }
+  });
+
+  // #7980: every generated page publishes a risk score, a ranking, or a
+  // reference claim, and none of them named anyone who stands behind it --
+  // `author` was absent at any depth on all 240. `publisher` alone does not
+  // encode that signal, and the docs family already proves the shape. The
+  // population is DISCOVERED from the generator's own output, so a new page
+  // family cannot ship unattributed.
+  it('attributes every generated page body to a canonical author (#7980)', async () => {
+    const corpus = await generatedCorpusDocuments();
+    assert.ok(corpus.size > 200, 'the generated corpus must be built before checking attribution');
+
+    let checked = 0;
+    for (const [path, html] of corpus) {
+      const bodies = PAGE_BODY_TYPES.flatMap((type) => collectNodesOfType(html, type));
+      assert.ok(bodies.length > 0, `${path}: no page-shaped JSON-LD body to attribute`);
+      for (const body of bodies) {
+        checked += 1;
+        const author = body.author as Record<string, unknown> | undefined;
+        assert.ok(author, `${path}: ${JSON.stringify(body['@type'])} must carry an author`);
+        assert.ok(
+          author['@id'] === ORGANIZATION_ID || author['@id'] === PERSON_ID,
+          `${path}: author must reference the canonical Organization or Person, got ${JSON.stringify(author['@id'])}`,
+        );
+        // A bare `@id` is an unresolvable stub for the naive extractors this
+        // signal is for: no generated page declares the canonical node, and
+        // parsers resolve `@id` within one document (#7459b).
+        assert.ok(
+          typeof author['@type'] === 'string' && typeof author.name === 'string',
+          `${path}: author reference must carry @type and name so it resolves in-document`,
+        );
+      }
+    }
+    assert.ok(checked > 200, `expected the whole generated corpus to be checked, saw ${checked} bodies`);
   });
 
   it('serves every variant dashboard identically to browsers and AI crawlers', () => {
