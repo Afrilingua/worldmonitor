@@ -1072,7 +1072,12 @@ export function classifyDeferredPayload(
   now = Date.now(),
   maxCacheAgeMs = MAX_CACHE_AGE_MS,
 ) {
-  if (!prevPayload || typeof prevPayload !== 'object' || !Number.isFinite(prevPayload.cacheWrittenAt)) {
+  if (!prevPayload || typeof prevPayload !== 'object'
+    || !Array.isArray(prevPayload.ports)
+    || !prevPayload.ports.every((port) => port && typeof port.portId === 'string' && port.portId.length > 0)
+    || (prevPayload.ports.length === 0 && prevPayload.zeroActivity !== true)
+    || !Number.isFinite(prevPayload.cacheWrittenAt)
+    || prevPayload.cacheWrittenAt > now) {
     return { status: 'missing', payload: null };
   }
   if ((now - prevPayload.cacheWrittenAt) >= maxCacheAgeMs) {
@@ -1186,7 +1191,9 @@ export function buildCoverageReport({
   const missingCountries = expected.filter((iso2) => !countryData.has(iso2));
   const unidentifiedMissingCount = Math.max(0, target - expected.length);
   const failureByCountry = new Map();
-  for (const [iso2, state] of retryState) {
+  // Deferred failures remain actionable until that country is recovered or
+  // positively revalidated; another country's success must not hide them.
+  for (const [iso2, state] of [...countryData, ...retryState]) {
     if (typeof state?.refreshFailure?.code === 'string') {
       failureByCountry.set(iso2, state.refreshFailure.code);
     }
@@ -1197,10 +1204,16 @@ export function buildCoverageReport({
   const failures = [...failureByCountry]
     .map(([iso2, code]) => ({ iso2, code }))
     .sort((a, b) => a.iso2.localeCompare(b.iso2));
+  const payloads = [...countryData.values()];
+  const retainedCountryCount = payloads.filter((payload) => payload.staleAsof === true).length;
+  const cacheTimes = payloads.map((payload) => payload.cacheWrittenAt).filter(Number.isFinite);
   return {
     target,
     referenceCountryCount: eligible.length,
     published: countryData.size,
+    currentCountryCount: countryData.size - retainedCountryCount,
+    retainedCountryCount,
+    oldestCountryCacheWrittenAt: cacheTimes.length ? Math.min(...cacheTimes) : null,
     complete: missingCountries.length === 0 && unidentifiedMissingCount === 0,
     missingCountries,
     unidentifiedMissingCount,
@@ -1307,10 +1320,8 @@ export async function fetchAll(progress, { signal, expectedCountries = [] } = {}
         ? prev?.asof === upstreamMaxDate
         : prev?.asof === null && prev?.zeroActivity === true);
     const cacheFresh = !criticalRefreshDue
-      && prev && typeof prev === 'object'
-      && observationMatches
-      && typeof prev.cacheWrittenAt === 'number'
-      && (now - prev.cacheWrittenAt) < MAX_CACHE_AGE_MS;
+      && classifyDeferredPayload(prev, now).status === 'stale'
+      && observationMatches;
     if (cacheFresh) {
       const { refreshFailure: _failure, staleAsof: _stale, ...confirmed } = prev;
       countryData.set(iso2, confirmed);
@@ -1332,7 +1343,7 @@ export async function fetchAll(progress, { signal, expectedCountries = [] } = {}
   // prior cache marked staleAsof=true. Prevents the catastrophic "everything
   // stale → 174 cold-fetches → bundle SIGTERM" failure mode that produced
   // 37h of stale data after a single upstream-advance event. A nominal attempt
-  // sweep takes ceil(174/30) = 6 runs (18h); allow a seventh run when
+  // sweep takes ceil(174/30) = 6 runs (3d); allow a seventh run when
   // critical countries reserve repeat slots.
   let servedStaleCount = 0;
   let droppedTooOldCount = 0;
@@ -1612,7 +1623,7 @@ export async function fetchAll(progress, { signal, expectedCountries = [] } = {}
     servedStaleCount,
     droppedTooOldCount,
     droppedNoCacheCount,
-    // Success metadata requires a current observation for every country.
+    // Report current observations separately from usable retained coverage.
     freshFetchedCount,
     cacheHitCount: cacheHits,
   };
@@ -1628,7 +1639,10 @@ export function shouldAdvanceCanonicalForRun({
     && coverage?.complete === true
     && coverage.refreshFailures.length === 0
     && countryCount === coverage.target
-    && upstreamContactCount === countryCount;
+    // Daily source advances must not invalidate a completed rolling sweep.
+    // Every country must remain usable, and this run must do useful upstream
+    // work. Per-country timestamps and content clocks remain unchanged on reuse.
+    && upstreamContactCount > 0;
 }
 
 export function buildPortActivityFailureMeta(previousMeta, {

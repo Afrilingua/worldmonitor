@@ -256,30 +256,87 @@ test('one persistently corrupt country cannot stop healthy country recovery', ()
   }
 });
 
-test('recovery publishes complete snapshots while upstream dates advance daily', () => {
+test('12-hour rolling recovery stays complete across daily advances within the original traffic cap', () => {
   let state = fixtures();
-  const completedDays = new Set<number>();
   const cadenceMs = PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES * 60_000;
-  const runsPerDay = DAY / cadenceMs;
-  for (let run = 0; run < 3 * runsPerDay; run++) {
-    // Reserve one missed slot each day for interval gating or a failed run.
-    if (run % runsPerDay === 0) continue;
+  assert.equal(cadenceMs, DAY / 2);
+  let recovered = false;
+  let successfulRuns = 0;
+  for (let run = 0; run < 20; run++) {
+    // Miss scheduled runs during both initial recovery and steady state.
+    if (run === 6 || run === 14) continue;
     const now = NOW + run * cadenceMs;
     const result = runProducer(state, 'moving', now);
+    const activityRequests = result.requests.map((query: string) => new URLSearchParams(query))
+      .filter((query: URLSearchParams) => query.get('where')?.startsWith('ISO3=') && !query.has('outStatistics'));
+    const refreshed = new Set(activityRequests.map((query: URLSearchParams) => query.get('where')!.match(/ISO3='([^']+)'/)![1]));
+    assert.ok(refreshed.size <= 30, 'do not increase countries attempted per run');
+    assert.ok(activityRequests.length <= 60, 'two one-page windows per country, no duplicate activity requests');
     if (result.error) {
+      assert.equal(recovered, false, 'daily updates must not invalidate recovered coverage');
       assert.deepEqual(result.redis[CANONICAL], state[CANONICAL]);
       assert.equal(result.redis[META].fetchedAt, state[META].fetchedAt);
     } else {
-      completedDays.add(Math.floor(run / runsPerDay));
+      recovered = true;
+      successfulRuns++;
       assert.equal(result.redis[META].recordCount, 174);
       assert.equal(result.redis[META].coverage.complete, true);
       assert.deepEqual(result.redis[META].coverage.refreshFailures, []);
-      const currentDate = new Date(now - DAY).toISOString().slice(0, 10);
-      for (const [, code] of countries) assert.equal(result.redis[`${PREFIX}${code}`].asof, currentDate);
+      const coverage = result.redis[META].coverage;
+      assert.equal(coverage.currentCountryCount + coverage.retainedCountryCount, 174);
+      assert.ok(coverage.retainedCountryCount > 0, 'allow useful retained data as the source moves');
+      assert.ok(now - coverage.oldestCountryCacheWrittenAt < 7 * DAY);
+      assert.equal(health(result.redis, now).status, 'OK');
+      assert.equal(health(result.redis, now).coverage.retainedCountryCount, coverage.retainedCountryCount);
+      for (const [iso3, code] of countries) {
+        const payload = result.redis[`${PREFIX}${code}`];
+        assert.ok(now - payload.cacheWrittenAt < 7 * DAY);
+        if (!refreshed.has(iso3)) {
+          for (const field of ['fetchedAt', 'cacheWrittenAt', 'contentAsOfChangedAt', 'asof']) {
+            assert.equal(payload[field], state[`${PREFIX}${code}`][field], `retention must preserve ${field}`);
+          }
+        }
+      }
     }
     state = result.redis;
   }
-  assert.deepEqual([...completedDays], [0, 1, 2], 'each daily update must reach complete publication');
+  assert.ok(successfulRuns >= 10, 'recover within a rotation and remain complete over multiple rotations');
+});
+
+test('a deferred refresh failure cannot be hidden by otherwise complete retained coverage', () => {
+  const input = fixtures();
+  for (const [, code] of countries) {
+    input[`${PREFIX}${code}`].cacheWrittenAt = NOW - DAY;
+    input[`${PREFIX}${code}`].asof = '2026-09-08';
+  }
+  const code = countries[0][1];
+  input[`${PREFIX}${code}`].refreshAttemptedAt = 1;
+  const failed = runProducer(input, 'activity-page');
+  assert.match(failed.error, /Incomplete PortWatch coverage/);
+  assert.equal(failed.redis[META].coverage.published, 174);
+  const deferred = runProducer(failed.redis, 'moving', NOW + DAY / 2);
+  assert.match(deferred.error, /Incomplete PortWatch coverage/);
+  assert.equal(deferred.redis[META].fetchedAt, input[META].fetchedAt);
+  assert.ok(deferred.redis[META].coverage.refreshFailures.some((entry: any) => entry.iso2 === code));
+  assert.equal(health(deferred.redis, NOW + DAY / 2).status, 'SEED_ERROR');
+});
+
+test('unchanged upstream data uses the cache without any activity downloads', () => {
+  const input = fixtures();
+  for (const [, code] of countries) {
+    input[`${PREFIX}${code}`].cacheWrittenAt = NOW - DAY;
+    input[`${PREFIX}${code}`].asof = '2026-09-09';
+  }
+  const result = runProducer(input);
+  assert.equal(result.error, null);
+  const activityRequests = result.requests.map((query: string) => new URLSearchParams(query))
+    .filter((query: URLSearchParams) => query.get('where')?.startsWith('ISO3=') && !query.has('outStatistics'));
+  assert.equal(activityRequests.length, 0);
+  assert.equal(result.redis[META].coverage.currentCountryCount, 174);
+  assert.equal(result.redis[META].coverage.retainedCountryCount, 0);
+  for (const [, code] of countries) {
+    assert.deepEqual(result.redis[`${PREFIX}${code}`], input[`${PREFIX}${code}`]);
+  }
 });
 
 test('durable rotation replaces the snapshot only after complete validated recovery', () => {

@@ -2,9 +2,9 @@
 // this module owns the bounded report, critical refresh deadline, and queue
 // ordering so those contracts can be tested without loading the full runner.
 
-export const PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES = 3 * 60;
-// One nominal cold-fetch rotation is six 3-hour runs (174 countries / 30 slots),
-// so two rotations -- the floor this budget must clear -- is 36h.
+export const PORTWATCH_CONTENT_FRESHNESS_CADENCE_MINUTES = 12 * 60;
+// One nominal cold-fetch rotation is six 12-hour runs (174 countries / 30 slots),
+// so two rotations -- the floor this budget must clear -- is 6d.
 // The parity test recomputes that floor from the seeder's own constants and the
 // cron cadence, and fails if the budget drops under it.
 //
@@ -56,7 +56,7 @@ export function isCriticalContentRefreshDue({
   const leadMs = Math.max(0, cadenceMinutes * 60_000);
   // Reserve the next scheduled run before the hard budget. This keeps a
   // cache-hit critical payload out of the seven-day cache path early enough
-  // that a normal 3h cadence still has a chance to refresh it before budget.
+  // that a normal 12h cadence still has a chance to refresh it before budget.
   return ageMs >= Math.max(0, budgetMs - leadMs);
 }
 

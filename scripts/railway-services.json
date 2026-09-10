@@ -307,7 +307,7 @@
       "shared/country-names.json",
       "shared/iso3-to-iso2.json"
     ],
-    "cronSchedule": "0 */3 * * *",
+    "cronSchedule": "0 */12 * * *",
     "documentedAt": "Dockerfile.seed-bundle-portwatch-port-activity"
   },
   {
@@ -835,7 +835,7 @@
       "shared/country-names.json",
       "shared/iso3-to-iso2.json"
     ],
-    "cronSchedule": "0 */3 * * *",
+    "cronSchedule": "0 */12 * * *",
     "documentedAt": "Dockerfile.seed-bundle-portwatch-port-activity"
   },
   {
