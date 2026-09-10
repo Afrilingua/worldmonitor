@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { createXPollCycle, xPollSlot } = require('../scripts/lib/x-poll-cycle.cjs');
+const { createPollGenerationGuard } = require('../scripts/lib/poll-generation-guard.cjs');
 const xNewsAccounts = require('../scripts/lib/x-news-accounts.cjs');
 const {
   createXPostBudget,
@@ -158,9 +159,12 @@ function createHarness(options = {}) {
       calls.publish.push(args);
       return typeof publishResult === 'function' ? publishResult(args) : publishResult;
     },
-    upstashReleaseLockIfOwner: async (key, owner) => { calls.release.push({ key, owner }); return true; },
-    getPollGeneration: () => generation,
-    scheduleRetry: (retry) => calls.retry.push(retry),
+    upstashReleaseLockIfOwner: async (key, owner) => {
+      calls.release.push({ key, owner });
+      return options.releaseLock ? options.releaseLock() : true;
+    },
+    getPollGeneration: options.getPollGeneration ?? (() => generation),
+    scheduleRetry: options.scheduleRetry ?? ((retry) => calls.retry.push(retry)),
     randomId: () => 'deadbeef',
     X_ENABLED: options.xEnabled ?? true,
     X_BEARER_TOKEN: 'test-bearer',
@@ -429,6 +433,52 @@ describe('X failure diagnostics and backoff recovery', () => {
     await harness.cycle.pollOnce({ generation: 1 });
     assert.equal(harness.calls.poll.length, 1);
   });
+
+  for (const releaseOffset of [-50, 50]) {
+    it(`waits for lease release before arming a peer backoff wake (${releaseOffset}ms from deadline)`, async () => {
+      let clock = Date.parse('2026-09-03T12:30:00.000Z');
+      const deadline = clock + 127;
+      let generation = 0;
+      let release;
+      const releasePending = new Promise((resolve) => { release = resolve; });
+      const redis = new Map([[POLL_STATE_KEY, xNewsAccounts.buildXPollState(makeState({
+        rateLimitedUntil: deadline, backoffCause: 'credits',
+      }), { expectedAccounts: 1 })]]);
+      let guard;
+      const retryStarted = [];
+      const harness = createHarness({
+        redis, now: () => clock,
+        releaseLock: () => releasePending,
+        getPollGeneration: () => generation,
+        scheduleRetry: () => retryStarted.push(guard.run()),
+      });
+      guard = createPollGenerationGuard({
+        poll: (context) => harness.cycle.pollOnce(context),
+        getGeneration: () => generation,
+        setGeneration: (value) => { generation = value; },
+        now: () => clock,
+        stuckAfterMs: 60_000,
+      });
+
+      assert.equal(guard.run(), true);
+      await new Promise(setImmediate);
+      assert.equal(harness.calls.release.length, 1);
+      assert.equal(guard.isInFlight(), true);
+      assert.equal(harness.calls.timer.length, 0, 'do not wake while lease release still holds the poll guard');
+      clock = deadline + releaseOffset;
+      release(true);
+      await new Promise(setImmediate);
+      assert.equal(guard.isInFlight(), false);
+      assert.equal(harness.calls.timer.length, 1);
+      const timer = harness.calls.timer[0];
+      assert.equal(timer.ms, Math.max(1, -releaseOffset));
+      clock += timer.ms;
+      timer.fn();
+      await new Promise(setImmediate);
+      assert.deepEqual(retryStarted, [true]);
+      assert.equal(harness.calls.poll.length, 1, 'the real guard admits recovery in the same slot');
+    });
+  }
 });
 
 describe('receipt recovery and Redis safety', () => {

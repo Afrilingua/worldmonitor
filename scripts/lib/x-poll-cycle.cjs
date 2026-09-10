@@ -188,21 +188,29 @@ function createXPollCycle(deps = {}) {
 
   async function pollOnce({ generation, signal, retryAfterLeaseConflict = false } = {}) {
     if (!X_ENABLED) return;
+    let backoffRetryAt = 0;
+    const scheduleBackoffRetry = () => {
+      if (!backoffRetryAt) return;
+      setTimer(() => {
+        if (generation === getPollGeneration() && !signal?.aborted) scheduleRetry(false);
+      }, Math.max(1, backoffRetryAt - now()));
+    };
     const deferBackoff = () => {
       if (!xState.rateLimitedUntil || now() >= xState.rateLimitedUntil) return false;
       xState.lastError = xNewsAccounts.sharedBackoffMessage(xState.backoffCause);
       // A response finishes just after the UTC boundary. Wake at its deadline
       // within this slot instead of turning a 30-minute backoff into 45 minutes.
       if (xState.rateLimitedUntil < xPollSlot(now(), X_POLL_INTERVAL_MS).endsAt) {
-        setTimer(() => {
-          if (generation === getPollGeneration() && !signal?.aborted) scheduleRetry(false);
-        }, Math.max(1, xState.rateLimitedUntil - now()));
+        backoffRetryAt = xState.rateLimitedUntil;
       }
       return true;
     };
     const initialSlot = xPollSlot(now(), X_POLL_INTERVAL_MS);
     if (xState.lastAttemptSlot === initialSlot.id) return;
-    if (deferBackoff()) return;
+    if (deferBackoff()) {
+      scheduleBackoffRetry();
+      return;
+    }
 
     const lockOwner = `ais-relay:${pid}:${generation}:${now()}:${randomId()}`;
     const lockResult = await upstashSetNx(X_FEED_POLL_LOCK_KEY, lockOwner, X_FEED_POLL_LOCK_TTL_SECONDS);
@@ -403,6 +411,9 @@ function createXPollCycle(deps = {}) {
       }
     } finally {
       await upstashReleaseLockIfOwner(X_FEED_POLL_LOCK_KEY, lockOwner);
+      // Redis release can outlast the backoff. Arm only after it finishes so
+      // the wake cannot be rejected by this run's still-active poll guard.
+      scheduleBackoffRetry();
       if (retryCurrentSlot) {
         setTimer(() => {
           if (generation === getPollGeneration()) scheduleRetry(false);
