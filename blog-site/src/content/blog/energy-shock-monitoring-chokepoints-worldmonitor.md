@@ -17,6 +17,8 @@ This is a practical workflow for monitoring energy-shock risk.
 
 For a worked example, open the [Strait of Hormuz tracker](https://www.worldmonitor.app/chokepoints/strait-of-hormuz/) to inspect its latest published transit and disruption readings. The [historical Strait of Hormuz Transit Report for July 2026](https://www.worldmonitor.app/research/strait-of-hormuz-transit-report-2026-07/) provides a dated comparison with Suez, Bab el-Mandeb, and the Cape of Good Hope. Its figures describe that report's observation period, not current traffic.
 
+For country context, open the [Iran](https://www.worldmonitor.app/countries/iran/) and [Oman](https://www.worldmonitor.app/countries/oman/) profiles. The [Gulf security tracker](https://www.worldmonitor.app/crises/hormuz-gulf-security/) summarizes conflict data for its stated regional coverage. The separate [Iran–Israel escalation tracker](https://www.worldmonitor.app/crises/iran-israel-escalation/) covers those two countries only.
+
 ## What is energy shock monitoring?
 
 Energy shock monitoring is the process of tracking the signals that can disrupt oil, gas, electricity, fuel distribution, or energy-linked commodities before the disruption fully appears in price or inventory data.

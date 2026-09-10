@@ -2688,6 +2688,9 @@ describe('crawlable corpus generator', () => {
       const topicWindow = new Window();
       try {
         const requiredPaths = [
+          ...Object.entries(JSON.parse(readFileSync(join(repoRoot, 'tests/fixtures/editorial-corpus-links.json'), 'utf8')))
+            .flatMap(([article, targets]) => targets.filter((target) => target.startsWith('/chokepoints/'))
+              .map((target) => [target, `/blog/posts/${article}/`])),
           ...corpusData.chokepoints.map(({ slug }) => [
             `/chokepoints/${slug}/`, '/blog/posts/what-is-a-maritime-chokepoint/',
           ]),

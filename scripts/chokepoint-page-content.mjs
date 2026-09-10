@@ -48,9 +48,44 @@ const MARITIME_EXPLAINER = {
   label: 'How maritime chokepoints are monitored and scored',
 };
 
+const TRADE_ROUTE_GUIDE = {
+  href: '/blog/posts/tracking-global-trade-routes-chokepoints-freight-costs/',
+  label: 'How to track trade routes and freight costs',
+};
+
+const EARLY_WARNING_TUTORIAL = {
+  href: '/blog/posts/build-supply-chain-early-warning-system-api/',
+  label: 'Build supply-chain alerts with the API',
+};
+
+const SUPPLY_CHAIN_DASHBOARD = {
+  href: '/blog/posts/supply-chain-early-warning-dashboard-worldmonitor-api/',
+  label: 'Design a supply-chain early-warning dashboard',
+};
+
+const SCENARIO_GUIDE = {
+  href: '/blog/posts/stress-test-supply-chain-scenario-engine-worldmonitor/',
+  label: 'Stress-test supply chains with scenarios',
+};
+
+const COMMODITY_GUIDE = {
+  href: '/blog/posts/monitor-global-supply-chains-and-commodity-disruptions/',
+  label: 'Monitor supply chains and commodity disruptions',
+};
+
+const COUNTRY_RISK_WORKFLOW = {
+  href: '/blog/posts/country-risk-monitoring-workflow-for-analysts/',
+  label: 'Apply the country-risk monitoring workflow',
+};
+
+const CONFLICT_GUIDE = {
+  href: '/blog/posts/track-global-conflicts-in-real-time/',
+  label: 'Monitor conflicts across strategic theaters',
+};
+
 export const CHOKEPOINT_CONTENT = {
   suez: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, TRADE_ROUTE_GUIDE, EARLY_WARNING_TUTORIAL, SUPPLY_CHAIN_DASHBOARD, SCENARIO_GUIDE, COMMODITY_GUIDE, COUNTRY_RISK_WORKFLOW],
     countryCodes: ['EG'],
     crisisSlugs: ['red-sea-security'],
     region: 'Mediterranean ↔ Red Sea',
@@ -76,7 +111,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   malacca_strait: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, SUPPLY_CHAIN_DASHBOARD],
     countryCodes: ['MY', 'ID', 'SG'],
     region: 'Indian Ocean ↔ South China Sea',
     glossarySlug: 'strait-of-malacca',
@@ -105,6 +140,11 @@ export const CHOKEPOINT_CONTENT = {
     crisisSlugs: ['hormuz-gulf-security', 'iran-israel-escalation'],
     editorialLinks: [
       MARITIME_EXPLAINER,
+      TRADE_ROUTE_GUIDE,
+      EARLY_WARNING_TUTORIAL,
+      SUPPLY_CHAIN_DASHBOARD,
+      SCENARIO_GUIDE,
+      CONFLICT_GUIDE,
       { href: '/blog/posts/energy-shock-monitoring-chokepoints-worldmonitor/', label: 'How to monitor energy shocks across chokepoints, fuel, and markets' },
     ],
     region: 'Persian Gulf ↔ Gulf of Oman',
@@ -130,7 +170,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   bab_el_mandeb: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, TRADE_ROUTE_GUIDE, EARLY_WARNING_TUTORIAL, SUPPLY_CHAIN_DASHBOARD, SCENARIO_GUIDE],
     countryCodes: ['YE', 'DJ', 'ER'],
     crisisSlugs: ['red-sea-security'],
     region: 'Red Sea ↔ Gulf of Aden',
@@ -155,7 +195,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   panama: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, SUPPLY_CHAIN_DASHBOARD, SCENARIO_GUIDE],
     countryCodes: ['PA'],
     region: 'Atlantic ↔ Pacific',
     whyHeading: 'Why can drought close the Panama Canal when both oceans are open?',
@@ -179,7 +219,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   taiwan_strait: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, TRADE_ROUTE_GUIDE, SCENARIO_GUIDE, COUNTRY_RISK_WORKFLOW, CONFLICT_GUIDE],
     countryCodes: ['TW', 'CN'],
     region: 'East China Sea ↔ South China Sea',
     whyHeading: 'Why does military tension in the Taiwan Strait hit containers first?',
@@ -203,7 +243,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   cape_of_good_hope: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, TRADE_ROUTE_GUIDE, EARLY_WARNING_TUTORIAL, COMMODITY_GUIDE],
     countryCodes: ['ZA'],
     region: 'Atlantic ↔ Indian Ocean',
     whyHeading: 'When is the Cape of Good Hope a chokepoint rather than just a longer road?',
@@ -227,7 +267,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   gibraltar: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, TRADE_ROUTE_GUIDE],
     countryCodes: ['ES', 'MA'],
     region: 'Atlantic ↔ Mediterranean',
     whyHeading: 'Why does every Suez–Europe loop still have to use Gibraltar?',
@@ -251,7 +291,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   bosphorus: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, TRADE_ROUTE_GUIDE],
     countryCodes: ['TR'],
     crisisSlugs: ['ukraine-war'],
     region: 'Black Sea ↔ Sea of Marmara',
@@ -300,7 +340,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   dover_strait: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, TRADE_ROUTE_GUIDE],
     countryCodes: ['GB', 'FR'],
     region: 'English Channel ↔ North Sea',
     whyHeading: 'Why is Dover among the busiest lanes if World Monitor maps no corridor row?',
@@ -324,7 +364,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   kerch_strait: {
-    editorialLinks: [MARITIME_EXPLAINER],
+    editorialLinks: [MARITIME_EXPLAINER, TRADE_ROUTE_GUIDE],
     countryCodes: ['UA', 'RU'],
     crisisSlugs: ['ukraine-war'],
     region: 'Black Sea ↔ Sea of Azov',

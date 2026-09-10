@@ -88,6 +88,17 @@ function assertNoUnsupportedVendorPrice(post, vendor) {
 }
 
 describe('blog SEO and GEO corpus contract', () => {
+  it('connects the worked editorial examples to their country, crisis, and waterway pages', () => {
+    const expectedLinks = JSON.parse(readFileSync(join(root, 'tests/fixtures/editorial-corpus-links.json'), 'utf8'));
+    for (const [slug, targets] of Object.entries(expectedLinks)) {
+      const article = posts.find((post) => post.file === `${slug}.md`);
+      const prose = article.body.replace(/```[\s\S]*?```/g, '');
+      for (const target of targets) {
+        const href = `https://www.worldmonitor.app${target}`;
+        assert.equal(prose.split(`](${href})`).length - 1, 1, `${slug} links ${target} once outside code examples`);
+      }
+    }
+  });
   it('links all thirteen waterways from the maritime explainer and the existing glossary entries', () => {
     const article = posts.find((post) => post.file === 'what-is-a-maritime-chokepoint.md');
     const routes = [
