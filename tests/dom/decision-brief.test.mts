@@ -42,6 +42,8 @@ it('keeps energy identity while invalid worksheet edits clear preview and export
   expect(exported.operationalWorksheet).toBeNull();
   const { operationalWorksheet, ...energy } = exported;
   expect(energy).toEqual(data);
+  stock.value = '100'; stock.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(root.querySelector('.cdp-decision-paper .operational-summary')!.textContent).toContain('Baseline first gap: Day 8');
 });
 
 
