@@ -3748,11 +3748,19 @@ describe('crawlable corpus generator', () => {
       assert.equal(catalog.dataset.length, corpusData.crises.length + 1);
       for (const dataset of catalog.dataset) {
         assert.ok(dataset['@id'], `${dataset.name} must reuse its detail-page identity`);
-        assert.deepEqual(dataset, { '@id': dataset['@id'] }, 'catalog must reference the canonical Dataset');
+        assert.equal(dataset['@type'], 'Dataset');
+        for (const field of ['name', 'description']) {
+          assert.ok(typeof dataset[field] === 'string' && dataset[field].trim(),
+            `${dataset['@id']} must carry ${field} on the catalog page`);
+        }
         const detailPath = new URL(dataset['@id']).pathname.slice(1) + 'index.html';
         const details = jsonLdObjects(read(outDir, detailPath)).flatMap((node) => collectDatasets(node));
-        assert.ok(details.some((node) => node['@type'] === 'Dataset' && node['@id'] === dataset['@id']),
-          `${dataset['@id']} must identify a Dataset on the generated detail page`);
+        const detail = details.find((node) => node['@id'] === dataset['@id']);
+        assert.ok(detail, `${dataset['@id']} must identify a Dataset on the generated detail page`);
+        for (const field of ['name', 'description', 'url', 'creator', 'license', 'keywords', 'distribution']) {
+          assert.ok(dataset[field], `${dataset['@id']} must carry ${field}`);
+          assert.deepEqual(dataset[field], detail[field], `${dataset['@id']} ${field} must match its detail page`);
+        }
       }
       assert.match(sourcesPage, /<h1>See every source behind World Monitor\.<\/h1>/);
       assert.match(sourcesPage, /<link rel="canonical" href="https:\/\/www\.worldmonitor\.app\/sources\/">/);
