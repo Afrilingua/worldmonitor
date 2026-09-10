@@ -70,6 +70,46 @@ describe('scenario worker manifest and evidence', () => {
     assert.equal(zero.scopedIso2, 'DE');
   });
 
+  it('distinguishes raw invalid JSON from missing records and evaluated zero', async () => {
+    const fetchFixture = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).endsWith('/pipeline')) return fetchFixture(url, init);
+      batches.push(JSON.parse(init.body));
+      return Response.json([
+        { result: '{invalid JSON' },
+        { result: null },
+        { result: JSON.stringify(record('JP', '27', 0)) },
+        { result: JSON.stringify(record('JP', '29', 0)) },
+      ]);
+    };
+    const result = await computeScenario('hormuz-tanker-blockade', null);
+    assert.deepEqual(result.coverage.records.map(r => [r.iso2, r.hs2, r.state, r.rawImpact]), [
+      ['DE', '27', 'malformed', undefined],
+      ['DE', '29', 'missing', undefined],
+      ['JP', '27', 'evaluated', 0],
+      ['JP', '29', 'evaluated', 0],
+    ]);
+    assert.equal(result.coverage.status, 'partial');
+    assert.deepEqual(result.topImpactCountries, [{ iso2: 'JP', totalImpact: 0, impactPct: 0 }]);
+  });
+
+  it('reports unknown coverage after manifest GET rejection without pipeline reads', async () => {
+    const fetchFixture = globalThis.fetch;
+    const reads = [];
+    globalThis.fetch = async (url, init) => {
+      reads.push(String(url));
+      if (String(url).includes('/get/')) throw new Error('manifest transport unavailable');
+      return fetchFixture(url, init);
+    };
+    const result = await computeScenario('hormuz-tanker-blockade', null);
+    assert.equal(reads.length, 1);
+    assert.match(decodeURIComponent(reads[0]), /\/get\/seed-meta:supply_chain:chokepoint-exposure$/);
+    assert.equal(result.coverage.status, 'unknown');
+    assert.deepEqual(result.coverage.records, []);
+    assert.deepEqual(result.topImpactCountries, []);
+    assert.equal(batches.length, 0);
+  });
+
   it('reports unknown coverage for absent, old, invalid or failed manifest without guessing keys', async () => {
     for (const value of [null, {}, { ...manifest(), status: 'error' }, { ...manifest(), countryIds: ['DE', 'DE'] }, { ...manifest(), hs2Codes: ['../../key'] }]) {
       cache.set('seed-meta:supply_chain:chokepoint-exposure', value);
