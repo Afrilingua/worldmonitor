@@ -836,6 +836,37 @@ describe('strict terminal reconciliation drift', () => {
     assert.equal(formatComparisonHead(result), 'source=--head vs-origin-main=behind');
   });
 
+  it('refreshes main after deployment observation without moving the comparison head', () => {
+    let main = HEAD;
+    const context = resolveComparisonHead(['--head', HEAD], {
+      refreshMain: true,
+      git: (args) => {
+        if (args[0] === 'fetch') { main = NEWER; return ''; }
+        return args.at(-1) === 'origin/main^{commit}' ? main : HEAD;
+      },
+      ancestry: (a, b) => a === HEAD && b === NEWER ? 'yes' : 'no',
+    });
+    assert.equal(context.headSha, HEAD);
+    assert.equal(context.originMainSha, NEWER);
+    assert.equal(context.originMainRelation, 'behind');
+    const result = classify([deployment('SUCCESS', { sha: NEWER })], {
+      isAncestor: (a, b) => a === HEAD && b === NEWER,
+    });
+    assert.equal(summarizeDeployDrift([result], {
+      isOnAuthorizedMainLineage: sha => sha === context.originMainSha,
+    }).ok, true);
+  });
+
+  it('fails closed when the post-observation main refresh fails with a pinned head', () => {
+    assert.throws(() => resolveComparisonHead(['--head', HEAD], {
+      refreshMain: true,
+      git: args => {
+        if (args[0] === 'fetch') throw new Error('main refresh failed');
+        return HEAD;
+      },
+    }), /main refresh failed/);
+  });
+
   it('fails a manual comparison when main cannot be refreshed', () => {
     const calls = [];
     assert.throws(
