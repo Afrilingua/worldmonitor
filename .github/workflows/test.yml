@@ -256,7 +256,7 @@ jobs:
     # Always-on: derives build-owned inventory facts and validates fixed or
     # semantic documentation contracts. Runs on every PR/push (docs-only PRs
     # set changes.code=false and skip `unit`, so this must not gate on it).
-    # Pure Node builtins — no npm install required.
+    # Docs date generation uses the existing YAML parser for OpenAPI pages.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -275,6 +275,7 @@ jobs:
         run: node scripts/docs-stats.mjs --check
       - name: Generate and validate docs page dates for this revision
         run: |
+          npm ci --ignore-scripts --prefer-offline
           node scripts/generate-docs-page-dates.mjs
           node scripts/generate-docs-page-dates.mjs --check
           node --test tests/docs-page-dates.test.mjs
