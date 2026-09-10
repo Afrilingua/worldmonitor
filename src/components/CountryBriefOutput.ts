@@ -1,3 +1,4 @@
+import { t } from '@/services/i18n';
 import { h } from '@/utils/dom-utils';
 import { WEB_APP_ORIGIN } from '@/config/web-origin';
 import { BRIEF_TOPICS, type BriefTopic, type BriefSectionState } from './country-brief-presentation';
@@ -143,6 +144,101 @@ export function createCountryBriefOutput(snapshot: BriefOutputSnapshot, kind: 's
   });
   controls.append(download, status);
   output.append(h('header', { className: 'cdp-output-header' }, close, h('h2', {}, kind === 'story' ? 'Create a story' : 'Export report')),
+    h('div', { className: 'cdp-output-layout' }, controls, paper));
+  return output;
+}
+
+export function renderDecisionBrief(snapshot: import('@/types/decision-brief').DecisionBriefSnapshot): HTMLElement {
+  const fmt = (value: number | null, unit = '') => {
+    if (value === null) return 'Unknown';
+    const number = value !== 0 && Math.abs(value) < 0.1
+      ? value > 0 ? '<0.1' : '>-0.1'
+      : value.toLocaleString('en-US', { maximumFractionDigits: 1, minimumFractionDigits: 1 });
+    return `${number} ${unit}`.trim();
+  };
+  const list = (items: string[]) => h('ul', {}, ...items.map(item => h('li', {}, item)));
+  const article = h('article', { className: 'cdp-output-paper cdp-decision-paper' },
+    h('h1', {}, `${snapshot.selection.countryName} · Decision brief`),
+    h('p', {}, `${snapshot.selection.countryCode} · ${snapshot.selection.chokepointId} · ${snapshot.selection.fuelMode} · Captured ${snapshot.capturedAt}`),
+    h('h2', {}, 'Conditional impact'), h('p', {}, snapshot.impact),
+    h('h2', {}, 'Selected scenarios'),
+    ...snapshot.results.map(result => h('p', { 'data-reference': result.reference }, `${result.reference}: ${result.severity}% disruption · ${fmt(result.loss, result.unit)} modeled loss${result.demandPct === null ? '' : ` · ${fmt(result.demandPct, '%')} of recorded demand`} · observed ${result.observedAt ?? 'unknown'}`)),
+    h('p', { className: 'cdp-decision-comparison' }, `${snapshot.comparison.delta === null ? '' : `Difference: ${fmt(snapshot.comparison.delta, snapshot.results[0]!.unit)}. `}${snapshot.comparison.reason}`),
+    h('h2', {}, 'Next action'), h('p', { className: 'cdp-decision-action' }, snapshot.action.text),
+    h('p', {}, `References: ${snapshot.action.references.join(', ')}`),
+    h('h3', {}, 'Constraint'), h('p', {}, snapshot.action.constraint),
+    h('h3', {}, 'Reassessment trigger'), h('p', {}, snapshot.action.trigger),
+    h('h2', {}, 'Evidence'),
+    ...snapshot.evidence.map(e => h('p', { id: `decision-${e.id}` }, `[${e.id}] ${e.label}: ${fmt(e.value, e.unit)} · `, h('a', { href: e.sourceUrl, target: '_blank', rel: 'noopener noreferrer' }, e.source), ` · observed ${e.observedAt ?? 'unknown'}`)),
+    ...snapshot.captures.map((capture, index) => h('p', {}, `${index === 0 ? 'Baseline' : 'Comparison'} retrieved ${capture.retrievedAt}`)),
+    h('h2', {}, 'Assumptions'), list(snapshot.assumptions), h('h2', {}, 'Unknowns'), list(snapshot.unknowns));
+  const data = h('script', { type: 'application/json', id: 'decision-brief-snapshot' });
+  data.textContent = JSON.stringify(snapshot).replace(/</g, '\\u003c');
+  article.append(data);
+  return article;
+}
+
+export function createDecisionBriefOutput(
+  country: { code: string; name: string },
+  signal: AbortSignal,
+  load: (selection: import('@/types/decision-brief').DecisionBriefSelection, signal: AbortSignal) => Promise<import('@/types/decision-brief').DecisionBriefSnapshot>,
+  onClose: () => void,
+): HTMLElement {
+  const output = h('section', { className: 'cdp-output', 'aria-label': t('components.decisionBrief.title') });
+  const close = h('button', { type: 'button', className: 'cdp-action-btn' }, t('components.decisionBrief.back'));
+  const controls = h('div', { className: 'cdp-output-controls' });
+  const paper = h('div', { className: 'cdp-decision-result' });
+  const status = h('p', { role: 'status', 'aria-live': 'polite' }, t('components.decisionBrief.select'));
+  const select = (label: string, values: [string, string][], initial: string) => {
+    const element = h('select', { 'aria-label': label }) as HTMLSelectElement;
+    for (const [value, text] of values) element.append(h('option', { value, selected: value === initial }, text));
+    controls.append(h('label', {}, label, element));
+    return element;
+  };
+  const fuel = select(t('components.decisionBrief.fuel'), [['gas', 'Gas (LNG)'], ['oil', 'Oil']], 'gas');
+  const route = select(t('components.decisionBrief.chokepoint'), [['hormuz_strait', 'Strait of Hormuz'], ['malacca_strait', 'Strait of Malacca'], ['suez', 'Suez Canal'], ['bab_el_mandeb', 'Bab el-Mandeb']], 'hormuz_strait');
+  const severities: [string, string][] = [25, 50, 75, 100].map(n => [String(n), `${n}%`]);
+  const baseline = select(t('components.decisionBrief.baseline'), severities, '50');
+  const comparison = select(t('components.decisionBrief.comparison'), severities, '100');
+  const refresh = h('button', { type: 'button', className: 'cdp-action-btn' }, t('components.decisionBrief.capture'));
+  const html = h('button', { type: 'button', className: 'cdp-action-btn', disabled: true }, t('components.decisionBrief.downloadHtml')) as HTMLButtonElement;
+  const json = h('button', { type: 'button', className: 'cdp-action-btn', disabled: true }, t('components.decisionBrief.downloadJson')) as HTMLButtonElement;
+  let snapshot: import('@/types/decision-brief').DecisionBriefSnapshot | null = null;
+  let request: AbortController | null = null;
+  let generation = 0;
+  const invalidate = () => { generation++; request?.abort(); snapshot = null; html.disabled = json.disabled = true; };
+  signal.addEventListener('abort', invalidate, { once: true });
+  close.addEventListener('click', () => { invalidate(); onClose(); });
+  for (const input of [fuel, route, baseline, comparison]) input.addEventListener('change', () => {
+    invalidate(); paper.replaceChildren(); status.textContent = t('components.decisionBrief.changed');
+  });
+  refresh.addEventListener('click', async () => {
+    invalidate();
+    const current = generation;
+    request = new AbortController();
+    paper.replaceChildren(); status.textContent = t('components.decisionBrief.loading');
+    try {
+      const result = await load({ countryCode: country.code, countryName: country.name, fuelMode: fuel.value as 'gas' | 'oil', chokepointId: route.value, baselinePct: Number(baseline.value), comparisonPct: Number(comparison.value) }, request.signal);
+      if (signal.aborted || current !== generation) return;
+      snapshot = result;
+      paper.replaceChildren(renderDecisionBrief(result)); html.disabled = json.disabled = false;
+      status.textContent = t('components.decisionBrief.captured');
+    } catch {
+      if (signal.aborted || current !== generation) return;
+      status.textContent = t('components.decisionBrief.failed');
+    }
+  });
+  html.addEventListener('click', () => {
+    if (snapshot) downloadHtml(`${country.code.toLowerCase()}-decision.html`, renderDecisionBrief(snapshot), `${country.name} Decision brief`);
+  });
+  json.addEventListener('click', () => {
+    if (!snapshot) return;
+    const url = URL.createObjectURL(new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' }));
+    h('a', { href: url, download: `${country.code.toLowerCase()}-decision.json` }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  });
+  controls.append(refresh, html, json, status);
+  output.append(h('header', { className: 'cdp-output-header' }, close, h('h2', {}, t('components.decisionBrief.title'))),
     h('div', { className: 'cdp-output-layout' }, controls, paper));
   return output;
 }
