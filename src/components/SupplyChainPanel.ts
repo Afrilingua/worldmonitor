@@ -89,6 +89,8 @@ export class SupplyChainPanel extends Panel {
    * the button node directly. Absent means idle.
    */
   private scenarioRunState = new Map<string, 'running' | 'idle' | 'error'>();
+  /** When true, the next render() commits via setSafeContentImmediate (user gesture). */
+  private pendingImmediateRender = false;
   private scenarioPollController: AbortController | null = null;
 
   constructor() {
@@ -111,7 +113,7 @@ export class SupplyChainPanel extends Panel {
       this.scenarioPollController?.abort();
       const scenarioId = trigger.dataset.scenarioId;
       if (scenarioId) this.scenarioRunState.delete(scenarioId);
-      this.render(true);
+      this.renderFromUser();
     });
     this.content.addEventListener('click', (e) => {
       const stageBtn = (e.target as HTMLElement).closest('[data-mineral-stage]') as HTMLElement | null;
@@ -176,7 +178,7 @@ export class SupplyChainPanel extends Panel {
   private setScenarioRunState(scenarioId: string, state: 'running' | 'idle' | 'error'): void {
     if (state === 'idle') this.scenarioRunState.delete(scenarioId);
     else this.scenarioRunState.set(scenarioId, state);
-    this.render(true);
+    this.renderFromUser();
   }
 
   private restoreChokepointHeaderFocus(): void {
@@ -230,13 +232,19 @@ export class SupplyChainPanel extends Panel {
     this.render();
   }
 
+  /** User-gesture repaint: bypass Panel's content coalesce so controls update same-tick. */
+  private renderFromUser(): void {
+    this.pendingImmediateRender = true;
+    this.render();
+  }
+
   /**
-   * @param immediate commit synchronously instead of through the debounce. Use it for
-   * direct user actions on the scenario controls, where the button must respond in the
-   * same tick — the debounced path would leave the old button state visible until the
-   * write lands, which is what the old out-of-band DOM mutation was working around.
+   * Paint the panel. Scenario control gestures use renderFromUser() so the button state
+   * commits in the same tick instead of waiting on Panel's 150 ms content coalesce.
    */
-  private render(immediate = false): void {
+  private render(): void {
+    const immediate = this.pendingImmediateRender;
+    this.pendingImmediateRender = false;
     this.clearTransitChart();
 
     const tabsHtml = `
@@ -289,14 +297,12 @@ export class SupplyChainPanel extends Panel {
       case 'stress': contentHtml = this.renderStress(); break;
     }
 
-    const commit = immediate
-      ? this.setSafeContentImmediate.bind(this)
-      : this.setSafeContent.bind(this);
-    commit(unsafeRawHtml(`
+    const html = unsafeRawHtml(`
       ${tabsHtml}
       ${unavailableBanner}
       <div class="economic-content">${contentHtml}</div>
-    `, 'legacy Panel.setContent() migration'), () => {
+    `, 'legacy Panel.setContent() migration');
+    const afterUpdate = (): void => {
       this.restoreChokepointHeaderFocus();
       for (const trigger of this.content.querySelectorAll<HTMLElement>('.sc-scenario-trigger')) {
         const controls = this.scenarioControls.get(trigger.dataset.scenarioId!);
@@ -314,7 +320,12 @@ export class SupplyChainPanel extends Panel {
       // activeScenarioState. Running it inside the setContent callback (rather than
       // after) guarantees it lands on the freshly committed DOM.
       if (this.activeScenarioState) this.renderScenarioBanner();
-    });
+    };
+    if (immediate) {
+      this.setSafeContentImmediate(html, afterUpdate);
+    } else {
+      this.setSafeContent(html, afterUpdate);
+    }
 
     if (this.activeTab === 'chokepoints' && this.expandedChokepoint) {
       const expandedCpName = this.expandedChokepoint;
