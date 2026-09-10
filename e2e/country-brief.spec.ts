@@ -118,6 +118,9 @@ test('US brief keeps late evidence, metric design and report data connected', as
   await expect(panel.locator('.cdp-country-name')).toHaveText('United States');
   await expect(panel.locator('#cdp-section-factors')).toHaveAttribute('aria-busy', 'true');
   await topic('Economy & trade').click();
+  // Release while the real request is still live; unrelated metric checks can exceed its deadline on CI.
+  data.releaseFactors();
+  await expect(panel.locator('#cdp-section-factors').getByRole('tab', { includeHidden: true })).toHaveCount(5);
   const housing = panel.locator('#cdp-section-housing');
   await expect(housing.locator('.cdp-metric-hero')).toHaveText(['156.4', '186.6', '8.0']);
   await expect(housing).toContainText('-2.1% · ↓ Falling');
@@ -125,7 +128,6 @@ test('US brief keeps late evidence, metric design and report data connected', as
   await expect(panel.locator('#cdp-section-debt .cdp-metric-hero')).toHaveText('128.6%');
   await expect(panel.locator('#cdp-section-debt')).toContainText('source value needs review');
   await expect(panel.locator('#cdp-section-tariffs')).toContainText('→ Unchanged');
-  data.releaseFactors();
   await expect(panel.locator('#cdp-section-factors')).toHaveAttribute('aria-busy', 'false');
   await expect(topic('Economy & trade')).toHaveAttribute('aria-current', 'page');
   await housing.scrollIntoViewIfNeeded();
