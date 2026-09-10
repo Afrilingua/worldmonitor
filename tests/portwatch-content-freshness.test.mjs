@@ -120,8 +120,8 @@ describe('buildContentFreshnessReport', () => {
     );
   });
 
-  // The cold-fetch cap is 30 countries per run on a 12h cron, so a full
-  // 174-country sweep takes ~6 runs = ~72h BY DESIGN, and served-stale
+  // The cold-fetch cap is 30 countries per run on a 3h cron, so a full
+  // 174-country sweep takes ~6 runs = ~18h BY DESIGN, and served-stale
   // payloads are retained for up to 7 days. Gating on "any country past
   // budget" would therefore be permanently true — a warning nobody can clear
   // and nobody would act on. Only the countries the China corridor adapter
@@ -262,7 +262,7 @@ describe('buildContentFreshnessReport', () => {
 
 // The seeder reserves the first cold-fetch slots for CN/HK instead of letting
 // them follow the fleet rotation: MAX_COLD_FETCH_PER_RUN caps refreshes at 30
-// of 174 per run on a 12h cron, so a full sweep is ceil(174/30) = 6 runs = 72h,
+// of 174 per run on a 3h cron, so a nominal sweep is ceil(174/30) = 6 runs = 18h,
 // comfortably inside the 240h content budget. CN and HK feed the China
 // corridor adapter and the activity-nowcast's maritime family, so they must be
 // refreshed every run they are due, not once per fleet sweep.
@@ -453,7 +453,7 @@ describe('decision-critical cold-fetch priority', () => {
 describe('decision-critical cache-hit refresh deadline', () => {
   it('moves a critical cache hit into the cold queue before the 144h boundary', () => {
     const budgetMs = PORTWATCH_CONTENT_FRESHNESS_BUDGET_MINUTES * MINUTE_MS;
-    const cadenceMs = 12 * HOUR_MS;
+    const cadenceMs = 3 * HOUR_MS;
     const atDeadline = new Date(NOW - budgetMs + cadenceMs).toISOString();
     const justBeforeDeadline = new Date(NOW - budgetMs + cadenceMs + 1).toISOString();
 
@@ -477,7 +477,7 @@ describe('decision-critical cache-hit refresh deadline', () => {
 
   it('uses the content clock when retrieval is recent but upstream is frozen', () => {
     const budgetMs = PORTWATCH_CONTENT_FRESHNESS_BUDGET_MINUTES * MINUTE_MS;
-    const cadenceMs = 12 * HOUR_MS;
+    const cadenceMs = 3 * HOUR_MS;
     const prior = payload('CN', new Date(NOW - HOUR_MS).toISOString());
     prior.contentAsOfChangedAt = NOW - budgetMs + cadenceMs;
 
