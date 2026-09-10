@@ -3186,6 +3186,27 @@ function isContainedHealthWarning(entry, evidence, now = Date.now()) {
     && entry.readModelReady !== false;
 }
 
+function isUsableTender(tender) {
+  if (!tender || typeof tender !== 'object' || Array.isArray(tender)) return false;
+  const stringArray = (values) => Array.isArray(values) && values.every((value) => typeof value === 'string');
+  const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+  return [tender.id, tender.title, tender.source, tender.sourceNoticeId, tender.officialUrl,
+    tender.status, tender.participationMode].every((value) => typeof value === 'string' && value.trim())
+    && [tender.countryCode, tender.region, tender.buyer, tender.description, tender.noticeType,
+      tender.publishedAt, tender.updatedAt, tender.deadline]
+      .every((value) => value === undefined || typeof value === 'string')
+    && [tender.categoryCodes, tender.sectors, tender.eligibilityRequirements, tender.submissionUrls].every(stringArray)
+    && (tender.money === undefined || (object(tender.money)
+      && (tender.money.amount === undefined || Number.isFinite(tender.money.amount))
+      && (tender.money.currency === undefined || typeof tender.money.currency === 'string')))
+    && (tender.automationFit === undefined || (object(tender.automationFit)
+      && typeof tender.automationFit.level === 'string'
+      && Number.isFinite(tender.automationFit.score)
+      && typeof tender.automationFit.classificationVersion === 'string'
+      && stringArray(tender.automationFit.matchReasons)
+      && stringArray(tender.automationFit.evidence)));
+}
+
 function composeContractsFinderHealth(entry, meta, snapshot, readFailed, now) {
   // Source-status bytes prove a diagnostic exists, not that its tender rows
   // still exist. Replace the generic containment proof with the served data.
@@ -3238,13 +3259,7 @@ function composeContractsFinderHealth(entry, meta, snapshot, readFailed, now) {
     && snapshot.sourceStatuses.filter((status) => status?.source === 'contracts-finder').length === 1
     && snapshot.sourceStatuses.every((status) => status && typeof status.source === 'string' && typeof status.state === 'string')
     && ['available', 'partial', 'empty'].includes(snapshot.availability)
-    && aggregateFresh && snapshot.tenders.every((tender) => tender
-      && [tender.id, tender.title, tender.source].every((value) => typeof value === 'string' && value.trim())
-      && [tender.countryCode, tender.region, tender.status, tender.buyer, tender.description,
-        tender.publishedAt, tender.updatedAt, tender.deadline, tender.money?.currency]
-        .every((value) => value === undefined || typeof value === 'string')
-      && [tender.categoryCodes, tender.sectors].every((values) => Array.isArray(values)
-        && values.every((value) => typeof value === 'string')));
+    && aggregateFresh && snapshot.tenders.every(isUsableTender);
   const aligned = (confirmedEmpty ? source.state === 'error' && meta.sourceState === 'error'
     : source?.state === 'stale' && meta?.sourceState === 'stale')
     && source.lastSuccessfulAt === meta.lastSuccessfulAt && source.fetchedAt === meta.lastAttemptAt

@@ -315,6 +315,36 @@ test('zero count alone cannot prove a verified empty source or a usable aggregat
   }
 });
 
+test('empty-source containment requires the complete tender reader shape', async () => {
+  const record = { ...(await failedContractsFinder()).tenders[0], source: 'ted' };
+  const fixture = await failedEmptyContractsFinder(undefined, [record]);
+  for (const field of ['sourceNoticeId', 'officialUrl', 'status', 'participationMode',
+    'eligibilityRequirements', 'submissionUrls']) {
+    const snapshot = structuredClone(fixture);
+    delete snapshot.tenders[0][field];
+    assert.equal((await classifyContractsFinder(snapshot)).contained, false, `missing ${field}`);
+  }
+  for (const [label, mutate] of [
+    ['matchReasons string', r => { r.automationFit.matchReasons = 'network'; }],
+    ['evidence object', r => { r.automationFit.evidence = {}; }],
+    ['missing score', r => { delete r.automationFit.score; }],
+    ['invalid level', r => { r.automationFit.level = 1; }],
+    ['missing version', r => { delete r.automationFit.classificationVersion; }],
+    ['null automation', r => { r.automationFit = null; }],
+    ['array money', r => { r.money = []; }],
+    ['string amount', r => { r.money = { amount: '20' }; }],
+    ['null money', r => { r.money = null; }],
+    ['invalid eligibility', r => { r.eligibilityRequirements = [1]; }],
+  ]) {
+    const snapshot = structuredClone(fixture);
+    mutate(snapshot.tenders[0]);
+    assert.equal((await classifyContractsFinder(snapshot)).contained, false, label);
+  }
+  delete fixture.tenders[0].automationFit;
+  delete fixture.tenders[0].money;
+  assert.equal((await classifyContractsFinder(fixture)).contained, true, 'optional nested messages may be absent');
+});
+
 test('Contracts Finder producer-to-health retains every diagnostic during bounded first-failure containment', async () => {
   const snapshot = await failedContractsFinder();
   const { entry, contained } = await classifyContractsFinder(snapshot);
