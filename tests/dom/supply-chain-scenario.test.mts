@@ -151,6 +151,30 @@ describe('SupplyChainPanel scenario controls', () => {
     expect(button().textContent).not.toContain('Simulate Closure');
   });
 
+  it('releases a cancelled template when a different template starts', async () => {
+    panel.updateChokepointStatus({ chokepoints: ['hormuz_strait', 'panama'].map(id => ({
+      id, name: id, disruptionScore: 20, status: 'yellow', affectedCommodities: [],
+      affectedRoutes: [], description: 'Fixture', lat: 26, lon: 56,
+    })), fetchedAt: Date.now() } as never);
+    await settle();
+    panel.getElement().querySelector<HTMLElement>('.trade-restriction-header')!.click();
+    await settle();
+    let releaseFirst: (value: unknown) => void = () => {};
+    mocks.poll.mockReturnValueOnce(new Promise(r => { releaseFirst = r; }));
+    button().click(); await settle();
+    const headers = () => panel.getElement().querySelectorAll<HTMLElement>('.trade-restriction-header');
+    headers()[1]!.click(); await settle();
+    mocks.poll.mockReturnValue(new Promise(() => {}));
+    button().click(); await settle();
+    expect(mocks.run.mock.calls[1]![0].scenarioId).toBe('panama-drought-50pct');
+    releaseFirst({ status: 'done', result: result() });
+    await settle();
+    expect(button().disabled).toBe(true);
+    headers()[0]!.click(); await settle();
+    expect(button().disabled).toBe(false);
+    expect(button().textContent).toContain('Simulate Closure');
+  });
+
   it('sends an explicit zero severity and reports no route disruption', async () => {
     change(severity(), '0');
     mocks.poll.mockResolvedValue({ status: 'done', result: result('DE', 0) });

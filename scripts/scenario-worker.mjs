@@ -166,14 +166,19 @@ async function redisLrem(key, value) {
  * Batch-GET multiple keys via a single Upstash pipeline request.
  * Returns parsed records, null for absent keys, and an invalid object for malformed JSON.
  * @param {string[]} keys
+ * @param {number} deadline
  * @returns {Promise<Array<unknown | null>>}
  */
-async function redisPipelineGet(keys) {
+async function redisPipelineGet(keys, deadline) {
   if (keys.length === 0) return [];
   // Retried: this pipeline is now fail-closed (a short array or any per-entry error
   // aborts the whole job), and a full-scope run makes several sequential requests, so
   // one transient blip would otherwise fail the entire scenario with no recourse.
   return withRetry(async () => {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw Object.assign(new Error('Scenario computation budget exhausted'), { nonRetryable: true });
+    }
     const { url, token } = getCredentials();
     const pipeline = keys.map(k => ['GET', k]);
     const resp = await fetch(`${url}/pipeline`, {
@@ -183,7 +188,12 @@ async function redisPipelineGet(keys) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(pipeline),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(Math.min(30_000, remainingMs)),
+    }).catch(err => {
+      if (Date.now() >= deadline) {
+        throw Object.assign(new Error('Scenario computation budget exhausted'), { nonRetryable: true });
+      }
+      throw err;
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
@@ -270,9 +280,15 @@ export async function computeScenario(scenarioId, iso2, disruptionPct) {
   for (let offset = 0; offset < pending.length; offset += EXPOSURE_BATCH_SIZE) {
     // Unread records keep their pre-set 'missing' state, so an exhausted budget
     // reports partial coverage truthfully rather than silently returning fewer countries.
-    if (Date.now() > deadline) break;
+    if (Date.now() >= deadline) break;
     const batch = pending.slice(offset, offset + EXPOSURE_BATCH_SIZE);
-    const values = await redisPipelineGet(batch.map(r => `supply-chain:exposure:${r.iso2}:${r.hs2}:v1`));
+    let values;
+    try {
+      values = await redisPipelineGet(batch.map(r => `supply-chain:exposure:${r.iso2}:${r.hs2}:v1`), deadline);
+    } catch (err) {
+      if (Date.now() >= deadline) break;
+      throw err;
+    }
     for (let i = 0; i < batch.length; i++) {
       const record = batch[i];
       const data = values[i];

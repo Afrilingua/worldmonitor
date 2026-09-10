@@ -1124,6 +1124,9 @@ export class SupplyChainPanel extends Panel {
     const disruptionPct = Number(severityInput.value);
 
     this.scenarioPollController?.abort();
+    for (const [id, state] of this.scenarioRunState) {
+      if (state === 'running') this.scenarioRunState.delete(id);
+    }
     const controller = new AbortController();
     this.scenarioPollController = controller;
     const { signal } = controller;

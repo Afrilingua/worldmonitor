@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeScenario, physicalImpact, EXPOSURE_BATCH_SIZE } from '../scripts/scenario-worker.mjs';
 
@@ -30,9 +30,34 @@ beforeEach(() => {
     return Response.json({ result: cache.has(k) ? JSON.stringify(cache.get(k)) : null });
   };
 });
-afterEach(() => { globalThis.fetch = originalFetch; process.env = { ...originalEnv }; });
+afterEach(() => { mock.restoreAll(); globalThis.fetch = originalFetch; process.env = { ...originalEnv }; });
 
 describe('scenario worker manifest and evidence', () => {
+  it('caps retried reads to the remaining budget and preserves partial results on expiry', async () => {
+    let now = 0;
+    mock.method(Date, 'now', () => now);
+    const timeout = AbortSignal.timeout;
+    const timeouts = [];
+    mock.method(AbortSignal, 'timeout', ms => { timeouts.push(ms); return timeout(ms); });
+    const fetchFixture = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async (url, init) => {
+      if (!String(url).endsWith('/pipeline')) return fetchFixture(url, init);
+      calls++;
+      if (calls === 1) {
+        now = 30_000;
+        throw new Error('first request timed out');
+      }
+      now = 45_000;
+      throw new Error('remaining budget timed out');
+    };
+    const result = await computeScenario('hormuz-tanker-blockade', null);
+    assert.equal(calls, 2, 'must not make a third request after the deadline');
+    assert.deepEqual(timeouts, [10_000, 30_000, 15_000]);
+    assert.equal(result.coverage.status, 'partial');
+    assert.ok(result.coverage.records.every(r => r.state === 'missing'));
+  });
+
   it('scales raw score 40 to 20 at half severity and 40 at full severity with multiplier 1', () => {
     assert.equal(physicalImpact(40, 50, 1), 20);
     assert.equal(physicalImpact(40, 100, 1), 40);
