@@ -150,10 +150,12 @@ test('the proxy-exhaustion warning names every exit it tried', async (t) => {
   await fredFetchJson('https://api.stlouisfed.org/fred/series/observations', 'https://fake:secret@gate.decodo.com:49999');
   const exhaustion = warnings.find((line) => line.includes('[fredFetch]'));
   assert.ok(exhaustion, 'the proxy leg must announce that it fell through to direct');
-  assert.match(
-    exhaustion,
-    /49999.*10001.*10002/,
-    'the warning must name the exits actually tried, in attempt order',
+  // Pin the RENDERED list, not a loose /49999.*10001.*10002/ — `.*` spans the
+  // whole line, so the interpolated error message alone could satisfy a loose
+  // pattern and the assertion would survive the port list being dropped.
+  assert.ok(
+    exhaustion.includes('on exits [49999, 10001, 10002]'),
+    `the warning must name the exits actually tried, in attempt order — got: ${exhaustion}`,
   );
 });
 
