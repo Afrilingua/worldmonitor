@@ -2583,6 +2583,7 @@ function readSeedMeta(seedCfg, keyMetaValues, keyMetaErrors, now) {
   return {
     hasMeta: meta != null,
     seedFetchedAt: fetchedAt,
+    targetLocationsDegraded: meta?.targetLocationsDegraded === true,
     seedAge,
     seedStale,
     seedError: sourceDegraded || failedDatasets.length > 0,
@@ -2939,6 +2940,8 @@ function classifyKey(name, redisKey, opts, ctx) {
   else status = 'OK';
 
   const entry = { status, records };
+  // Target locations are optional; expose their failure without changing status.
+  if (name === 'ddosAttacks' && meta.targetLocationsDegraded) entry.targetLocationsDegraded = true;
   // Source-level on-demand marker: "this key is RPC-populated or awaiting its
   // first producer run", NOT "any failure here is acceptable". The status suffix
   // (`EMPTY_ON_DEMAND`) cannot carry that, because it only covers the
