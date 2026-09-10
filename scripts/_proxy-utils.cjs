@@ -161,8 +161,10 @@ function curlProxyString(cfg) {
  * advancing their port would point at a closed door.
  */
 function resolveProxyStringForAttempt(attempt = 0, raw = process.env.PROXY_URL || '') {
-  const index = Number.isFinite(Number(attempt)) ? Math.max(0, Math.trunc(Number(attempt))) : 0;
-  const cfg = parseProxyConfigForAttempt(raw, index);
+  // No local clamp: parseProxyConfigForAttempt sanitizes `attempt` itself now,
+  // with the identical expression. A second copy bought nothing and left two
+  // places to drift apart.
+  const cfg = parseProxyConfigForAttempt(raw, attempt);
   if (!cfg) return '';
   return curlProxyString(cfg);
 }
