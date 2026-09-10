@@ -705,6 +705,7 @@ components:
                     $ref: '#/components/schemas/ScenarioResultTemplate'
                 scenarioId:
                     type: string
+                    description: Selected catalog template identifier.
                 scopedIso2:
                     type: string
                     description: Empty means all countries in the manifest.
@@ -774,10 +775,12 @@ components:
                     type: array
                     items:
                         type: string
+                        description: 'Requested countries: one selected country or the manifest country universe.'
                 hs2Codes:
                     type: array
                     items:
                         type: string
+                        description: Requested template chapters, or manifest chapters for all-sector templates.
                 records:
                     type: array
                     items:
@@ -790,8 +793,10 @@ components:
             properties:
                 iso2:
                     type: string
+                    description: Requested 2-letter ISO country code; paired with hs2 as the record reference.
                 hs2:
                     type: string
+                    description: Requested 2-digit HS chapter; paired with iso2 as the record reference.
                 state:
                     type: string
                     description: evaluated, missing, malformed, or not_seeded.

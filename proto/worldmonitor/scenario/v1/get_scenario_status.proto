@@ -46,9 +46,11 @@ message ScenarioResult {
   repeated ScenarioImpactCountry top_impact_countries = 2;
   // Template parameters echoed from the registry.
   ScenarioResultTemplate template = 3;
+  // Selected catalog template identifier.
   string scenario_id = 4;
   // Empty means all countries in the manifest.
   string scoped_iso2 = 5;
+  // Bounded country/sector evidence and gaps used for this run.
   ScenarioCoverage coverage = 6;
   // Computation time, not source observation time.
   string computed_at = 7;
@@ -56,7 +58,9 @@ message ScenarioResult {
 
 // One requested country/sector record. Missing evidence never implies zero impact.
 message ScenarioCoverageRecord {
+  // Requested 2-letter ISO country code; paired with hs2 as the record reference.
   string iso2 = 1;
+  // Requested 2-digit HS chapter; paired with iso2 as the record reference.
   string hs2 = 2;
   // evaluated, missing, malformed, or not_seeded.
   string state = 3;
@@ -71,8 +75,11 @@ message ScenarioCoverageRecord {
 message ScenarioCoverage {
   // complete, partial, or unknown. Complete refers to the bounded manifest only.
   string status = 1;
+  // Requested countries: one selected country or the manifest country universe.
   repeated string country_ids = 2;
+  // Requested template chapters, or manifest chapters for all-sector templates.
   repeated string hs2_codes = 3;
+  // One entry per requested country/chapter pair when the manifest is known.
   repeated ScenarioCoverageRecord records = 4;
   // Seed metadata production time, not trade observation time.
   string manifest_fetched_at = 5;
