@@ -2841,7 +2841,14 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     });
     const decisionButton = this.el('button', 'cdp-action-btn', t('components.decisionBrief.title')) as HTMLButtonElement;
     decisionButton.type = 'button';
-    decisionButton.addEventListener('click', () => { void this.openDecisionBrief(decisionButton); });
+    decisionButton.addEventListener('click', () => {
+      if (!hasPremiumAccess(getAuthState())) {
+        trackGateHit('evidence-export');
+        showToast(t('components.decisionBrief.locked'));
+        return;
+      }
+      void this.openDecisionBrief(decisionButton);
+    });
     right.append(shareBtn, maxBtn, storyButton, exportButton, decisionButton, evidenceButton);
     header.append(left, right);
 
@@ -3771,11 +3778,6 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
   }
 
   private async openDecisionBrief(trigger: HTMLButtonElement): Promise<void> {
-    if (!hasPremiumAccess(getAuthState())) {
-      trackGateHit('evidence-export');
-      showToast(t('components.decisionBrief.locked'));
-      return;
-    }
     const code = this.currentCode;
     const name = this.currentName;
     const signal = this.signal;
