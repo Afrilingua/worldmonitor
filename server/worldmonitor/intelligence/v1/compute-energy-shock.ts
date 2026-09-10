@@ -176,7 +176,7 @@ export async function computeEnergyShockScenario(
     : null;
   const liveFlowRatio: number | null = rawFlowRatio !== null ? clamp(rawFlowRatio, 0, 1.5) : null;
 
-  const cacheKey = `energy:shock:${needsGas ? 'v4' : 'v2'}:${code}:${chokepointId}:${disruptionPct}:${degraded ? 'd' : 'l'}:${fuelMode}`;
+  const cacheKey = `energy:shock:${needsOil ? 'v5' : 'v4'}:${code}:${chokepointId}:${disruptionPct}:${degraded ? 'd' : 'l'}:${fuelMode}`;
   const cached = await getCachedJson(cacheKey);
   if (cached) return cached as ComputeEnergyShockScenarioResponse;
 
@@ -245,7 +245,10 @@ export async function computeEnergyShockScenario(
   const effectiveGulfShare = !comtradeCoverage ? PROXIED_GULF_SHARE : rawGulfShare;
   const gulfCrudeShare = effectiveGulfShare * exposureMult;
 
-  const crudeImportsKbd = n(jodiOil?.crude?.importsKbd);
+  const observedCrudeImportsKbd = jodiOil?.crude?.importsKbd;
+  const dataAvailable = typeof observedCrudeImportsKbd === 'number'
+    && Number.isFinite(observedCrudeImportsKbd) && observedCrudeImportsKbd >= 0;
+  const crudeImportsKbd = dataAvailable ? observedCrudeImportsKbd : 0;
   const crudeLossKbd = crudeImportsKbd * gulfCrudeShare * (disruptionPct / 100);
 
   const productDefs: Array<{ name: string; demand: number }> = [
@@ -275,8 +278,6 @@ export async function computeEnergyShockScenario(
   const daysOfCover = ieaStocksCoverage ? rawDaysOfCover : 0;
   const netExporter = ieaStocksCoverage && ieaStocks?.netExporter === true;
   const effectiveCoverDays = computeEffectiveCoverDays(daysOfCover, netExporter, crudeLossKbd, crudeImportsKbd);
-
-  const dataAvailable = jodiOilCoverage;
 
   const chokepointConfidence = deriveChokepointConfidence(liveFlowRatio, degraded);
 
@@ -394,7 +395,7 @@ export async function computeEnergyShockScenario(
   }
 
   if (needsOil && needsGas) {
-    response.dataAvailable = jodiOilCoverage || gasSensitivity != null;
+    response.dataAvailable = dataAvailable || gasSensitivity != null;
     response.coverageLevel = response.dataAvailable ? 'partial' : 'unsupported';
   }
 

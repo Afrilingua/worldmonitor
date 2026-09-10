@@ -22,6 +22,7 @@ import {
   REFINERY_YIELD_BASIS,
 } from '../server/worldmonitor/intelligence/v1/_shock-compute.js';
 import { computeEnergyShockScenario } from '../server/worldmonitor/intelligence/v1/compute-energy-shock.ts';
+import { buildDecisionBrief } from '../src/utils/decision-brief.ts';
 import { installRedis } from './helpers/fake-upstash-redis.mts';
 
 import { ISO2_TO_COMTRADE } from '../server/worldmonitor/intelligence/v1/_comtrade-reporters.js';
@@ -1059,5 +1060,51 @@ describe('gas response JSON contract', () => {
     assert.equal(response.gasSensitivity.storage.date, '2026-09-07');
     assert.equal(Object.hasOwn(response.gasSensitivity.storage, 'bufferDays'), false);
     assert.equal(Object.hasOwn(response.gasSensitivity, 'lngShareOfImports'), false);
+  });
+});
+
+
+describe('observed oil imports through handler and Decision brief', () => {
+  for (const importsKbd of [null, undefined, -1, '100', NaN, Infinity, 0, 100]) {
+    it(`distinguishes crude imports ${String(importsKbd)} from missing data`, async (t) => {
+      t.after(restoreEnergyShockEnvironment);
+      installEnergyShockRedis({ ...liveChokepointSeed(),
+        'energy:jodi-oil:v1:DE': { dataMonth: '2026-05', crude: { importsKbd }, diesel: { demandKbd: 80 } },
+      });
+      const available = importsKbd === 0 || importsKbd === 100;
+      const captures = [];
+      for (const disruptionPct of [50, 100]) {
+        const response = await computeShock({ countryCode: 'DE', chokepointId: 'hormuz_strait', disruptionPct, fuelMode: 'oil' });
+        assert.equal(response.jodiOilCoverage, true);
+        assert.equal(response.dataAvailable, available);
+        if (!available) assert.match(response.assessment, /insufficient/i);
+        captures.push({ response, retrievedAt: '2026-09-10T10:00:00Z' });
+      }
+      const brief = buildDecisionBrief({ countryCode: 'DE', countryName: 'Germany', chokepointId: 'hormuz_strait', fuelMode: 'oil', baselinePct: 50, comparisonPct: 100 }, captures);
+      assert.deepEqual(brief.results.map(r => r.loss), available ? importsKbd === 0 ? [0, 0] : [20, 40] : [null, null]);
+      assert.match(brief.action.text, available ? importsKbd === 0 ? /modeled zero/ : /Compare Germany/ : /Recover the oil import/);
+      if (!available) assert.match(brief.action.constraint, /baseline is incomplete/);
+      const both = await computeShock({ countryCode: 'DE', chokepointId: 'hormuz_strait', disruptionPct: 100, fuelMode: 'both' });
+      assert.equal(both.dataAvailable, available);
+    });
+  }
+
+  it('isolates old oil and both caches while preserving gas-only cache reuse', async (t) => {
+    t.after(restoreEnergyShockEnvironment);
+    const request = { countryCode: 'US', chokepointId: 'hormuz_strait', disruptionPct: 100 };
+    installEnergyShockRedis({ ...liveChokepointSeed(), ...US_GAS_SEED,
+      'energy:jodi-oil:v1:US': { crude: { importsKbd: null }, diesel: { demandKbd: 80 } },
+      'energy:shock:v2:US:hormuz_strait:100:l:oil': { dataAvailable: true, assessment: 'old oil' },
+      'energy:shock:v4:US:hormuz_strait:100:l:both': { dataAvailable: false, assessment: 'old both' },
+      'energy:shock:v4:US:hormuz_strait:100:l:gas': { dataAvailable: true, assessment: 'gas cache retained' },
+    });
+    const oil = await computeShock({ ...request, fuelMode: 'oil' });
+    assert.equal(oil.dataAvailable, false);
+    assert.notEqual(oil.assessment, 'old oil');
+    const both = await computeShock({ ...request, fuelMode: 'both' });
+    assert.equal(both.dataAvailable, true);
+    assert.equal(both.gasSensitivity.dataAvailable, true);
+    assert.notEqual(both.assessment, 'old both');
+    assert.equal((await computeShock({ ...request, fuelMode: 'gas' })).assessment, 'gas cache retained');
   });
 });
