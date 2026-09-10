@@ -14,6 +14,22 @@ function captures(code = 'DE', lng = 41318, demand = 467224): [DecisionBriefCapt
   } })) as [DecisionBriefCapture, DecisionBriefCapture];
 }
 
+test('oil route evidence withholds a proxy and retains covered Comtrade values', () => {
+  const data = captures();
+  for (const { response } of data) {
+    response.jodiOilCoverage = true;
+    response.gulfCrudeShare = 0.4;
+    response.crudeLossKbd = 100;
+  }
+  data[1].response.comtradeCoverage = true;
+  const s = buildDecisionBrief({ ...selection, fuelMode: 'oil' }, data);
+  assert.equal(s.evidence.find(e => e.id === 'baseline-route')!.value, null);
+  assert.equal(s.evidence.find(e => e.id === 'comparison-route')!.value, 40);
+  assert.match(s.unknowns.join(' '), /baseline: Comtrade route exposure is unavailable.*fixed proxy/);
+  assert.deepEqual(s.results.map(r => r.loss), [100, 100]);
+  assert.equal(s.comparison.delta, null);
+});
+
 test('Germany shared basis retains exact corrected gas results and evidence-specific action', () => {
   const s = buildDecisionBrief(selection, captures());
   assert.deepEqual(s.results.map(r => r.loss), [6197.7, 12395.4]);

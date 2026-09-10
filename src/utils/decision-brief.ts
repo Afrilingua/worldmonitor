@@ -29,7 +29,8 @@ export function buildDecisionBrief(selection: DecisionBriefSelection, captures: 
         unknowns.add('Accessible storage and withdrawal capacity are unknown; storage is excluded from the comparison.');
       }
     } else {
-      add('route', 'Modeled crude route share', usable && nonnegative(r.gulfCrudeShare) ? r.gulfCrudeShare * 100 : null, '%', 'UN Comtrade / route model');
+      add('route', 'Comtrade-backed crude route share', usable && r.comtradeCoverage && nonnegative(r.gulfCrudeShare) ? r.gulfCrudeShare * 100 : null, '%', 'UN Comtrade / route model');
+      if (identity && !r.comtradeCoverage) unknowns.add(`${reference}: Comtrade route exposure is unavailable; the oil loss model uses a fixed proxy share.`);
     }
     add('loss', gas ? 'Assumed monthly LNG loss' : 'Modeled crude loss', usable ? gas ? g!.lngDisruptionTj : r.crudeLossKbd : null, gas ? 'TJ' : 'kbd', gas ? 'JODI / assumed route sensitivity' : 'JODI / route model');
     if (!r.portwatchCoverage) unknowns.add(`${reference}: shipping traffic is unavailable; no closure is established.`);
