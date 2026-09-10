@@ -363,7 +363,7 @@ function createXPollCycle(deps = {}) {
           // completeness: polled/expected/failed freeze together with `complete`,
           // so normalizeCoverage cannot self-correct and the panel's degraded
           // banner (api/x-feed.js -> XIntelPanel) would never render through an
-          // outage. Seed-meta staleness only catches this 3 slots (45min) later.
+          // outage, even while seed metadata reports the rejected attempt.
           ? { ...xState.lastCoverage, complete: false }
           : xState.lastCoverage),
         lastHealthyAt: next.listAccepted && next.cycleComplete ? acceptedSourceAt : xState.lastHealthyAt,
