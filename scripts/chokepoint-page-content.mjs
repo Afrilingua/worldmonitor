@@ -91,7 +91,7 @@ export const CHOKEPOINT_CONTENT = {
     ],
   },
   hormuz_strait: {
-    countryCodes: ['IR', 'OM'],
+    countryCodes: ['IR', 'OM', 'BH', 'KW', 'QA', 'SA', 'AE'],
     crisisSlugs: ['hormuz-gulf-security'],
     editorialLinks: [
       { href: '/blog/posts/energy-shock-monitoring-chokepoints-worldmonitor/', label: 'How to monitor energy shocks across chokepoints, fuel, and markets' },

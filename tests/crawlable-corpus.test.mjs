@@ -2688,10 +2688,10 @@ describe('crawlable corpus generator', () => {
       const topicWindow = new Window();
       try {
         const requiredPaths = [
-          ['/countries/iran/', '/chokepoints/strait-of-hormuz/'],
-          ['/countries/oman/', '/chokepoints/strait-of-hormuz/'],
-          ['/chokepoints/strait-of-hormuz/', '/countries/iran/'],
-          ['/chokepoints/strait-of-hormuz/', '/countries/oman/'],
+          ...['iran', 'oman', 'bahrain', 'kuwait', 'qatar', 'saudi-arabia', 'united-arab-emirates'].flatMap((slug) => [
+            [`/countries/${slug}/`, '/chokepoints/strait-of-hormuz/'],
+            ['/chokepoints/strait-of-hormuz/', `/countries/${slug}/`],
+          ]),
           ['/chokepoints/strait-of-hormuz/', '/crises/hormuz-gulf-security/'],
           ['/crises/hormuz-gulf-security/', '/chokepoints/strait-of-hormuz/'],
           ['/chokepoints/strait-of-hormuz/', '/blog/posts/energy-shock-monitoring-chokepoints-worldmonitor/'],
