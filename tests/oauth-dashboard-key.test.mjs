@@ -22,12 +22,13 @@ beforeEach(() => {
   });
   globalThis.fetch = async (input, init) => {
     const url = String(input);
-    if (url.startsWith('https://convex.test')) {
+    const origin = new URL(url).origin;
+    if (origin === 'https://convex.test') {
       convexCalls++;
       assert.equal(JSON.parse(init.body).keyHash, await sha256Hex(key));
       return Response.json(validation, { status: validation === 'unavailable' ? 503 : 200 });
     }
-    assert.ok(url.startsWith('https://redis.test'), url);
+    assert.equal(origin, 'https://redis.test');
     const command = (cmd) => {
       const [op, name, value] = cmd;
       if (op.toUpperCase() === 'GET') return { result: store.get(name) ?? null };
