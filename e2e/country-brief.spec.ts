@@ -316,6 +316,36 @@ for (const mobile of [false, true]) {
     }
     await form.locator('.operational-summary').scrollIntoViewIfNeeded();
     expect(await output.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+  });
+
+  test(`operational worksheet ${mobile ? 'mobile' : 'desktop'} rejects invalid inputs and retains reopened drafts`, async ({ page, countryBrief }, testInfo) => {
+    void countryBrief;
+    await page.setViewportSize(mobile ? { width: 390, height: 844 } : { width: 1440, height: 1000 });
+    await installDecisionBriefData(page);
+    await page.goto(`/dashboard?country=DE${mobile ? '' : '&expanded=1'}`);
+    const panel = page.locator('#country-deep-dive-panel');
+    await expect(panel).toHaveAttribute('aria-hidden', 'false');
+    await panel.getByRole('button', { name: 'Decision brief', exact: true }).click();
+    const output = panel.getByRole('region', { name: 'Decision brief', exact: true });
+    const form = output.getByRole('region', { name: 'Operational what-if worksheet', exact: true });
+    const worksheetFile = {
+      name: 'recovery-worksheet.json', mimeType: 'application/json',
+      buffer: Buffer.from(JSON.stringify({
+        schema: 'worldmonitor-operational-worksheet/v1',
+        input: {
+          operation: 'Recovery example', basis: 'user', unit: 'units',
+          startDate: '2026-09-10', horizonDays: 10, startingStock: 100, dailyDemand: 20,
+          deliveries: [{ date: '2026-09-13', quantity: 40, unit: 'units', costUsd: null }],
+          alternativeDeliveries: [{ date: '2026-09-17', quantity: 40, unit: 'units', costUsd: null }],
+          alternativeDailyDemand: null,
+        },
+      })),
+    };
+    await form.getByLabel('Import worksheet JSON', { exact: true }).setInputFiles(worksheetFile);
+    await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: Day 10');
+    await output.getByRole('button', { name: 'Capture / refresh both' }).click();
+    await expect(output.getByRole('status')).toContainText('Captured.');
+    const paper = output.locator('.cdp-decision-paper');
     await form.getByLabel('Starting usable stock', { exact: true }).fill('');
     await expect(form.locator('.operational-result')).toHaveCount(0);
     await expect(paper).toContainText('Operational worksheet incomplete or invalid');
@@ -326,7 +356,7 @@ for (const mobile of [false, true]) {
     const invalidPath = testInfo.outputPath('incomplete-decision.json');
     await invalidDownload.saveAs(invalidPath);
     expect(JSON.parse(await readFile(invalidPath, 'utf8')).operationalWorksheet).toBeNull();
-    await form.getByLabel('Import worksheet JSON', { exact: true }).setInputFiles(worksheetPath);
+    await form.getByLabel('Import worksheet JSON', { exact: true }).setInputFiles(worksheetFile);
     await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: Day 10');
     await form.getByLabel('Alternative daily demand (blank keeps baseline)', { exact: true }).fill('10');
     await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: None within horizon');
