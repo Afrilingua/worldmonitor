@@ -9,6 +9,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, describe, it } from 'node:test';
+import { Window } from 'happy-dom';
+import { htmlToMarkdown } from '../api/_md-url-twin.ts';
 
 import { buildCorpus, loadCorpusData } from '../scripts/build-crawlable-corpus.mjs';
 import {
@@ -18,6 +20,7 @@ import {
   formatMetric,
   mean,
   resolveMetricTokens,
+  renderResearchReportPage,
 } from '../scripts/build-research-reports.mjs';
 import {
   enumerateMissingDates,
@@ -234,6 +237,38 @@ describe('research report corpus (#5668)', () => {
       /^World Monitor — real-time global intelligence dashboard/,
       'report OG alt must describe the report, not the generic site card',
     );
+  });
+
+  it('connects historical focus and comparison research in main content and Markdown', () => {
+    const window = new Window();
+    try {
+      for (const [slug, role] of [
+        ['strait-of-hormuz', 'Focus'],
+        ['bab-el-mandeb', 'Comparison'],
+        ['suez-canal', 'Comparison'],
+        ['cape-of-good-hope', 'Comparison'],
+      ]) {
+        window.document.body.innerHTML = html;
+        const href = `/chokepoints/${slug}/`;
+        assert.ok(window.document.querySelector(`main a[href="${href}"]`), `report links ${slug} in content`);
+        assert.ok(htmlToMarkdown(html).includes(`](${href})`));
+        const trackerHtml = readFileSync(join(outDir, 'chokepoints', slug, 'index.html'), 'utf8');
+        window.document.body.innerHTML = trackerHtml;
+        const links = window.document.querySelectorAll(`main a[href="/research/${report.slug}/"]`);
+        assert.equal(links.length, 1, `${slug} has one report return path`);
+        assert.match(links[0].parentElement.textContent, new RegExp(`${role}.*historical research.*${report.datePublished}`, 'i'));
+        assert.ok(htmlToMarkdown(trackerHtml).includes(`](/research/${report.slug}/)`));
+      }
+    } finally {
+      window.close();
+    }
+  });
+
+  it('rejects a declared comparison without a canonical tracker route', () => {
+    assert.throws(() => renderResearchReportPage({
+      report, snapshot, tpl: {},
+      chokepointSlugById: new Map([['hormuz_strait', 'strait-of-hormuz']]),
+    }), /contextChokepointId bab_el_mandeb.*chokepoint registry/);
   });
 
   it('separates evidence layers and states failure modes in plain language', () => {

@@ -173,7 +173,7 @@ const AVAILABLE_EVIDENCE_LIMIT = 6;
 // This floor is published on country pages, so keep it aligned with
 // docs/methodology/country-resilience-index.mdx#supported-readings-on-unranked-country-pages.
 export const SUPPORTED_READING_MIN_COVERAGE = 0.5;
-export const CHOKEPOINT_PAGE_CONTENT_VERSION = '2026-09-04';
+export const CHOKEPOINT_PAGE_CONTENT_VERSION = '2026-09-10';
 const SOURCES_PAGE_CONTENT_VERSION = '2026-08-20';
 // Dataset schema versions stamp Dataset JSON-LD shape changes, per family. They
 // must NOT fold into every family's sitemap/page lastmod — that made ~90% of main
@@ -188,12 +188,12 @@ export const DATASET_SCHEMA_CONTENT_VERSION = {
   crisis: '2026-09-03',
   tools: '2026-09-03',
 };
-export const CRISIS_PAGE_CONTENT_VERSION = '2026-09-03';
+export const CRISIS_PAGE_CONTENT_VERSION = '2026-09-10';
 // TOOLS_PAGE_CONTENT_VERSION and RESEARCH_PAGE_CONTENT_VERSION are exported
 // for the same reason as the constants above: the #7533 guard recomputes
 // their families' clocks from the real values.
 export const TOOLS_PAGE_CONTENT_VERSION = '2026-09-03';
-export const RESEARCH_PAGE_CONTENT_VERSION = '2026-09-03';
+export const RESEARCH_PAGE_CONTENT_VERSION = '2026-09-10';
 const DATASET_LICENSE = {
   '@type': 'CreativeWork',
   name: 'World Monitor Terms of Service (27 July 2026)',
@@ -4120,8 +4120,11 @@ function renderChokepointPage({
 
   const relatedItems = [];
   for (const { report } of researchReports) {
-    if (report.focusChokepointId === chokepoint.id) {
-      relatedItems.push(`<a href="/research/${report.slug}/">${escapeHtml(report.title)}</a>`);
+    const role = report.focusChokepointId === chokepoint.id
+      ? 'Focus'
+      : report.contextChokepointIds.includes(chokepoint.id) ? 'Comparison' : null;
+    if (role) {
+      relatedItems.push(`${role} in historical research published ${escapeHtml(report.datePublished)}: <a href="/research/${report.slug}/">${escapeHtml(report.title)}</a>`);
     }
   }
   if (content.glossarySlug) {
@@ -4381,6 +4384,7 @@ ${crises.map((crisis) => `        <a class="card" href="/crises/${escapeHtml(cri
 
 function renderCrisisPage({
   crisis,
+  countrySlugByCode,
   baseUrl,
   lastmod,
   livePulse = null,
@@ -4410,11 +4414,15 @@ function renderCrisisPage({
     fallback,
   );
   const countryRows = crisis.coverage.map((country) => {
+    const slug = countrySlugByCode.get(country.code);
+    const name = slug
+      ? `<a href="/countries/${escapeHtml(slug)}/">${escapeHtml(country.name)}</a>`
+      : escapeHtml(country.name);
     const row = rowByCode.get(country.code);
     const value = row
       ? `${formatCount(row.events, OBSERVED_EVIDENCE)} events · ${formatCount(row.fatalities, OBSERVED_EVIDENCE)} fatalities · ${row.referencePeriod}`
       : (hasPulse ? 'Unavailable' : 'Waiting for published pulse');
-    return `          <li data-crisis-country data-country-code="${escapeHtml(country.code)}" data-country-name="${escapeHtml(country.name)}"><strong>${escapeHtml(country.name)}</strong><br><span data-crisis-country-value>${escapeHtml(value)}</span></li>`;
+    return `          <li data-crisis-country data-country-code="${escapeHtml(country.code)}" data-country-name="${escapeHtml(country.name)}"><strong>${name}</strong><br><span data-crisis-country-value>${escapeHtml(value)}</span></li>`;
   }).join('\n');
   const liveGrid = hasPulse
     ? `        <div class="grid" data-live-grid aria-label="Current crisis metrics" aria-busy="false">
@@ -5052,6 +5060,7 @@ export async function buildCorpus({
   livePulseSnapshotPath,
 } = {}) {
   const data = await loadCorpusData({ rootDir, livePulseSnapshotPath });
+  const countrySlugByCode = new Map(data.countries.map((country) => [country.code, country.slug]));
   if (clean) {
     for (const dir of GENERATED_DIRS) {
       rmSync(join(outDir, dir), { recursive: true, force: true });
@@ -5370,6 +5379,7 @@ export async function buildCorpus({
       routeFile(pagePath),
       renderCrisisPage({
         crisis,
+        countrySlugByCode,
         baseUrl,
         lastmod: data.lastmod.crises,
         livePulse: data.livePulse,

@@ -2637,6 +2637,32 @@ describe('crawlable corpus generator', () => {
 
       const corpusData = await loadCorpusData({ rootDir: repoRoot });
       const countryByCode = new Map(corpusData.countries.map((country) => [country.code, country]));
+      const unavailableCoverage = new Set();
+      for (const crisis of corpusData.crises) {
+        const window = new Window();
+        try {
+          const crisisHtml = read(outDir, `crises/${crisis.slug}/index.html`);
+          window.document.write(crisisHtml);
+          for (const covered of crisis.coverage) {
+            const row = window.document.querySelector(`main [data-crisis-country][data-country-code="${covered.code}"]`);
+            assert.ok(row, `${crisis.slug} retains coverage for ${covered.code}`);
+            const country = countryByCode.get(covered.code);
+            if (!country) {
+              unavailableCoverage.add(covered.code);
+              assert.equal(row.querySelector('a'), null);
+              assert.ok(row.textContent.includes(covered.name));
+              continue;
+            }
+            const href = `/countries/${country.slug}/`;
+            assert.equal(row.querySelector('a')?.getAttribute('href'), href, `${crisis.slug} links ${covered.code} in coverage`);
+            assert.ok(existsSync(join(outDir, href, 'index.html')));
+            assert.ok(htmlToMarkdown(crisisHtml).includes(`](${href})`));
+          }
+        } finally {
+          window.close();
+        }
+      }
+      assert.deepEqual([...unavailableCoverage], ['PS']);
       const microstateCohort = JSON.parse(readFileSync(
         join(repoRoot, 'server/worldmonitor/resilience/v1/cohorts/microstate-territories.json'),
         'utf8',
@@ -4429,8 +4455,8 @@ describe('crawlable corpus generator', () => {
       });
       assert.equal(
         redSeaDataset.dateModified,
-        laterDate(corpus.lastmod.crises, DATASET_SCHEMA_CONTENT_VERSION.crisis),
-        'changed crisis Dataset schema must advance only the crisis family stamp',
+        laterDate(corpus.livePulse.capturedAt, DATASET_SCHEMA_CONTENT_VERSION.crisis),
+        'page links must not advance the crisis Dataset observation clock',
       );
       assert.equal(
         pageLastmod(redSea),
@@ -4940,7 +4966,10 @@ describe('crawlable corpus generator', () => {
       laterDate(data.lastmod.countries, CII_COUNTRY_PAGE_CONTENT_VERSION),
       'the CII country clock must derive from the generic country clock',
     );
-    assert.equal(data.lastmod.research, '2026-09-03');
+    assert.equal(data.lastmod.research, laterDate(
+      ...data.researchReports.map(({ report }) => report.dateModified),
+      RESEARCH_PAGE_CONTENT_VERSION,
+    ));
     assert.equal(
       data.lastmod.chokepoints,
       laterDate(
