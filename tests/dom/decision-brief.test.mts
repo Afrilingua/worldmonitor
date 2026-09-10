@@ -25,6 +25,26 @@ function snapshot(missing = false) {
 const click = (root: HTMLElement, text: string) => (Array.from(root.querySelectorAll('button')).find(b => b.textContent === text)!).click();
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
 
+it('keeps energy identity while invalid worksheet edits clear preview and exported operational results', async () => {
+  const data = snapshot();
+  const blobs: Blob[] = [];
+  vi.spyOn(URL, 'createObjectURL').mockImplementation(blob => { blobs.push(blob as Blob); return 'blob:test'; });
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  const root = createDecisionBriefOutput({ code: 'DE', name: 'Germany' }, new AbortController().signal, async () => data, () => {});
+  click(root, 'Capture / refresh both');
+  await vi.waitFor(() => expect(root.querySelector('.cdp-decision-paper .operational-summary')!.textContent).toContain('Baseline first gap: Day 8'));
+  const stock = root.querySelector<HTMLInputElement>('[aria-label="Starting usable stock"]')!;
+  stock.value = ''; stock.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(root.querySelector('.cdp-decision-paper .operational-result')).toBeNull();
+  expect(root.querySelector('.cdp-decision-paper')!.textContent).toContain('Operational worksheet incomplete or invalid');
+  click(root, 'Download decision JSON');
+  const exported = JSON.parse(await blobs[0]!.text());
+  expect(exported.operationalWorksheet).toBeNull();
+  const { operationalWorksheet, ...energy } = exported;
+  expect(energy).toEqual(data);
+});
+
+
 describe('decision brief preview and exports', () => {
   for (const missing of [false, true]) it(`renders exact snapshot and distinct action for missing=${missing}`, async () => {
     const data = snapshot(missing);
@@ -143,23 +163,4 @@ describe('decision brief preview and exports', () => {
     expect(paper.querySelector('img')).toBeNull();
     expect(paper.querySelector('script')!.textContent).not.toContain('<');
   });
-});
-
-it('keeps energy identity while invalid worksheet edits clear preview and exported operational results', async () => {
-  const data = snapshot();
-  const blobs: Blob[] = [];
-  vi.spyOn(URL, 'createObjectURL').mockImplementation(blob => { blobs.push(blob as Blob); return 'blob:test'; });
-  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
-  const root = createDecisionBriefOutput({ code: 'DE', name: 'Germany' }, new AbortController().signal, async () => data, () => {});
-  click(root, 'Capture / refresh both');
-  await vi.waitFor(() => expect(root.querySelector('.cdp-decision-paper .operational-summary')!.textContent).toContain('Baseline first gap: Day 8'));
-  const stock = root.querySelector<HTMLInputElement>('[aria-label="Starting usable stock"]')!;
-  stock.value = ''; stock.dispatchEvent(new Event('input', { bubbles: true }));
-  expect(root.querySelector('.cdp-decision-paper .operational-result')).toBeNull();
-  expect(root.querySelector('.cdp-decision-paper')!.textContent).toContain('Operational worksheet incomplete or invalid');
-  click(root, 'Download decision JSON');
-  const exported = JSON.parse(await blobs[0]!.text());
-  expect(exported.operationalWorksheet).toBeNull();
-  const { operationalWorksheet, ...energy } = exported;
-  expect(energy).toEqual(data);
 });
