@@ -3,8 +3,8 @@ import type {
   ComputeEnergyShockScenarioRequest,
   ComputeEnergyShockScenarioResponse,
   ProductImpact,
-  GasImpact,
-  GasStorageBuffer,
+  GasSensitivity,
+  GasStorageObservation,
 } from '../../../../src/generated/server/worldmonitor/intelligence/v1/service_server';
 
 import { getCachedJson, setCachedJson } from '../../../_shared/redis';
@@ -151,7 +151,7 @@ export async function computeEnergyShockScenario(
     degraded: false,
     chokepointConfidence: 'none',
     liveFlowRatio: undefined,
-    gasImpact: undefined,
+    gasSensitivity: undefined,
   };
 
   if (!code || code.length !== 2) return EMPTY;
@@ -176,7 +176,7 @@ export async function computeEnergyShockScenario(
     : null;
   const liveFlowRatio: number | null = rawFlowRatio !== null ? clamp(rawFlowRatio, 0, 1.5) : null;
 
-  const cacheKey = `energy:shock:${needsGas ? 'v3' : 'v2'}:${code}:${chokepointId}:${disruptionPct}:${degraded ? 'd' : 'l'}:${fuelMode}`;
+  const cacheKey = `energy:shock:${needsGas ? 'v4' : 'v2'}:${code}:${chokepointId}:${disruptionPct}:${degraded ? 'd' : 'l'}:${fuelMode}`;
   const cached = await getCachedJson(cacheKey);
   if (cached) return cached as ComputeEnergyShockScenarioResponse;
 
@@ -295,7 +295,7 @@ export async function computeEnergyShockScenario(
     comtradeCoverage,
   );
 
-  let gasImpact: GasImpact | undefined;
+  let gasSensitivity: GasSensitivity | undefined;
 
   const gasDisruption = needsGas && jodiGas
     ? computeGasDisruption(jodiGas.lngImportsTj, jodiGas.totalDemandTj, chokepointId, disruptionPct)
@@ -318,7 +318,7 @@ export async function computeEnergyShockScenario(
     const dataMonth = typeof jodiGas.dataMonth === 'string' ? jodiGas.dataMonth : '';
     const { lngDisruptionTj, deficitPct: gasDeficitPct } = gasDisruption;
 
-    let storage: GasStorageBuffer | undefined;
+    let storage: GasStorageObservation | undefined;
     const isEu = EU_GAS_STORAGE_COUNTRIES.has(code);
 
     if (isEu && gasStorageData
@@ -334,7 +334,7 @@ export async function computeEnergyShockScenario(
       };
     }
 
-    gasImpact = {
+    gasSensitivity = {
       lngShareOfImports,
       lngImportsTj,
       lngDisruptionTj,
@@ -370,13 +370,13 @@ export async function computeEnergyShockScenario(
     degraded,
     chokepointConfidence: needsGas ? 'none' : chokepointConfidence,
     liveFlowRatio: liveFlowRatio !== null ? Math.round(liveFlowRatio * 1000) / 1000 : undefined,
-    gasImpact,
+    gasSensitivity,
   };
 
   if (!needsOil) {
-    response.assessment = gasImpact?.assessment ?? buildGasAssessment(code, chokepointId, false, 0, 0, disruptionPct, '');
-    response.dataAvailable = gasImpact?.dataAvailable ?? false;
-    response.coverageLevel = gasImpact ? 'partial' : 'unsupported';
+    response.assessment = gasSensitivity?.assessment ?? buildGasAssessment(code, chokepointId, false, 0, 0, disruptionPct, '');
+    response.dataAvailable = gasSensitivity?.dataAvailable ?? false;
+    response.coverageLevel = gasSensitivity ? 'partial' : 'unsupported';
     response.limitations = response.limitations.filter(l =>
       !l.includes('refinery yield') &&
       !l.includes('Gulf crude share') &&
@@ -394,7 +394,7 @@ export async function computeEnergyShockScenario(
   }
 
   if (needsOil && needsGas) {
-    response.dataAvailable = jodiOilCoverage || gasImpact != null;
+    response.dataAvailable = jodiOilCoverage || gasSensitivity != null;
     response.coverageLevel = response.dataAvailable ? 'partial' : 'unsupported';
   }
 

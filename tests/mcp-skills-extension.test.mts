@@ -20,8 +20,8 @@ describe('Skills Over MCP extension', () => {
     assert.equal(read.status, 200);
     const content = body.result.contents[0]!.text;
     assert.match(content, /assumed_route_sensitivity/);
-    assert.match(content, /`bufferDays` is deprecated and omitted/);
-    assert.match(content, /`gasImpact.dataMonth`/);
+    assert.match(content, /`gasImpact` is deprecated and omitted/);
+    assert.match(content, /`gasSensitivity.dataMonth`/);
     assert.match(content, /Current shipping flow does not scale it/);
   });
 

@@ -1738,7 +1738,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
         .then((r) => r.json() as Promise<ComputeEnergyShockScenarioResponse>)
         .then((result) => {
           resultArea.replaceChildren();
-          if (result.gasImpact && result.gasImpact.modelBasis !== 'assumed_route_sensitivity') {
+          if (result.gasImpact || (result.gasSensitivity && result.gasSensitivity.modelBasis !== 'assumed_route_sensitivity')) {
             resultArea.append(this.el('div', 'cdp-economic-source', 'Gas scenario uses an outdated model. Retry after the cached response expires.'));
             return;
           }
@@ -1771,7 +1771,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
   private renderShockResult(result: ComputeEnergyShockScenarioResponse): HTMLElement {
     const container = this.el('div', '');
 
-    if (!result.dataAvailable && !(result as any).gasImpact?.dataAvailable) {
+    if (!result.dataAvailable && !result.gasSensitivity?.dataAvailable) {
       container.append(this.el('div', 'cdp-economic-source', result.assessment));
       return container;
     }
@@ -1779,7 +1779,7 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
     if (result.degraded) {
       const warn = this.el('div', '');
       warn.style.cssText = 'font-size:calc(10px * var(--wm-panel-effective-scale, 1));color:#f59e0b;margin-bottom:6px;padding:3px 6px;background:#1c1400;border-radius:3px';
-      warn.textContent = result.gasImpact && !result.jodiOilCoverage
+      warn.textContent = result.gasSensitivity && !result.jodiOilCoverage
         ? 'Shipping flow data unavailable. Gas sensitivity uses an assumed route baseline.'
         : 'Live flow data unavailable — using historical baseline';
       container.append(warn);
@@ -1869,8 +1869,8 @@ export class CountryDeepDivePanel implements CountryBriefPanel {
       container.append(details);
     }
 
-    if (result.gasImpact?.dataAvailable) {
-      const gi = result.gasImpact;
+    if (result.gasSensitivity?.dataAvailable) {
+      const gi = result.gasSensitivity;
       const gasSection = this.el('div', '');
       gasSection.style.cssText = 'margin-top:10px;border-top:1px solid #374151;padding-top:8px';
 
