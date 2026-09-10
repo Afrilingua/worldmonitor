@@ -40,6 +40,7 @@ paths:
                 content:
                     application/json:
                         example:
+                            "disruptionPct": 1
                             "iso2": "US"
                             "scenarioId": "hormuz-tanker-blockade"
                         schema:
@@ -619,8 +620,14 @@ components:
                     pattern: ^([A-Z]{2})?$
                     description: |-
                         Optional 2-letter ISO country code to scope the impact computation.
-                         When absent, v1 computes only the seeded reporter set:
-                         US, CN, RU, IR, IN, TW.
+                         When absent, use the bounded country/sector manifest in existing seed metadata.
+                         Missing or old manifest means unknown coverage.
+                disruptionPct:
+                    type: integer
+                    maximum: 100
+                    minimum: 0
+                    format: int32
+                    description: Physical scenarios only. Omitted preserves the template default; zero is valid.
             required:
                 - scenarioId
             description: |-
@@ -696,6 +703,16 @@ components:
                         $ref: '#/components/schemas/ScenarioImpactCountry'
                 template:
                     $ref: '#/components/schemas/ScenarioResultTemplate'
+                scenarioId:
+                    type: string
+                scopedIso2:
+                    type: string
+                    description: Empty means all countries in the manifest.
+                coverage:
+                    $ref: '#/components/schemas/ScenarioCoverage'
+                computedAt:
+                    type: string
+                    description: Computation time, not source observation time.
             description: |-
                 ScenarioResult is the computed payload the scenario-worker writes back
                  under the `scenario-result:{job_id}` Redis key. Populated only when
@@ -738,7 +755,7 @@ components:
                 durationDays:
                     type: integer
                     format: int32
-                    description: Estimated duration of disruption in days.
+                    description: Descriptive duration in days; not an input to the impact calculation.
                 costShockMultiplier:
                     type: number
                     format: double
@@ -747,6 +764,48 @@ components:
                 ScenarioResultTemplate carries template parameters echoed into the worker's
                  computed result so clients can render them without re-looking up the
                  template registry.
+        ScenarioCoverage:
+            type: object
+            properties:
+                status:
+                    type: string
+                    description: complete, partial, or unknown. Complete refers to the bounded manifest only.
+                countryIds:
+                    type: array
+                    items:
+                        type: string
+                hs2Codes:
+                    type: array
+                    items:
+                        type: string
+                records:
+                    type: array
+                    items:
+                        $ref: '#/components/schemas/ScenarioCoverageRecord'
+                manifestFetchedAt:
+                    type: string
+                    description: Seed metadata production time, not trade observation time.
+        ScenarioCoverageRecord:
+            type: object
+            properties:
+                iso2:
+                    type: string
+                hs2:
+                    type: string
+                state:
+                    type: string
+                    description: evaluated, missing, malformed, or not_seeded.
+                basis:
+                    type: string
+                    description: flow_weighted or country_route_fallback, only for evaluated records.
+                rawImpact:
+                    type: number
+                    format: double
+                    description: Relative score units, not currency. Present only for evaluated records.
+                fetchedAt:
+                    type: string
+                    description: Cache production time. Observation date is unknown unless separately supplied.
+            description: One requested country/sector record. Missing evidence never implies zero impact.
         ListScenarioTemplatesRequest:
             type: object
         ListScenarioTemplatesResponse:

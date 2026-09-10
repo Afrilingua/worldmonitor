@@ -334,7 +334,7 @@ export async function main() {
 
     commands.push([
       'SET', META_KEY,
-      JSON.stringify({ fetchedAt: Date.now(), recordCount: writtenCount, status: 'ok' }),
+      JSON.stringify({ fetchedAt: Date.now(), recordCount: writtenCount, status: 'ok', manifestVersion: 1, countryIds: iso2List, hs2Codes: HS2_CODES }),
       'EX', TTL_SECONDS * 3,
     ]);
 

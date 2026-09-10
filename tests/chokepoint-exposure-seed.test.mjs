@@ -177,3 +177,38 @@ describe('algorithm parity with handler', () => {
       'Hormuz should appear from SA exporter routes via union-based coverage');
   });
 });
+
+describe('seed coverage manifest', () => {
+  it('publishes the exact country/sector universe with its exposure records', async () => {
+    const { main, META_KEY, HS2_CODES } = await import('../scripts/seed-hs2-chokepoint-exposure.mjs');
+    const originalFetch = globalThis.fetch;
+    const env = { ...process.env };
+    const writes = [];
+    process.env.UPSTASH_REDIS_REST_URL = 'https://fixture.invalid';
+    process.env.UPSTASH_REDIS_REST_TOKEN = 'fixture';
+    globalThis.fetch = async (url, init) => {
+      const commands = JSON.parse(init.body);
+      if (!String(url).endsWith('/pipeline')) return Response.json({ result: 'OK' });
+      return Response.json(commands.map(command => {
+        if (command[0] === 'GET') return { result: null };
+        writes.push(command);
+        return { result: 'OK' };
+      }));
+    };
+    try {
+      await main();
+      const meta = JSON.parse(writes.find(c => c[1] === META_KEY)[2]);
+      const countries = Object.keys(CLUSTERS).filter(k => /^[A-Z]{2}$/.test(k));
+      assert.deepEqual(meta.countryIds, countries);
+      assert.deepEqual(meta.hs2Codes, HS2_CODES);
+      assert.equal(meta.manifestVersion, 1);
+      assert.equal(meta.recordCount, countries.length * HS2_CODES.length);
+      assert.equal(meta.status, 'ok');
+      assert.ok(meta.countryIds.includes('DE') && meta.countryIds.includes('JP'));
+      const keys = new Set(writes.map(c => c[1]));
+      for (const country of countries) for (const hs2 of HS2_CODES) {
+        assert.ok(keys.has(`supply-chain:exposure:${country}:${hs2}:v1`));
+      }
+    } finally { globalThis.fetch = originalFetch; process.env = env; }
+  });
+});

@@ -49,13 +49,43 @@ function coerceTemplate(raw: unknown): ScenarioResult['template'] {
 
 function coerceResult(raw: unknown): ScenarioResult | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
-  const r = raw as { affectedChokepointIds?: unknown; topImpactCountries?: unknown; template?: unknown };
+  const r = raw as Partial<ScenarioResult>;
   return {
     affectedChokepointIds: Array.isArray(r.affectedChokepointIds)
       ? r.affectedChokepointIds.filter((id): id is string => typeof id === 'string')
       : [],
     topImpactCountries: coerceImpactCountries(r.topImpactCountries),
     template: coerceTemplate(r.template),
+    scenarioId: typeof r.scenarioId === 'string' ? r.scenarioId : '',
+    scopedIso2: typeof r.scopedIso2 === 'string' ? r.scopedIso2 : '',
+    computedAt: typeof r.computedAt === 'string' ? r.computedAt : '',
+    coverage: coerceCoverage(r.coverage),
+  };
+}
+
+function coerceCoverage(raw: ScenarioResult['coverage']): ScenarioResult['coverage'] {
+  const unknown = { status: 'unknown', countryIds: [], hs2Codes: [], records: [], manifestFetchedAt: '' };
+  if (!raw || !['complete', 'partial', 'unknown'].includes(raw.status)
+    || !Array.isArray(raw.countryIds) || !raw.countryIds.every(id => typeof id === 'string')
+    || !Array.isArray(raw.hs2Codes) || !raw.hs2Codes.every(id => typeof id === 'string')
+    || !Array.isArray(raw.records) || raw.records.some(r => !r
+      || typeof r.iso2 !== 'string' || typeof r.hs2 !== 'string'
+      || !['evaluated', 'missing', 'malformed', 'not_seeded'].includes(r.state)
+      || (r.state === 'evaluated' && (!['flow_weighted', 'country_route_fallback'].includes(r.basis)
+        || typeof r.rawImpact !== 'number' || !Number.isFinite(r.rawImpact) || r.rawImpact < 0)))) {
+    return unknown;
+  }
+  return {
+    status: raw.status,
+    countryIds: raw.countryIds,
+    hs2Codes: raw.hs2Codes,
+    manifestFetchedAt: typeof raw.manifestFetchedAt === 'string' ? raw.manifestFetchedAt : '',
+    records: raw.records.map(r => ({
+      iso2: r.iso2, hs2: r.hs2, state: r.state,
+      basis: r.state === 'evaluated' ? r.basis : '',
+      rawImpact: r.state === 'evaluated' ? r.rawImpact : undefined,
+      fetchedAt: typeof r.fetchedAt === 'string' ? r.fetchedAt : '',
+    })),
   };
 }
 

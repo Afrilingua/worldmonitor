@@ -1,3 +1,5 @@
+import type { ScenarioCoverage } from '../../../../src/generated/client/worldmonitor/scenario/v1/service_client';
+
 /**
  * Pre-built scenario templates for the supply chain scenario engine.
  *
@@ -140,6 +142,10 @@ export interface ScenarioVisualState {
  * chokepoint IDs + country impacts.
  */
 export interface ScenarioResult {
+  scenarioId?: string;
+  scopedIso2?: string;
+  computedAt?: string;
+  coverage?: ScenarioCoverage;
   affectedChokepointIds: string[];
   topImpactCountries: Array<{ iso2: string; totalImpact: number; impactPct: number }>;
   template?: {

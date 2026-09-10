@@ -40,20 +40,6 @@ function parseMethodologyLiveFlowMappings(source) {
     .map(([, canonicalId, baselineId]) => ({ canonicalId, baselineId }));
 }
 
-function parseSeededReporters(source) {
-  const match = source.match(/SEEDED_REPORTERS\s*=\s*\[([^\]]+)\]/);
-  assert.ok(match, 'SEEDED_REPORTERS declaration not found');
-  return [...match[1].matchAll(/'([A-Z]{2})'/g)].map(([, iso2]) => iso2);
-}
-
-function containsSeededReporters(text, seededReporters) {
-  const normalized = text
-    .replace(/`/g, '')
-    .replace(/, and /g, ', ')
-    .replace(/\s+/g, ' ');
-  return normalized.includes(seededReporters.join(', '));
-}
-
 function extractBetween(source, startNeedle, endNeedle, label) {
   const start = source.indexOf(startNeedle);
   assert.notEqual(start, -1, `${label} start not found`);
@@ -229,20 +215,17 @@ describe('scenario docs match worker scope and impact math', () => {
   const scenarioOpenApi = readRepo('docs/api/ScenarioService.openapi.yaml');
   const bundledOpenApi = readRepo('docs/api/worldmonitor.openapi.yaml');
 
-  it('discloses the seeded reporter scope wherever scope-all is documented', () => {
-    const seededReporters = parseSeededReporters(worker);
-    assert.deepEqual(seededReporters, ['US', 'CN', 'RU', 'IR', 'IN', 'TW']);
-
+  it('discloses bounded manifest scope and unknown coverage', () => {
+    assert.doesNotMatch(worker, /SEEDED_REPORTERS/);
+    assert.match(worker, /seed-meta:supply_chain:chokepoint-exposure/);
     for (const [label, text] of [
-      ['scenario engine doc', scenarioDoc],
-      ['API scenario doc', apiDoc],
-      ['supply-chain panel doc', panelDoc],
-      ['RunScenario proto', runProto],
-      ['ScenarioService OpenAPI', scenarioOpenApi],
-      ['bundled OpenAPI', bundledOpenApi],
+      ['scenario engine doc', scenarioDoc], ['API scenario doc', apiDoc],
+      ['supply-chain panel doc', panelDoc], ['RunScenario proto', runProto],
+      ['ScenarioService OpenAPI', scenarioOpenApi], ['bundled OpenAPI', bundledOpenApi],
     ]) {
-      assert.ok(text.includes(seededReporters.join(', ')) || containsSeededReporters(text, seededReporters), `${label} must list seeded reporters: ${seededReporters.join(', ')}`);
-      assert.doesNotMatch(text, /all countries with seeded exposure/i, `${label} still has stale scope-all wording`);
+      assert.match(text, /bounded country\/sector manifest/i, label);
+      assert.match(text, /unknown coverage/i, label);
+      assert.doesNotMatch(text, /US.*,.*CN.*,.*RU.*,.*IR.*,.*IN.*,.*TW/, label);
     }
   });
 

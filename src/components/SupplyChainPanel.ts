@@ -21,6 +21,7 @@ import { trackGateHit } from '@/services/analytics';
 import { runScenario, getScenarioStatus } from '@/services/scenario';
 import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
 import { bindActivationKeys } from '@/utils/activation';
+import { ISO2_TO_ISO3 } from '@/utils/country-codes';
 
 
 type TabId = 'chokepoints' | 'shipping' | 'indicators' | 'minerals' | 'stress';
@@ -61,11 +62,25 @@ export class SupplyChainPanel extends Panel {
   private onDismissScenario: (() => void) | null = null;
   private onScenarioActivate: ((scenarioId: string, result: ScenarioResult) => void) | null = null;
   private activeScenarioState: { scenarioId: string; result: ScenarioResult } | null = null;
+  private scenarioControls = new Map<string, { iso2: string; disruptionPct: number }>();
   private scenarioPollController: AbortController | null = null;
 
   constructor() {
     super({ id: 'supply-chain', title: t('panels.supplyChain'), defaultRowSpan: 2, infoTooltip: t('components.supplyChain.infoTooltip') });
     bindActivationKeys(this.content, '.trade-restriction-header');
+    this.content.addEventListener('change', (e) => {
+      const target = e.target as HTMLInputElement | HTMLSelectElement;
+      const trigger = target.closest<HTMLElement>('.sc-scenario-trigger');
+      if (!trigger) return;
+      const iso2 = trigger.querySelector<HTMLSelectElement>('.sc-scenario-country-select')!.value;
+      const disruptionPct = Number(trigger.querySelector<HTMLInputElement>('.sc-scenario-severity')!.value);
+      this.scenarioControls.set(trigger.dataset.scenarioId!, { iso2, disruptionPct });
+      this.scenarioPollController?.abort();
+      const button = trigger.querySelector<HTMLButtonElement>('.sc-scenario-btn')!;
+      button.disabled = false;
+      button.textContent = 'Simulate Closure';
+      button.classList.remove('sc-scenario-btn--active');
+    });
     this.content.addEventListener('click', (e) => {
       const stageBtn = (e.target as HTMLElement).closest('[data-mineral-stage]') as HTMLElement | null;
       if (stageBtn?.dataset.mineralStage === 'mine' || stageBtn?.dataset.mineralStage === 'refinery') {
@@ -89,7 +104,7 @@ export class SupplyChainPanel extends Panel {
       const scenarioTrigger = (e.target as HTMLElement).closest('.sc-scenario-trigger') as HTMLElement | null;
       if (scenarioTrigger) {
         e.stopPropagation();
-        const btn = scenarioTrigger.querySelector<HTMLButtonElement>('.sc-scenario-btn');
+        const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.sc-scenario-btn');
         if (btn && !btn.disabled) void this.runScenario(scenarioTrigger, btn);
         return;
       }
@@ -214,6 +229,11 @@ export class SupplyChainPanel extends Panel {
       <div class="economic-content">${contentHtml}</div>
     `, 'legacy Panel.setContent() migration'), () => {
       this.restoreChokepointHeaderFocus();
+      for (const trigger of this.content.querySelectorAll<HTMLElement>('.sc-scenario-trigger')) {
+        const select = trigger.querySelector<HTMLSelectElement>('.sc-scenario-country-select');
+        if (select) select.value = this.scenarioControls.get(trigger.dataset.scenarioId!)?.iso2 ?? '';
+      }
+      if (this.activeScenarioState) this.renderScenarioBanner();
     });
 
     if (this.activeTab === 'chokepoints' && this.expandedChokepoint) {
@@ -295,15 +315,6 @@ export class SupplyChainPanel extends Panel {
         if (this.chartObserver) { this.chartObserver.disconnect(); this.chartObserver = null; }
         this.chartMountTimer = null;
       }, 220);
-    }
-
-    // Re-insert scenario banner after setContent replaces inner content.
-    // Use the private renderScenarioBanner() — NOT showScenarioSummary() —
-    // so this render() call doesn't recurse. showScenarioSummary() is the
-    // public activate entrypoint that triggers render(); the banner DOM
-    // itself is built here from activeScenarioState.
-    if (this.activeScenarioState) {
-      this.renderScenarioBanner();
     }
   }
 
@@ -460,7 +471,14 @@ export class SupplyChainPanel extends Panel {
           // so the mutation hit a detached node and the visible button
           // remained enabled + "Simulate Closure" — letting users queue
           // duplicate runs of an already-active scenario.
-          const isActiveScenario = this.activeScenarioState?.scenarioId === template.id;
+          const controls = this.scenarioControls.get(template.id) ?? { iso2: '', disruptionPct: template.disruptionPct };
+          const active = this.activeScenarioState;
+          const isActiveScenario = active?.scenarioId === template.id
+            && (active.result.scopedIso2 ?? '') === controls.iso2
+            && active.result.template?.disruptionPct === controls.disruptionPct;
+          const names = new Intl.DisplayNames(['en'], { type: 'region' });
+          const countries = Object.keys(ISO2_TO_ISO3).map(iso2 => ({ iso2, name: names.of(iso2) ?? iso2 }))
+            .sort((a, b) => a.name.localeCompare(b.name));
           const btnClass = [
             'sc-scenario-btn',
             !isPro ? 'sc-scenario-btn--gated' : '',
@@ -472,6 +490,18 @@ export class SupplyChainPanel extends Panel {
             isActiveScenario ? 'disabled' : '',
           ].filter(Boolean).join(' ');
           return `<div class="sc-scenario-trigger" data-scenario-id="${escapeHtml(template.id)}" data-chokepoint-id="${escapeHtml(cp.id)}">
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0">
+              <label style="flex:1;min-width:140px">Country
+                <select class="sc-scenario-country-select" style="display:block;width:100%" aria-label="Scenario country">
+                  <option value="">All seeded countries</option>
+                  ${countries.map(c => `<option value="${c.iso2}" >${escapeHtml(c.name)}</option>`).join('')}
+                </select>
+              </label>
+              <label>Closure severity (%)
+                <input class="sc-scenario-severity" type="number" min="0" max="100" step="1" value="${controls.disruptionPct}" aria-label="Closure severity (%)" style="display:block;width:100px">
+              </label>
+            </div>
+            <p style="font-size:11px">${template.durationDays} days is descriptive only; duration does not change the score. Coverage is checked when the run completes.</p>
             <button class="${btnClass}" ${btnAttrs} aria-label="Simulate ${escapeHtml(template.name)}">
               ${btnLabel}
             </button>
@@ -507,7 +537,7 @@ export class SupplyChainPanel extends Panel {
             <span class="trade-status ${statusClass}">${escapeHtml(cp.status)}</span>
           </div>
           <div class="trade-restriction-body">
-            ${isAffectedByScenario && scenarioResult?.template ? `<div class="sc-metric-row" style="background:#7f1d1d22;padding:4px 6px;border-radius:3px;margin-bottom:4px;font-size:calc(11px * var(--wm-panel-effective-scale, 1))">
+            ${isAffectedByScenario && scenarioResult?.template ? `<div class="sc-metric-row" style="white-space:normal;background:#7f1d1d22;padding:4px 6px;border-radius:3px;margin-bottom:4px;font-size:calc(11px * var(--wm-panel-effective-scale, 1))">
               <span style="color:#fca5a5;font-weight:600">\u26A0 Projected under scenario: ${scenarioResult.template.disruptionPct}% closure for ${scenarioResult.template.durationDays} days${scenarioResult.template.costShockMultiplier > 1 ? ` (+${Math.round((scenarioResult.template.costShockMultiplier - 1) * 100)}% cost)` : ''}</span>
             </div>` : ''}
             <div class="sc-metric-row"${sourceMetrics || cp.directions?.length ? '' : ' hidden'}>
@@ -887,7 +917,7 @@ export class SupplyChainPanel extends Panel {
     // impactPct is already a 0–100 integer from the scenario-worker
     // (scripts/scenario-worker.mjs: `Math.min(Math.round((totalImpact / maxImpact) * 100), 100)`).
     const countriesHtml = top5.map(c =>
-      `<span class="sc-scenario-country">${escapeHtml(c.iso2)} <em>${c.impactPct.toFixed(0)}%</em></span>`
+      `<span class="sc-scenario-country">${escapeHtml(c.iso2)} <em>${c.totalImpact.toFixed(2)} score units (${c.impactPct.toFixed(0)}% relative)</em></span>`
     ).join(' \u00B7 ');
     const banner = document.createElement('div');
     banner.className = 'sc-scenario-banner';
@@ -899,7 +929,7 @@ export class SupplyChainPanel extends Panel {
     // (durationDays, disruptionPct, costShockMultiplier) come from the scenario
     // worker's result.template — optional field, defaults hide cleanly if absent.
     const tpl = result.template;
-    const durationStr = tpl ? `${tpl.durationDays}d` : null;
+    const durationStr = tpl ? `${tpl.durationDays} days (descriptive only)` : null;
     const closurePctStr = tpl ? `${tpl.disruptionPct}% closure` : null;
     const costBumpPct = tpl ? Math.round((tpl.costShockMultiplier - 1) * 100) : null;
     const costStr = costBumpPct != null && costBumpPct > 0 ? `+${costBumpPct}% cost` : null;
@@ -912,6 +942,13 @@ export class SupplyChainPanel extends Panel {
       ? `<div class="sc-scenario-tagline">Simulating ${escapeHtml(taglineParts)} on ${result.affectedChokepointIds.length} chokepoint${result.affectedChokepointIds.length === 1 ? '' : 's'}. Chokepoint card below shows projected score; map highlights disrupted routes.</div>`
       : '';
 
+    const coverage = result.coverage;
+    const records = coverage?.records ?? [];
+    const count = (state: string) => records.filter(r => r.state === state).length;
+    const coverageText = !coverage || coverage.status === 'unknown'
+      ? 'Unknown coverage: the country/sector manifest is unavailable. No broad exposure conclusion is supported.'
+      : `${coverage.status === 'complete' ? 'Complete within seeded scope' : 'Partial coverage'}: ${count('evaluated')}/${records.length} country/sector records evaluated; ${count('missing')} missing; ${count('malformed')} malformed; ${count('not_seeded')} not seeded. ${records.filter(r => r.basis === 'flow_weighted').length} flow-weighted; ${records.filter(r => r.basis === 'country_route_fallback').length} geographic fallback; ${records.filter(r => r.rawImpact === 0).length} valid zero impacts.`;
+    const details = records.map(r => `<li>${escapeHtml(r.iso2)} / HS ${escapeHtml(r.hs2)}: ${escapeHtml(r.state.replace(/_/g, ' '))}${r.basis ? `, ${r.basis === 'flow_weighted' ? 'flow-weighted' : 'geographic fallback'}` : ''}${r.rawImpact !== undefined ? `, ${r.rawImpact.toFixed(2)} score units` : ''}. Cache date: ${escapeHtml(r.fetchedAt || 'unknown')}; trade observation date: unknown.</li>`).join('');
     setTrustedHtml(banner, trustedHtml([
       `<div class="sc-scenario-top">`,
       `<span class="sc-scenario-icon">\u26A0</span>`,
@@ -921,7 +958,20 @@ export class SupplyChainPanel extends Panel {
       `<button class="sc-scenario-dismiss" aria-label="Dismiss scenario">\u00D7</button>`,
       `</div>`,
       taglineHtml,
+      `<p>Country scope: ${escapeHtml(result.scopedIso2 || 'All seeded countries')}. Raw impact is a modeled relative score, not currency or lost trade. Duration does not change the score.</p>`,
+      `<p class="sc-scenario-coverage">${escapeHtml(coverageText)}</p>`,
+      `<details><summary>Country/sector evidence (${records.length})</summary><ul style="max-height:220px;overflow:auto">${details}</ul></details>`,
+      `<button class="sc-scenario-export">Download scenario JSON</button>`,
     ].join(''), "legacy direct innerHTML migration"));
+    banner.querySelector('.sc-scenario-export')!.addEventListener('click', () => {
+      const exported = { scenarioId, result, units: 'relative score units, not currency or lost trade', durationBasis: 'descriptive only', observationDate: 'unknown', source: 'HS2 chokepoint exposure model; flow_weighted uses recorded Comtrade shares with modeled routes; country_route_fallback uses geography' };
+      const url = URL.createObjectURL(new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `scenario-${scenarioId}-${result.scopedIso2 || 'all'}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
     banner.querySelector('.sc-scenario-dismiss')!.addEventListener('click', () => this.onDismissScenario?.());
     this.content.prepend(banner);
   }
@@ -956,6 +1006,10 @@ export class SupplyChainPanel extends Panel {
     const { signal } = this.scenarioPollController;
 
     const scenarioId = trigger.dataset.scenarioId!;
+    const severityInput = trigger.querySelector<HTMLInputElement>('.sc-scenario-severity')!;
+    if (!severityInput.value || !severityInput.reportValidity()) return;
+    const iso2 = trigger.querySelector<HTMLSelectElement>('.sc-scenario-country-select')!.value;
+    const disruptionPct = Number(severityInput.value);
     btn.disabled = true;
     btn.textContent = 'Computing\u2026';
 
@@ -978,7 +1032,7 @@ export class SupplyChainPanel extends Panel {
       // Hard timeout on POST /run so a hanging edge function can't leave
       // the button in "Computing…" indefinitely.
       const runSignal = AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
-      const runResp = await runScenario({ scenarioId, iso2: '' }, { signal: runSignal });
+      const runResp = await runScenario({ scenarioId, iso2, disruptionPct }, { signal: runSignal });
       const jobId = runResp.jobId;
       let result: ScenarioResult | null = null;
       // 60 × 1s = 60s max (worker typically completes in <1s). 1s poll keeps
