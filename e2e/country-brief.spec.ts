@@ -245,14 +245,16 @@ test('limited country coverage stays navigable and China keeps its own section',
 for (const mobile of [false, true]) {
   test(`operational worksheet ${mobile ? 'mobile' : 'desktop'} edits day 8/day 10 and imports actual downloads`, async ({ page, countryBrief }, testInfo) => {
     void countryBrief;
-    if (mobile) await page.setViewportSize({ width: 390, height: 844 });
+    await page.setViewportSize(mobile ? { width: 390, height: 844 } : { width: 1440, height: 1000 });
     const state = await installDecisionBriefData(page);
-    await page.goto('/dashboard?country=DE');
+    await page.goto(`/dashboard?country=DE${mobile ? '' : '&expanded=1'}`);
     const panel = page.locator('#country-deep-dive-panel');
     await expect(panel).toHaveAttribute('aria-hidden', 'false');
     await panel.getByRole('button', { name: 'Decision brief', exact: true }).click();
     const output = panel.getByRole('region', { name: 'Decision brief', exact: true });
     const form = output.getByRole('region', { name: 'Operational what-if worksheet', exact: true });
+    const briefFont = await panel.locator('.cdp-shell').evaluate(element => getComputedStyle(element).fontFamily);
+    await expect(form).toHaveCSS('font-family', briefFont);
     await expect(form.locator('.operational-summary')).toContainText('Baseline first gap: Day 8. Alternative first gap: Day 8.');
     await expect(form).toContainText('Labeled example');
     expect(state.requests).toHaveLength(0);
@@ -267,6 +269,8 @@ for (const mobile of [false, true]) {
     await expect(form.locator('[data-day="8"] td')).toHaveText(['0', '20', '0', '20', '40', '20', '20', '0']);
     await expect(form.locator('[data-day="10"] td')).toHaveText(['0', '20', '0', '20', '0', '20', '0', '20']);
     await expect(form).toContainText('Delivery cost comparison unavailable');
+    await form.locator(mobile ? '.operational-result' : '.operational-header').evaluate(element => element.scrollIntoView({ block: 'start' }));
+    await page.screenshot({ path: testInfo.outputPath('worksheet-day10.png'), fullPage: true });
     const event = page.waitForEvent('download');
     await form.getByRole('button', { name: 'Export worksheet JSON' }).click();
     const download = await event;
@@ -311,7 +315,6 @@ for (const mobile of [false, true]) {
       }
     }
     await form.locator('.operational-summary').scrollIntoViewIfNeeded();
-    await page.screenshot({ path: testInfo.outputPath('worksheet-day10.png'), fullPage: true });
     expect(await output.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
     await form.getByLabel('Starting usable stock', { exact: true }).fill('');
     await expect(form.locator('.operational-result')).toHaveCount(0);
