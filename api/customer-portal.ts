@@ -17,6 +17,8 @@ import {
   completeStandaloneIdempotency,
   getIdempotencyKey,
 } from './_idempotency.js';
+// @ts-expect-error — JS module, no declaration file
+import { checkRateLimit } from './_rate-limit.js';
 import { validateBearerToken } from '../server/auth-session';
 
 const CONVEX_SITE_URL =
@@ -64,6 +66,12 @@ export default async function handler(
   if (!session.valid || !session.userId) {
     return json({ error: 'Unauthorized' }, 401, cors);
   }
+
+  const limited = await checkRateLimit(req, cors, {
+    scope: 'customer-portal', identifier: session.userId, limit: 5, window: '60 s',
+    failClosed: true, ctx,
+  });
+  if (limited) return limited;
 
   const idempotencyKey = getIdempotencyKey(req);
   const idempotency = idempotencyKey
