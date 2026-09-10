@@ -538,6 +538,7 @@ describe('docs article injection for bare WebPage output', () => {
       }
     }
     for (const slug of Object.keys(DOCS_PAGE_DATES)) {
+      if (slug.startsWith('api-reference/')) continue; // Generated from configured OpenAPI sources.
       assert.equal(
         existsSync(join(repoRoot, `docs/${slug}.mdx`)),
         true,

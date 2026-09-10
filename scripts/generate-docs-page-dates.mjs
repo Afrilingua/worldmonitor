@@ -20,22 +20,52 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { load as loadYaml } from 'js-yaml';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUTPUT = 'src/config/docs-page-dates.generated.ts';
 const CHECK = process.argv.includes('--check');
 const FETCH_HISTORY = process.argv.includes('--fetch-history');
 
-function listDocFiles() {
-  const files = [];
+function listDocPages() {
+  const pages = new Map();
   const walk = (dir) => {
     for (const entry of readdirSync(join(ROOT, dir), { withFileTypes: true })) {
       if (entry.isDirectory()) walk(`${dir}/${entry.name}`);
-      else if (entry.name.endsWith('.mdx')) files.push(`${dir}/${entry.name}`);
+      else if (entry.name.endsWith('.mdx')) {
+        const file = `${dir}/${entry.name}`;
+        pages.set(file.replace(/^docs\//, '').replace(/\.mdx$/, ''), file);
+      }
     }
   };
   walk('docs');
-  return files.sort();
+  // Mintlify derives API page paths from each operation's tag and summary.
+  // Read the configured sources so unlisted specs do not create phantom pages.
+  const sources = new Set();
+  const collectSources = (value) => {
+    if (Array.isArray(value)) value.forEach(collectSources);
+    else if (value && typeof value === 'object') {
+      if (typeof value.openapi === 'string') sources.add(`docs/${value.openapi}`);
+      Object.values(value).forEach(collectSources);
+    }
+  };
+  collectSources(JSON.parse(readFileSync(join(ROOT, 'docs/docs.json'), 'utf8')));
+  const slugify = (value) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  for (const file of sources) {
+    const spec = loadYaml(readFileSync(join(ROOT, file), 'utf8'));
+    for (const paths of [spec.paths, spec.webhooks]) {
+      for (const methods of Object.values(paths ?? {})) {
+        for (const [method, operation] of Object.entries(methods)) {
+          if (!['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'].includes(method)) continue;
+          const tag = operation.tags?.[0];
+          const name = operation.summary || operation.operationId;
+          if (!tag || !name) throw new Error(`docs page dates: missing API page tag or name in ${file}`);
+          pages.set(`api-reference/${slugify(tag)}/${slugify(name)}`, file);
+        }
+      }
+    }
+  }
+  return pages;
 }
 
 function commitDateRanges() {
@@ -107,16 +137,16 @@ function render(dates) {
   ].join('\n');
 }
 
-const files = listDocFiles();
+const pages = listDocPages();
 const commitDates = commitDateRanges();
-const missing = files.filter((file) => !commitDates.has(file));
+const missing = [...new Set(pages.values())].filter((file) => !commitDates.has(file));
 if (missing.length > 0) {
   throw new Error(
     `docs page dates missing git history for: ${missing.join(', ')}`,
   );
 }
 const dates = new Map(
-  files.map((file) => [file.replace(/^docs\//, '').replace(/\.mdx$/, ''), commitDates.get(file)]),
+  [...pages].map(([slug, file]) => [slug, commitDates.get(file)]),
 );
 const expected = render(dates);
 const outputPath = join(ROOT, OUTPUT);

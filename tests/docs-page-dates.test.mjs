@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,6 +45,8 @@ function withDateFixture(run) {
       join(fixtureRoot, 'scripts/generate-docs-page-dates.mjs'),
     );
     writeFileSync(join(fixtureRoot, 'docs/about.mdx'), '# About\n');
+    writeFileSync(join(fixtureRoot, 'docs/docs.json'), '{}');
+    writeFileSync(join(fixtureRoot, '.gitignore'), 'node_modules\n');
     writeFileSync(join(fixtureRoot, 'src/config/.gitkeep'), '');
 
     execFileSync('git', ['init', '--quiet'], { cwd: fixtureRoot, env: gitEnv });
@@ -65,6 +68,9 @@ function withDateFixture(run) {
 }
 
 function generate(root, args = [], env = {}) {
+  if (!existsSync(join(root, 'node_modules'))) {
+    symlinkSync(join(repoRoot, 'node_modules'), join(root, 'node_modules'), 'dir');
+  }
   return execFileSync(process.execPath, ['scripts/generate-docs-page-dates.mjs', ...args], {
     cwd: root,
     env: isolatedGitEnv(env),
@@ -89,6 +95,34 @@ it('preserves publication date when a page is edited later', () => withDateFixtu
   });
   generate(root);
   assert.match(readFileSync(join(root, OUTPUT), 'utf8'), /"about": \{"datePublished":"2026-07-27","dateModified":"2026-08-02"\}/);
+  assert.doesNotThrow(() => generate(root, ['--check']));
+}));
+
+it('dates generated API operations and webhooks from their configured OpenAPI sources', () => withDateFixture((root) => {
+  writeFileSync(join(root, 'docs/docs.json'), JSON.stringify({ navigation: { groups: [{ openapi: 'service.yaml' }] } }));
+  writeFileSync(join(root, 'docs/service.yaml'), `openapi: 3.1.0
+paths:
+  /example:
+    get:
+      tags: [ExampleService]
+      summary: GetExample
+      operationId: GetExample
+webhooks:
+  alert:
+    post:
+      tags: [ExampleService]
+      summary: Alert (outbound, signed)
+`);
+  execFileSync('git', ['add', 'docs'], { cwd: root, env: isolatedGitEnv() });
+  execFileSync('git', ['commit', '--quiet', '-m', 'docs: add API source'], {
+    cwd: root,
+    env: isolatedGitEnv({ GIT_AUTHOR_DATE: '2026-08-02T12:00:00Z', GIT_COMMITTER_DATE: '2026-08-02T12:00:00Z' }),
+  });
+  generate(root);
+  const output = readFileSync(join(root, OUTPUT), 'utf8');
+  for (const slug of ['getexample', 'alert-outbound-signed']) {
+    assert.ok(output.includes(`"api-reference/exampleservice/${slug}": {"datePublished":"2026-08-02","dateModified":"2026-08-02"}`));
+  }
   assert.doesNotThrow(() => generate(root, ['--check']));
 }));
 
