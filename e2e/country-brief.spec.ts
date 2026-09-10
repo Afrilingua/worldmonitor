@@ -408,3 +408,101 @@ test('decision brief clears and stays usable when a selection change aborts a ca
   // The aborted capture must leave the control usable, not permanently disabled.
   await expect(panel.getByRole('button', { name: 'Capture / refresh both' })).toBeEnabled();
 });
+
+for (const mobile of [false, true]) {
+  test(`operational worksheet ${mobile ? 'mobile' : 'desktop'} edits day 8/day 10 and imports actual downloads`, async ({ page, countryBrief }, testInfo) => {
+    void countryBrief;
+    if (mobile) await page.setViewportSize({ width: 390, height: 844 });
+    const state = await installDecisionBriefData(page);
+    await page.goto('/dashboard?country=DE');
+    const panel = page.locator('#country-deep-dive-panel');
+    await expect(panel).toHaveAttribute('aria-hidden', 'false');
+    await panel.getByRole('button', { name: 'Decision brief', exact: true }).click();
+    const output = panel.getByRole('region', { name: 'Decision brief', exact: true });
+    const form = output.getByRole('region', { name: 'Operational what-if worksheet', exact: true });
+    await expect(form.locator('.operational-summary')).toContainText('Baseline first gap: Day 8. Alternative first gap: Day 8.');
+    await expect(form).toContainText('Labeled example');
+    expect(state.requests).toHaveLength(0);
+    await form.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('worksheet-example.png'), fullPage: true });
+    await form.getByRole('button', { name: 'Add alternative delivery', exact: true }).click();
+    await expect(form.locator('.operational-result')).toHaveCount(0);
+    await expect(form.getByRole('button', { name: 'Export worksheet JSON' })).toBeDisabled();
+    await form.getByLabel('Alternative delivery date', { exact: true }).fill('2026-09-17');
+    await form.getByLabel('Alternative delivery quantity', { exact: true }).fill('40');
+    await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: Day 10');
+    await expect(form.locator('[data-day="8"] td')).toHaveText(['0', '20', '0', '20', '40', '20', '20', '0']);
+    await expect(form.locator('[data-day="10"] td')).toHaveText(['0', '20', '0', '20', '0', '20', '0', '20']);
+    await expect(form).toContainText('Delivery cost comparison unavailable');
+    const event = page.waitForEvent('download');
+    await form.getByRole('button', { name: 'Export worksheet JSON' }).click();
+    const download = await event;
+    const worksheetPath = testInfo.outputPath(download.suggestedFilename());
+    await download.saveAs(worksheetPath);
+    const worksheet = JSON.parse(await readFile(worksheetPath, 'utf8'));
+    expect(worksheet.baseline.days.map((day: { unmetDemand: number }) => day.unmetDemand)).toEqual([0,0,0,0,0,0,0,20,20,20]);
+    expect(worksheet.alternative.days.map((day: { unmetDemand: number }) => day.unmetDemand)).toEqual([0,0,0,0,0,0,0,0,0,20]);
+    await form.getByLabel('Alternative delivery date', { exact: true }).fill('2026-09-18');
+    await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: Day 8');
+    await form.getByLabel('Import worksheet JSON', { exact: true }).setInputFiles(worksheetPath);
+    await expect(form).toContainText('Worksheet imported');
+    await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: Day 10');
+    await form.getByLabel('Import worksheet JSON', { exact: true }).setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{') });
+    await expect(form).toContainText('Import rejected');
+    await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: Day 10');
+    await form.getByLabel('Import worksheet JSON', { exact: true }).setInputFiles({ name: 'large.json', mimeType: 'application/json', buffer: Buffer.from(' '.repeat(65537)) });
+    await expect(form).toContainText('64 KiB');
+    await output.getByRole('button', { name: 'Capture / refresh both' }).click();
+    await expect(output.getByRole('status')).toContainText('Captured.');
+    const paper = output.locator('.cdp-decision-paper');
+    await expect(paper.locator('.operational-summary')).toContainText('Alternative first gap: Day 10');
+    const preview = JSON.parse(await paper.locator('#decision-brief-snapshot').textContent() ?? 'null');
+    expect(preview.operationalWorksheet).toEqual(worksheet);
+    for (const format of ['HTML', 'JSON']) {
+      const event = page.waitForEvent('download');
+      await output.getByRole('button', { name: `Download decision ${format}`, exact: true }).click();
+      const download = await event;
+      const path = testInfo.outputPath(download.suggestedFilename());
+      await download.saveAs(path);
+      const contents = await readFile(path, 'utf8');
+      if (format === 'JSON') expect(JSON.parse(contents)).toEqual(preview);
+      else {
+        const exported = await page.context().newPage();
+        await exported.route('http://worksheet-export.test/', route => route.fulfill({ body: contents, contentType: 'text/html' }));
+        await exported.goto('http://worksheet-export.test/');
+        expect(JSON.parse(await exported.locator('#decision-brief-snapshot').textContent() ?? 'null')).toEqual(preview);
+        await expect(exported.locator('.operational-summary')).toContainText('Alternative first gap: Day 10');
+        await expect(exported.locator('a[href]').first()).toHaveAttribute('href', /https:/);
+        await exported.screenshot({ path: testInfo.outputPath('worksheet-export.png'), fullPage: true });
+        await exported.close();
+      }
+    }
+    await form.locator('.operational-summary').scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('worksheet-day10.png'), fullPage: true });
+    expect(await output.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await form.getByLabel('Starting usable stock', { exact: true }).fill('');
+    await expect(form.locator('.operational-result')).toHaveCount(0);
+    await expect(paper).toContainText('Operational worksheet incomplete or invalid');
+    await expect(paper.locator('.operational-result')).toHaveCount(0);
+    const invalidEvent = page.waitForEvent('download');
+    await output.getByRole('button', { name: 'Download decision JSON' }).click();
+    const invalidDownload = await invalidEvent;
+    const invalidPath = testInfo.outputPath('incomplete-decision.json');
+    await invalidDownload.saveAs(invalidPath);
+    expect(JSON.parse(await readFile(invalidPath, 'utf8')).operationalWorksheet).toBeNull();
+    await form.getByLabel('Import worksheet JSON', { exact: true }).setInputFiles(worksheetPath);
+    await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: Day 10');
+    await form.getByLabel('Alternative daily demand (blank keeps baseline)', { exact: true }).fill('10');
+    await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: None within horizon');
+    await output.getByRole('button', { name: '← Back to brief', exact: true }).click();
+    await panel.getByRole('button', { name: 'Decision brief', exact: true }).click();
+    await expect(form.getByLabel('Alternative daily demand (blank keeps baseline)', { exact: true })).toHaveValue('10');
+    await expect(form.locator('.operational-summary')).toContainText('Alternative first gap: None within horizon');
+    await form.getByLabel('Daily demand', { exact: true }).fill('');
+    await output.getByRole('button', { name: '← Back to brief', exact: true }).click();
+    await panel.getByRole('button', { name: 'Decision brief', exact: true }).click();
+    await expect(form.getByLabel('Daily demand', { exact: true })).toHaveValue('');
+    await expect(form.locator('.operational-result')).toHaveCount(0);
+    await expect(form).toContainText('Daily demand is required');
+  });
+}

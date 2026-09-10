@@ -2200,3 +2200,19 @@
 .cdp-decision-paper p { margin: 0 0 10px; }
 .cdp-decision-paper ul { padding-inline-start: 20px; }
 .cdp-decision-paper li { margin-bottom: 8px; }
+
+.operational-worksheet { margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--border); min-width: 0; }
+.operational-worksheet p, .operational-result p { line-height: 1.6; overflow-wrap: anywhere; }
+.operational-fields, .operational-delivery { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin: 12px 0; }
+.operational-worksheet label { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.operational-worksheet input { box-sizing: border-box; width: 100%; min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; }
+.operational-worksheet button { margin: 8px 8px 8px 0; }
+.operational-result { margin-top: 24px; min-width: 0; }
+.operational-error { color: var(--semantic-critical, #e55); }
+.operational-table { max-width: 100%; overflow-x: auto; }
+.operational-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.operational-table th, .operational-table td { padding: 8px; border-bottom: 1px solid var(--border); text-align: right; }
+.operational-table th:first-child { text-align: left; white-space: nowrap; }
+@media (max-width: 600px) {
+  .operational-fields, .operational-delivery { grid-template-columns: minmax(0, 1fr); }
+}
