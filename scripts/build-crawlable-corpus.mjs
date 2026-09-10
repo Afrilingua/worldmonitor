@@ -193,7 +193,7 @@ export const CRISIS_PAGE_CONTENT_VERSION = '2026-09-10';
 // TOOLS_PAGE_CONTENT_VERSION and RESEARCH_PAGE_CONTENT_VERSION are exported
 // for the same reason as the constants above: the #7533 guard recomputes
 // their families' clocks from the real values.
-export const TOOLS_PAGE_CONTENT_VERSION = '2026-09-03';
+export const TOOLS_PAGE_CONTENT_VERSION = '2026-09-10';
 export const RESEARCH_PAGE_CONTENT_VERSION = '2026-09-10';
 const DATASET_LICENSE = {
   '@type': 'CreativeWork',
@@ -239,6 +239,24 @@ const PAGE_TYPES_WITH_WEBPAGE_ID = new Set([
   'WebPage',
   'CollectionPage',
   'ItemPage',
+]);
+// Every top-level node that STANDS FOR the page — whatever type it declares —
+// carries attribution (#7980). Deliberately wider than the page-shaped types
+// above, because a page states its body under more than one type: the two
+// live-tool pages state only a WebApplication, and 227 pages carry a FAQPage
+// (a WebPage subtype) or a HowTo sibling alongside their WebPage. An
+// unattributed sibling is the same gap as an unattributed score — it is a
+// rich-result surface of its own — so the set covers all of them, not just
+// the node that happens to hold the canonical page identity.
+//
+// Nodes that describe something OTHER than the page stay out: Dataset and
+// DataCatalog carry `creator`/`publisher` instead (#7459b), and BreadcrumbList
+// and ItemList are navigation, not authored claims.
+export const PAGE_TYPES_WITH_ATTRIBUTION = new Set([
+  ...PAGE_TYPES_WITH_SPEAKABLE,
+  'WebApplication',
+  'FAQPage',
+  'HowTo',
 ]);
 // Approximate monitoring footprint around each registry centroid (degrees).
 // Registry entries are points; GeoShape.box lets crawlers treat the waterway as
@@ -1920,15 +1938,24 @@ function jsonLdTypes(entry) {
 function withSpeakableAndGraph(entry, { canonical, breadcrumbId }) {
   if (!entry || typeof entry !== 'object') return entry;
   const types = jsonLdTypes(entry);
-  if (!types.some((type) => PAGE_TYPES_WITH_SPEAKABLE.has(type))) return entry;
+  if (!types.some((type) => PAGE_TYPES_WITH_ATTRIBUTION.has(type))) return entry;
   const next = { ...entry };
-  if (!next.speakable) next.speakable = { ...DEFAULT_SPEAKABLE };
+  if (types.some((type) => PAGE_TYPES_WITH_SPEAKABLE.has(type)) && !next.speakable) {
+    next.speakable = { ...DEFAULT_SPEAKABLE };
+  }
   if (types.some((type) => PAGE_TYPES_WITH_WEBPAGE_ID.has(type))) {
     if (!next['@id']) next['@id'] = `${canonical}#webpage`;
     if (!next.isPartOf) next.isPartOf = { '@id': WEBSITE_ID };
     if (!next.breadcrumb && breadcrumbId) next.breadcrumb = { '@id': breadcrumbId };
     if (!next.publisher) next.publisher = { ...WORLD_MONITOR_ORG };
   }
+  // Attribution, not just provenance (#7980). Every page here publishes a
+  // score, a ranking, or a reference claim, and `publisher` says only who put
+  // it online. `Organization` is the honest author for a generated page — no
+  // human wrote the sentence, and claiming one would be worse than silence —
+  // so the canonical Organization stands as author wherever a page does not
+  // already name a more specific one.
+  if (!next.author) next.author = { ...WORLD_MONITOR_ORG };
   return next;
 }
 
@@ -2033,6 +2060,11 @@ function pageDocument({
         <a href="/reference/changelog/">Changelog</a>
         <a href="/blog/glossary/">Glossary</a>`;
   const renderedFooter = footerBody || 'World Monitor reference corpus. Crawlable pages use committed snapshots; live API results are labelled separately.';
+  // The rendered half of #7980. `author` in JSON-LD is what a machine reads;
+  // a quality rater and a human reader want a name on the page that publishes
+  // the score. Rendered here rather than inside each body so no page family
+  // and no `footerBody` override can ship without it.
+  const renderedByline = '<p class="byline">Compiled and maintained by the <a href="/docs/about">World Monitor research team</a>. Scoring rules and coverage limits are published in the <a href="/docs">methodology documentation</a>; published revisions are recorded in the <a href="/docs/corrections">corrections log</a>.</p>';
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -2132,6 +2164,7 @@ function pageDocument({
       blockquote { margin: 16px 0 0; padding: 12px 16px; border-left: 2px solid var(--accent); background: var(--panel); border-radius: 0 8px 8px 0; }
       blockquote p { margin: 0; color: var(--text); font-size: 14px; }
       footer { border-top: 1px solid var(--line); padding-top: 20px; padding-bottom: 28px; color: var(--muted); font-size: 13px; }
+      .byline { margin: 0 0 12px; color: var(--text); }
 ${extraStyles}
     </style>
   </head>
@@ -2147,7 +2180,7 @@ ${renderedNav}
     <main>
 ${body}
     </main>
-    <footer>${renderedFooter}</footer>
+    <footer>${renderedByline}${renderedFooter}</footer>
     ${scriptSrcs.map((src) => `<script type="module" nonce="wm-static-bootstrap" src="${escapeHtml(src)}"></script>`).join('\n    ')}
     ${inlineScript ? `<script nonce="wm-static-bootstrap">${inlineScript}</script>` : ''}
   </body>
