@@ -988,3 +988,71 @@ describe('buildAssessment picks actual worst product', () => {
     assert.ok(msg.includes('40.0% jet fuel deficit'), `expected jet fuel deficit in: ${msg}`);
   });
 });
+
+describe('gas sensitivity preserves measurement meaning', () => {
+  for (const [disruptionPct, loss, deficit] of [[50, 6197.7, 1.3], [100, 12395.4, 2.7]]) {
+    it(`replays captured DE inputs at ${disruptionPct}% without traffic scaling or endurance`, async (t) => {
+      t.after(restoreEnergyShockEnvironment);
+      const { body: profile } = JSON.parse(await (await import('node:fs/promises')).readFile(new URL('./fixtures/energy-shock/de-profile-2026-09-10.json', import.meta.url), 'utf8'));
+      const { body: old } = JSON.parse(await (await import('node:fs/promises')).readFile(new URL('./fixtures/energy-shock/de-shock-100-2026-09-10.json', import.meta.url), 'utf8'));
+      installEnergyShockRedis({
+        ...liveChokepointSeed(old.liveFlowRatio),
+        'energy:jodi-gas:v1:DE': {
+          lngImportsTj: profile.gasLngImportsTj, totalDemandTj: profile.gasTotalDemandTj,
+          lngShareOfImports: profile.gasLngShare / 100, dataMonth: profile.jodiGasDataMonth,
+        },
+        'energy:gas-storage:v1:DE': old.gasImpact.storage,
+        [`energy:shock:v2:DE:hormuz_strait:${disruptionPct}:l:gas`]: old,
+      });
+      const response = await computeShock({ countryCode: 'DE', chokepointId: 'hormuz_strait', disruptionPct, fuelMode: 'gas' });
+      assert.equal(response.gasImpact?.lngDisruptionTj, loss);
+      assert.equal(response.gasImpact?.deficitPct, deficit);
+      assert.equal(response.coverageLevel, 'partial');
+      assert.notEqual(response.chokepointConfidence, 'high');
+      assert.equal(response.gasImpact?.dataMonth, '2026-01');
+      assert.equal(response.gasImpact?.storage?.date, '2026-09-07');
+      assert.equal(response.gasImpact?.storage?.bufferDays, undefined);
+      assert.match(response.assessment, /assumed.*30%/i);
+      assert.match(response.assessment, /not.*shortage forecast/i);
+      assert.doesNotMatch(response.assessment, /days|can bridge|low.*dependence|faces/i);
+    });
+  }
+
+  for (const invalid of [null, undefined, -1, '100', NaN, Infinity]) {
+    for (const field of ['lngImportsTj', 'totalDemandTj']) {
+      it(`suppresses ${field}=${String(invalid)} rather than claiming zero impact`, async (t) => {
+        t.after(restoreEnergyShockEnvironment);
+        installEnergyShockRedis({ ...liveChokepointSeed(), ...US_OIL_SEED,
+          'energy:jodi-gas:v1:US': { ...US_GAS_SEED['energy:jodi-gas:v1:US'], [field]: invalid },
+        });
+        const response = await computeShock({ countryCode: 'US', chokepointId: 'hormuz_strait', disruptionPct: 100, fuelMode: 'gas' });
+        assert.equal(response.dataAvailable, false);
+        assert.equal(response.coverageLevel, 'unsupported');
+        assert.equal(response.gasImpact, undefined);
+        assert.deepEqual(response.products, []);
+        assert.match(response.assessment, /insufficient gas/i);
+      });
+    }
+  }
+
+  it('cannot turn zero demand into a zero deficit', async (t) => {
+    t.after(restoreEnergyShockEnvironment);
+    installEnergyShockRedis({ 'energy:jodi-gas:v1:US': { lngImportsTj: 100, totalDemandTj: 0 } });
+    const response = await computeShock({ countryCode: 'US', chokepointId: 'hormuz_strait', disruptionPct: 100, fuelMode: 'gas' });
+    assert.equal(response.gasImpact, undefined);
+    assert.equal(response.dataAvailable, false);
+  });
+
+  it('keeps missing gas separate from available oil in gas-only and combined modes', async (t) => {
+    t.after(restoreEnergyShockEnvironment);
+    installEnergyShockRedis({ ...liveChokepointSeed(), ...US_OIL_SEED });
+    const request = { countryCode: 'US', chokepointId: 'hormuz_strait', disruptionPct: 100 };
+    const gas = await computeShock({ ...request, fuelMode: 'gas' });
+    assert.equal(gas.dataAvailable, false);
+    assert.deepEqual(gas.products, []);
+    const both = await computeShock({ ...request, fuelMode: 'both' });
+    assert.equal(both.dataAvailable, true);
+    assert.equal(both.coverageLevel, 'partial');
+    assert.ok(both.limitations.some(l => /insufficient gas/i.test(l)));
+  });
+});
