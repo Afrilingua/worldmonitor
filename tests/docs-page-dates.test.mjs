@@ -76,8 +76,20 @@ function generate(root, args = [], env = {}) {
 it('renders docs commit dates in UTC regardless of the build timezone', () => withDateFixture((root) => {
   for (const TZ of ['Pacific/Honolulu', 'Asia/Tokyo']) {
     generate(root, [], { TZ });
-    assert.match(readFileSync(join(root, OUTPUT), 'utf8'), /"about": "2026-07-27"/);
+    assert.match(readFileSync(join(root, OUTPUT), 'utf8'), /"about": \{"datePublished":"2026-07-27","dateModified":"2026-07-27"\}/);
   }
+}));
+
+it('preserves publication date when a page is edited later', () => withDateFixture((root) => {
+  writeFileSync(join(root, 'docs/about.mdx'), '# About\nUpdated content\n');
+  execFileSync('git', ['add', 'docs/about.mdx'], { cwd: root, env: isolatedGitEnv() });
+  execFileSync('git', ['commit', '--quiet', '-m', 'docs: update about page'], {
+    cwd: root,
+    env: isolatedGitEnv({ GIT_AUTHOR_DATE: '2026-08-02T12:00:00Z', GIT_COMMITTER_DATE: '2026-08-02T12:00:00Z' }),
+  });
+  generate(root);
+  assert.match(readFileSync(join(root, OUTPUT), 'utf8'), /"about": \{"datePublished":"2026-07-27","dateModified":"2026-08-02"\}/);
+  assert.doesNotThrow(() => generate(root, ['--check']));
 }));
 
 it('replaces pre-merge dates with the final commit date across a UTC day boundary', () => withDateFixture((root) => {
@@ -89,7 +101,7 @@ it('replaces pre-merge dates with the final commit date across a UTC day boundar
   });
   assert.throws(() => generate(root, ['--check']), /is stale/);
   generate(root);
-  assert.match(readFileSync(join(root, OUTPUT), 'utf8'), /"about": "2026-07-28"/);
+  assert.match(readFileSync(join(root, OUTPUT), 'utf8'), /"about": \{"datePublished":"2026-07-28","dateModified":"2026-07-28"\}/);
   assert.doesNotThrow(() => generate(root, ['--check']));
 }));
 
@@ -111,7 +123,7 @@ it('recovers a shallow build checkout without changing its selected revision', (
     assert.equal(existsSync(join(shallow, OUTPUT)), false);
     execFileSync('git', ['remote', 'set-url', 'origin', pathToFileURL(root).href], { cwd: shallow, env: isolatedGitEnv() });
     generate(shallow, ['--fetch-history']);
-    assert.match(readFileSync(join(shallow, OUTPUT), 'utf8'), /"about": "2026-07-27"/);
+    assert.match(readFileSync(join(shallow, OUTPUT), 'utf8'), /"about": \{"datePublished":"2026-07-27","dateModified":"2026-07-27"\}/);
     assert.deepEqual(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: shallow, env: isolatedGitEnv() }), head);
     generate(shallow, ['--fetch-history', '--check']);
   } finally {
@@ -146,7 +158,7 @@ it('recovers Vercel history when its checkout has no origin remote', () => withD
     generate(shallow, ['--fetch-history'], {
       VERCEL_GIT_PROVIDER: 'github', VERCEL_GIT_REPO_OWNER: 'fixture', VERCEL_GIT_REPO_SLUG: 'docs',
     });
-    assert.match(readFileSync(join(shallow, OUTPUT), 'utf8'), /"about": "2026-07-27"/);
+    assert.match(readFileSync(join(shallow, OUTPUT), 'utf8'), /"about": \{"datePublished":"2026-07-27","dateModified":"2026-07-27"\}/);
     assert.deepEqual(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: shallow, env }), head);
   } finally {
     rmSync(shallow, { recursive: true, force: true });
