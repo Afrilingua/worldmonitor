@@ -2499,7 +2499,8 @@ export const CACHE_TOOLS: ToolDef[] = [
             todayCargo: { type: ['number', 'null'] }, todayOther: { type: ['number', 'null'] },
             wowChangePct: { type: ['number', 'null'] }, riskLevel: { type: 'string' },
             incidentCount7d: { type: ['number', 'null'] }, disruptionPct: { type: ['number', 'null'] },
-            riskSummary: { type: 'string' }, riskReportAction: { type: 'string' },
+            riskSummary: { type: 'string', description: 'Generated prose is withheld as an empty string. This does not indicate low risk.' },
+            riskReportAction: { type: 'string', description: 'Operational advice is withheld as an empty string because it has no verified routing basis.' },
             anomaly: { type: 'object' }, dataAvailable: { type: 'boolean' },
             // null todayTotal means the relay's 24h AIS window was empty --
             // unsupplied, not a measured zero (#7457). dataAvailable is
