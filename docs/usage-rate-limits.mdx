@@ -126,7 +126,7 @@ Uncached `/api/symbol-search` requests also require admission to one shared 30 r
 
 | Endpoint | Limit | Window | Scope |
 |----------|-------|--------|-------|
-| `POST /api/customer-portal` | 5 | 60 s | Per authenticated user; fail-closed |
+| `POST /api/customer-portal` | 5 | 60 s | Per authenticated user; completed idempotent replays excluded; fail-closed |
 | `POST /api/scenario/v1/run-scenario` | 10 | 60 s | Per IP |
 | `POST /api/scenario/v1/run-scenario` (queue depth) | 100 in-flight | — | Global |
 | `POST /api/leads/v1/register-interest` | 5 | 60 min | Per IP + Turnstile (desktop sources require signed HMAC bypass) |

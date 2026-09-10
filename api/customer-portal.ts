@@ -16,6 +16,7 @@ import {
   beginStandaloneIdempotency,
   completeStandaloneIdempotency,
   getIdempotencyKey,
+  peekStandaloneIdempotency,
 } from './_idempotency.js';
 // @ts-expect-error — JS module, no declaration file
 import { checkRateLimit } from './_rate-limit.js';
@@ -67,21 +68,27 @@ export default async function handler(
     return json({ error: 'Unauthorized' }, 401, cors);
   }
 
+  const idempotencyKey = getIdempotencyKey(req);
+  const idempotencyOptions = idempotencyKey ? {
+    request: req,
+    pathname: '/api/customer-portal',
+    scope: `user:${session.userId}`,
+    idempotencyKey,
+    corsHeaders: cors,
+  } : null;
+  if (idempotencyOptions) {
+    const existing = await peekStandaloneIdempotency(idempotencyOptions);
+    if (existing.kind !== 'miss' && existing.kind !== 'disabled') return existing.response;
+  }
+
   const limited = await checkRateLimit(req, cors, {
     scope: 'customer-portal', identifier: session.userId, limit: 5, window: '60 s',
     failClosed: true, ctx,
   });
   if (limited) return limited;
 
-  const idempotencyKey = getIdempotencyKey(req);
-  const idempotency = idempotencyKey
-    ? await beginStandaloneIdempotency({
-      request: req,
-      pathname: '/api/customer-portal',
-      scope: `user:${session.userId}`,
-      idempotencyKey,
-      corsHeaders: cors,
-    })
+  const idempotency = idempotencyOptions
+    ? await beginStandaloneIdempotency(idempotencyOptions)
     : null;
   if (
     idempotency &&

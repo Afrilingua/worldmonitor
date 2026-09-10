@@ -16,12 +16,22 @@ it('limits portal sessions per authenticated user before the relay, across token
   const jwk = { ...await exportJWK(publicKey), kid: 'portal-test', alg: 'RS256' };
   let relayCalls = 0;
   const buckets = new Map<string, number>();
+  const stored = new Map<string, string>();
+  let replayToken = '';
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     if (new URL(url).origin === 'https://clerk.portal.test') return Response.json({ keys: [jwk] });
     if (new URL(url).origin === 'https://portal-redis.test') {
       const commands = JSON.parse(String(init?.body));
       return Response.json(commands.map((command: unknown[]) => {
+        const operation = String(command[0]).toUpperCase();
+        const storageKey = String(command[1]);
+        if (operation === 'GET') return { result: stored.get(storageKey) ?? null };
+        if (operation === 'SET') {
+          if (command.includes('NX') && stored.has(storageKey)) return { result: null };
+          stored.set(storageKey, String(command[2]));
+          return { result: 'OK' };
+        }
         const key = String(command[3]);
         const count = (buckets.get(key) ?? 0) + 1;
         buckets.set(key, count);
@@ -36,16 +46,30 @@ it('limits portal sessions per authenticated user before the relay, across token
     const token = await new SignJWT({ sub: 'user_portal', plan: 'pro', jti: String(i) })
       .setProtectedHeader({ alg: 'RS256', kid: 'portal-test' })
       .setIssuer('https://clerk.portal.test').setIssuedAt().setExpirationTime('5m').sign(privateKey);
+    replayToken = token;
     const res = await handler(new Request('https://worldmonitor.app/api/customer-portal', {
-      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'x-real-ip': `192.0.2.${i + 1}` },
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'x-real-ip': `192.0.2.${i + 1}`, ...(i === 0 ? { 'Idempotency-Key': 'completed-portal' } : {}) },
     }));
     assert.equal(res.status, i < 5 ? 200 : 429);
     if (i >= 5) assert.ok(res.headers.get('Retry-After'));
   }
   assert.equal(relayCalls, 5);
+  const replayRequest = () => new Request('https://worldmonitor.app/api/customer-portal', {
+    method: 'POST', headers: { Authorization: `Bearer ${replayToken}`, 'Idempotency-Key': 'completed-portal' },
+  });
+  const replay = await handler(replayRequest());
+  assert.equal(replay.status, 200);
+  assert.equal(replay.headers.get('Idempotent-Replayed'), 'true');
+  assert.deepEqual(await replay.json(), { url: 'https://billing.test/session' });
+  assert.equal(relayCalls, 5);
+  const missedReplay = await handler(new Request('https://worldmonitor.app/api/customer-portal', {
+    method: 'POST', headers: { Authorization: `Bearer ${replayToken}`, 'Idempotency-Key': 'new-portal' },
+  }));
+  assert.equal(missedReplay.status, 429);
+  assert.equal(stored.size, 1, 'rejected misses must not create idempotency reservations');
   const healthyFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
-    if (new URL(String(input)).origin === 'https://portal-redis.test') throw new Error('Redis unavailable');
+    if (new URL(String(input)).origin === 'https://portal-redis.test' && /eval/i.test(String(init?.body))) throw new Error('Redis unavailable');
     return healthyFetch(input, init);
   };
   const token = await new SignJWT({ sub: 'other_user', plan: 'pro' })
@@ -54,6 +78,9 @@ it('limits portal sessions per authenticated user before the relay, across token
   const unavailable = await handler(new Request('https://worldmonitor.app/api/customer-portal', {
     method: 'POST', headers: { Authorization: `Bearer ${token}` },
   }));
+  const replayDuringLimiterOutage = await handler(replayRequest());
+  assert.equal(replayDuringLimiterOutage.status, 200);
+  assert.equal(replayDuringLimiterOutage.headers.get('Idempotent-Replayed'), 'true');
   // The limiter caches its configured client; an unavailable Redis still fails closed.
   assert.equal(relayCalls, 5);
   assert.ok([429, 503].includes(unavailable.status));
