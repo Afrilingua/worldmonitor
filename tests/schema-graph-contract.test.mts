@@ -7,7 +7,11 @@ import { describe, it } from 'node:test';
 import middleware from '../middleware';
 import { rewriteDocsLocaleHtml } from '../src/config/docs-locale-seo';
 import { DOCS_PAGE_DATES } from '../src/config/docs-page-dates.generated';
-import { buildCorpus, WORLD_MONITOR_ORG } from '../scripts/build-crawlable-corpus.mjs';
+import {
+  buildCorpus,
+  PAGE_TYPES_WITH_ATTRIBUTION,
+  WORLD_MONITOR_ORG,
+} from '../scripts/build-crawlable-corpus.mjs';
 import {
   SOFTWARE_SHARED_PROPERTIES,
   WEBSITE_SHARED_PROPERTIES,
@@ -71,21 +75,30 @@ function generatedCorpusDocuments(): Promise<Map<string, string>> {
 
 /**
  * Nodes that stand for the page itself, as opposed to the Dataset/Place/
- * Question nodes hanging off them. Article-family types are here because the
- * docs surface states its page body that way, and `WebApplication` because
- * the two live-tool pages state theirs that way.
+ * Question nodes hanging off them. Driven from the generator's own set so the
+ * guard cannot drift from what it guards, plus the Article-family types the
+ * docs surface states its page body with (those never reach the corpus).
+ *
+ * A hand-listed set was the first version of this guard and it was already
+ * wrong: it omitted FAQPage, so 227 pages carried an unattributed
+ * rich-result node the guard could not see. Importing the set is what keeps a
+ * newly-attributed type in step; ORPHAN_PAGE_BODY_RE below is what catches a
+ * type nobody attributed at all.
  */
 const PAGE_BODY_TYPES = [
-  'WebPage',
-  'CollectionPage',
-  'ItemPage',
-  'WebApplication',
-  'Article',
+  ...PAGE_TYPES_WITH_ATTRIBUTION,
   'TechArticle',
-  'BlogPosting',
   'NewsArticle',
-  'Report',
 ];
+
+/**
+ * A top-level node whose type NAMES it a page — the escape the imported set
+ * cannot close. If a future family emits `ProfilePage` or `QAPage` and nobody
+ * adds it to PAGE_TYPES_WITH_ATTRIBUTION, importing that set would happily
+ * agree the page is fine. Matching on the name instead fails loudly and asks
+ * for a deliberate decision.
+ */
+const ORPHAN_PAGE_BODY_RE = /Page$/;
 
 // Single quotes, mixed case, and whitespace around `=` are all valid on the
 // type attribute. A double-quote-only matcher lets a conflicting block hide
@@ -371,6 +384,11 @@ describe('canonical schema graph', () => {
         'public/pro/welcome.html',
       ])],
       [ORGANIZATION_ID, {}, ['pro-test/welcome.html']],
+      // #7980 put a Person body on the docs middleware output too, so the
+      // "one `@id`, one body" invariant has to cover it: if the canonical
+      // node at /blog/authors/elie-habib/ is ever renamed or retyped, the
+      // docs and product stubs must not silently keep the old name.
+      [PERSON_ID, {}, []],
       ...[...datasetIds].map((id): [string, Record<string, unknown>, string[]] => [id, {}, []]),
     ];
 
@@ -440,6 +458,19 @@ describe('canonical schema graph', () => {
     for (const [path, html] of corpus) {
       const bodies = PAGE_BODY_TYPES.flatMap((type) => collectNodesOfType(html, type));
       assert.ok(bodies.length > 0, `${path}: no page-shaped JSON-LD body to attribute`);
+      // The escape hatch check: a top-level node NAMED a page that no one
+      // taught the generator to attribute. Runs over the raw blocks, not the
+      // type list, so it sees what the list does not.
+      for (const block of jsonLdBlocks(html)) {
+        const declared = block['@type'];
+        const types = Array.isArray(declared) ? declared : declared ? [declared] : [];
+        if (!types.some((type: string) => ORPHAN_PAGE_BODY_RE.test(type))) continue;
+        assert.ok(
+          block.author,
+          `${path}: ${JSON.stringify(declared)} names itself a page but carries no author — `
+            + 'add it to PAGE_TYPES_WITH_ATTRIBUTION or exempt it deliberately',
+        );
+      }
       for (const body of bodies) {
         checked += 1;
         const author = body.author as Record<string, unknown> | undefined;

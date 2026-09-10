@@ -193,7 +193,7 @@ export const CRISIS_PAGE_CONTENT_VERSION = '2026-09-10';
 // TOOLS_PAGE_CONTENT_VERSION and RESEARCH_PAGE_CONTENT_VERSION are exported
 // for the same reason as the constants above: the #7533 guard recomputes
 // their families' clocks from the real values.
-export const TOOLS_PAGE_CONTENT_VERSION = '2026-09-03';
+export const TOOLS_PAGE_CONTENT_VERSION = '2026-09-10';
 export const RESEARCH_PAGE_CONTENT_VERSION = '2026-09-10';
 const DATASET_LICENSE = {
   '@type': 'CreativeWork',
@@ -240,14 +240,23 @@ const PAGE_TYPES_WITH_WEBPAGE_ID = new Set([
   'CollectionPage',
   'ItemPage',
 ]);
-// The node that stands for the page itself, whatever type it declares. Every
-// one of them carries attribution (#7980), and the set is wider than the
-// page-shaped types above: the two live-tool pages state only a
-// WebApplication, and an unattributed tool is the same gap as an
-// unattributed score.
-const PAGE_TYPES_WITH_ATTRIBUTION = new Set([
+// Every top-level node that STANDS FOR the page — whatever type it declares —
+// carries attribution (#7980). Deliberately wider than the page-shaped types
+// above, because a page states its body under more than one type: the two
+// live-tool pages state only a WebApplication, and 227 pages carry a FAQPage
+// (a WebPage subtype) or a HowTo sibling alongside their WebPage. An
+// unattributed sibling is the same gap as an unattributed score — it is a
+// rich-result surface of its own — so the set covers all of them, not just
+// the node that happens to hold the canonical page identity.
+//
+// Nodes that describe something OTHER than the page stay out: Dataset and
+// DataCatalog carry `creator`/`publisher` instead (#7459b), and BreadcrumbList
+// and ItemList are navigation, not authored claims.
+export const PAGE_TYPES_WITH_ATTRIBUTION = new Set([
   ...PAGE_TYPES_WITH_SPEAKABLE,
   'WebApplication',
+  'FAQPage',
+  'HowTo',
 ]);
 // Approximate monitoring footprint around each registry centroid (degrees).
 // Registry entries are points; GeoShape.box lets crawlers treat the waterway as
