@@ -121,9 +121,11 @@ async function retryProviderRequest(request, retries = 2) {
     try {
       return await request();
     } catch (err) {
+      const code = err.cause?.code ?? err.code;
       const transient = !(err instanceof SyntaxError) && (typeof err.status === 'number'
         ? isRetryableHttpStatus(err.status)
-        : isTransientProxyError(`${err.message} ${err.cause?.code || ''}`));
+        : ['UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(code)
+          || isTransientProxyError(`${err.message} ${code || ''}`));
       err.nonRetryable = !transient;
       throw err;
     }

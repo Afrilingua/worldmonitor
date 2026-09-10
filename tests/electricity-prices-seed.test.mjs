@@ -272,6 +272,47 @@ describe('classified electricity retries', () => {
     }
   });
 
+  for (const code of ['UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']) {
+    it(`recovers both native fetch adapters from ${code}`, async () => {
+      const original = globalThis.fetch;
+      const socketError = () => new TypeError('fetch failed', { cause: Object.assign(new Error('transport closed'), { code }) });
+      try {
+        let entsoCalls = 0;
+        const entso = await fetchEntsoERegion(ENTSO_REGION, 'fake', ENTSO_TODAY, ENTSO_YESTERDAY, {
+          fetchFn: async () => {
+            if (++entsoCalls === 1) throw socketError();
+            return new Response(entsoXml(85));
+          }, proxyAuth: '',
+        });
+        assert.equal(entso?.priceMwhEur, 85);
+        assert.equal(entsoCalls, 2);
+        let eiaCalls = 0;
+        globalThis.fetch = async () => {
+          if (++eiaCalls === 1) throw socketError();
+          return new Response(JSON.stringify({ response: { data: [{ value: 10271, type: 'D' }] } }));
+        };
+        const eia = await fetchEiaRegion(EIA_REGIONS[0], 'fake', ENTSO_TODAY);
+        assert.equal(eia?.demandMwh, 10271);
+        assert.equal(eiaCalls, 2);
+      } finally { globalThis.fetch = original; }
+    });
+  }
+
+  for (const [code, expectedDirect, expectedProxy] of [
+    ['UND_ERR_SOCKET', 3, 1], ['UND_ERR_INVALID_ARG', 1, 0],
+  ]) it(`bounds repeated native errors and only falls back for transport failures: ${code}`, async () => {
+    let direct = 0;
+    let proxy = 0;
+    const result = await fetchEntsoERegion(ENTSO_REGION, 'fake', ENTSO_TODAY, ENTSO_YESTERDAY, {
+      fetchFn: async () => { direct++; throw new TypeError('fetch failed', { cause: { code } }); },
+      proxyAuth: 'fake',
+      proxyFetcher: async () => { proxy++; return { buffer: Buffer.from(entsoXml(85)) }; },
+    });
+    assert.equal(direct, expectedDirect);
+    assert.equal(proxy, expectedProxy);
+    assert.equal(result?.priceMwhEur ?? null, expectedProxy ? 85 : null);
+  });
+
   it('does not retry permanent EIA failures or malformed JSON', async () => {
     const original = globalThis.fetch;
     try {
