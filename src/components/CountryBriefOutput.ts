@@ -285,6 +285,39 @@ export function createDecisionBriefOutput(
 
 const chokepointName = (id: string) => CHOKEPOINT_REGISTRY.find(cp => cp.id === id)?.displayName ?? id;
 
+// The preview lives inside the country panel; a 25-origin heading would bury the
+// next action below several screens of cards. The export carries every origin.
+const PREVIEW_CANDIDATES = 10;
+
+type CommodityCandidate = import('@/types/decision-brief').CommodityBriefSnapshot['candidates'][number];
+
+const decimal = (value: number, digits = 0) => value.toLocaleString('en-US', { maximumFractionDigits: digits });
+/** World-export totals span 1e5..1e11, so they are abbreviated rather than printed in full. */
+const compactUsd = (value: number) => value >= 1e9 ? `$${decimal(value / 1e9, 1)}B`
+  : value >= 1e6 ? `$${decimal(value / 1e6, 1)}M`
+    : value >= 1e3 ? `$${decimal(value / 1e3, 1)}K` : `$${decimal(value)}`;
+
+/** Rows added to the existing candidate `<dl>`; each states its own "not available" case. */
+function candidateEvidenceRows(candidate: CommodityCandidate, hs4: string): [string, string][] {
+  const rows: [string, string][] = [['Recorded volume', candidate.netWeightKg === null
+    ? 'Volume not reported'
+    : `${decimal(candidate.netWeightKg)} kg${candidate.netWeightEstimated ? ' (estimated)' : ''}`]];
+  if (candidate.quantity !== null) {
+    rows.push(['Reported quantity', `${decimal(candidate.quantity, 2)}${candidate.quantityUnit ? ` ${candidate.quantityUnit}` : ' (unit not reported)'}`]);
+  }
+  rows.push(['Supplier scale', candidate.scale === null
+    ? 'Supplier scale unavailable'
+    : `${compactUsd(candidate.scale.worldExportsUsd)} world exports of HS ${hs4}, rank ${candidate.scale.rank} (${candidate.scale.year})${candidate.scale.worldExportsKg === null ? '' : ` · ${decimal(candidate.scale.worldExportsKg)} kg reported`}`]);
+  if (candidate.production) {
+    const { sharePct, stage, source, restricted } = candidate.production;
+    // A redistribution-restricted source is named without its number (R4).
+    rows.push(['World production share', restricted ? `share from ${source}, redistribution restricted`
+      : sharePct === null ? `Share not published by ${source}`
+        : `${decimal(sharePct, 1)}% of world ${stage} output (${source})`]);
+  }
+  return rows;
+}
+
 export function renderCommodityBrief(snapshot: import('@/types/decision-brief').CommodityBriefSnapshot, preview = false): HTMLElement {
   const countries = new Intl.DisplayNames(['en'], { type: 'region' });
   const article = h('article', { className: `cdp-commodity-paper ${preview ? 'cdp-commodity-preview' : 'cdp-output-paper'}`, lang: 'en' },
@@ -297,7 +330,8 @@ export function renderCommodityBrief(snapshot: import('@/types/decision-brief').
       h('p', { className: 'cdp-commodity-note' }, 'Recorded trade and modeled routes. Capacity, qualification, price and lead time remain unknown.')),
     h('h2', { className: 'cdp-commodity-section-title' }, 'Recorded origin-country comparison'));
   const candidates = h('div', { className: 'cdp-commodity-candidates' });
-  for (const candidate of snapshot.candidates) {
+  const shown = preview ? snapshot.candidates.slice(0, PREVIEW_CANDIDATES) : snapshot.candidates;
+  for (const candidate of shown) {
     const evidence = snapshot.evidence.find(e => e.id === candidate.shareReference)!;
     const share = candidate.sharePct === null ? 'Unknown' : candidate.sharePct > 0 && candidate.sharePct < 0.01
       ? '<0.01%' : `${candidate.sharePct.toLocaleString('en-US', { maximumFractionDigits: 2 })}%`;
@@ -306,7 +340,8 @@ export function renderCommodityBrief(snapshot: import('@/types/decision-brief').
     candidates.append(h('section', { className: 'cdp-commodity-candidate', 'data-origin': candidate.origin },
       h('div', { className: 'cdp-commodity-candidate-top' },
         h('div', {}, h('h3', {}, countries.of(candidate.origin) ?? candidate.origin),
-          h('span', { className: 'cdp-commodity-note' }, `${candidate.origin} · Trade year ${evidence.observedAt ?? 'unknown'}`)),
+          h('span', { className: 'cdp-commodity-note' }, `${candidate.origin} · Trade year ${evidence.observedAt ?? 'unknown'}`),
+          ...(candidate.transitHub ? [h('span', { className: 'cdp-commodity-hub' }, 'Possible transit hub')] : [])),
         h('div', { className: 'cdp-commodity-share' }, h('strong', {}, share), h('span', {}, 'of import value'))),
       h('span', { className: 'cdp-commodity-route-state', 'data-state': candidate.routeState }, state),
       h('p', { className: 'cdp-commodity-route' }, candidate.routeState === 'unknown' ? 'No modeled maritime path for this country pair.'
@@ -315,6 +350,7 @@ export function renderCommodityBrief(snapshot: import('@/types/decision-brief').
         h('summary', {}, 'Route & source details'),
         h('dl', {}, ...[
           ['Provider partner', `${candidate.partnerCode}: ${candidate.partnerScope}`],
+          ...candidateEvidenceRows(candidate, snapshot.hs4),
           ['Modeled chokepoints (unordered)', candidate.transitChokepoints.map(chokepointName).join(', ') || 'Unknown / none identified'],
           ['Modeled routes', candidate.routeIds.map(id => TRADE_ROUTES.find(route => route.id === id)?.name ?? id).join(', ') || 'Unknown'],
           ['Affected chokepoints', candidate.routeState === 'unknown' ? 'Unknown' : candidate.affectedChokepoints.map(chokepointName).join(', ') || 'Selected chokepoint absent from modeled path'],
@@ -325,6 +361,7 @@ export function renderCommodityBrief(snapshot: import('@/types/decision-brief').
         h('p', {}, candidate.reason))));
   }
   if (!snapshot.candidates.length) candidates.append(h('p', { className: 'cdp-commodity-empty' }, 'No recorded supplier countries for this selection. See the next action below.'));
+  if (shown.length < snapshot.candidates.length) candidates.append(h('p', { className: 'cdp-commodity-note cdp-commodity-more' }, `+${snapshot.candidates.length - shown.length} more origins in the export`));
   article.append(candidates,
     h('section', { className: 'cdp-commodity-action' },
       h('h2', { className: 'cdp-commodity-section-title' }, 'Next action'), h('p', { className: 'cdp-decision-action' }, snapshot.action.text),

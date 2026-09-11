@@ -122,6 +122,7 @@ test('commodity comparison preserves Qatar origin blockage and recorded US const
       { partnerCode: 999, partnerIso2: 'ZZ', share: 0.1, value: 100 },
     ] }] },
     vulnerabilities: { iso2: 'JP', country: 'Japan', vulnerabilities: [], generatedAt: '', methodologyVersion: '', upstreamUnavailable: true },
+    production: null,
   };
   const s = module.buildCommodityBrief({ countryCode: 'JP', countryName: 'Japan', commodityId: 'helium', chokepointId: 'hormuz_strait' }, data);
   assert.equal(s.candidates.find(c => c.origin === 'QA')?.routeState, 'exposed');
@@ -138,7 +139,7 @@ test('commodity comparison preserves Qatar origin blockage and recorded US const
 test('commodity missing products, country mismatch and invalid shares remain explicit', async () => {
   const { buildCommodityBrief } = await import('../src/utils/decision-brief.ts');
   const selected = { countryCode: 'JP', countryName: 'Japan', commodityId: 'helium', chokepointId: 'hormuz_strait' };
-  const data = { retrievedAt: '2026-09-10', products: { iso2: 'JP', fetchedAt: '', products: [] }, vulnerabilities: { iso2: 'JP', country: '', vulnerabilities: [], generatedAt: '', methodologyVersion: '', upstreamUnavailable: true } };
+  const data = { retrievedAt: '2026-09-10', products: { iso2: 'JP', fetchedAt: '', products: [] }, vulnerabilities: { iso2: 'JP', country: '', vulnerabilities: [], generatedAt: '', methodologyVersion: '', upstreamUnavailable: true }, production: null };
   const missing = buildCommodityBrief(selected, data);
   assert.equal(missing.candidates.length, 0);
   assert.match(missing.action.text, /No recorded HS 2804/);
@@ -155,7 +156,7 @@ test('commodity ordering uses known routes and exact zero remains different from
   const selected = { countryCode: 'DE', countryName: 'Germany', commodityId: 'wheat', chokepointId: 'suez' };
   const data = { retrievedAt: '2026-09-10', products: { iso2: 'DE', fetchedAt: '', products: [{ hs4: '1001', description: '', totalValue: 100, year: 2024, topExporters: [
     { partnerCode: 156, partnerIso2: 'CN', share: 0.6, value: 60 }, { partnerCode: 842, partnerIso2: 'US', share: 0.4, value: 40 }, { partnerCode: 124, partnerIso2: 'CA', share: 0, value: 0 },
-  ] }] }, vulnerabilities: { iso2: 'DE', country: '', vulnerabilities: [], generatedAt: '', methodologyVersion: '', upstreamUnavailable: true } };
+  ] }] }, vulnerabilities: { iso2: 'DE', country: '', vulnerabilities: [], generatedAt: '', methodologyVersion: '', upstreamUnavailable: true }, production: null };
   const blocked = buildCommodityBrief(selected, data);
   assert.equal(blocked.candidates[0]?.origin, 'US');
   assert.equal(blocked.candidates.find(c => c.origin === 'CN')?.routeState, 'exposed');
@@ -164,4 +165,59 @@ test('commodity ordering uses known routes and exact zero remains different from
   assert.equal(hormuz.candidates[0]?.origin, 'CN');
   assert.deepEqual(hormuz.evidence, blocked.evidence);
   assert.deepEqual(hormuz.capture, blocked.capture);
+});
+
+// U5. The threshold partner list, volume, supplier scale, the hub flag and the
+// mineral leg all reach the snapshot from the same builder pass, so one case
+// pins the whole mapping without a DOM.
+test('commodity evidence depth maps volume, scale, hub flag and world production', async () => {
+  const { buildCommodityBrief } = await import('../src/utils/decision-brief.ts');
+  const selected = { countryCode: 'JP', countryName: 'Japan', commodityId: 'cobalt', chokepointId: 'hormuz_strait' };
+  const data = {
+    retrievedAt: '2026-09-10T10:00:00Z',
+    products: {
+      iso2: 'JP', fetchedAt: '2026-09-09',
+      products: [{
+        hs4: '8105', description: 'Cobalt', totalValue: 1000, year: 2024, denominatorBasis: 'reported_world',
+        partnerBasis: 'share_threshold', omittedPartnerCount: 12, omittedPartnerShare: 0.042,
+        topExporters: [
+          { partnerCode: 528, partnerIso2: 'NL', share: 0.4, value: 400, netWeightKg: 839, netWeightEstimated: true, quantity: 4, quantityUnitCode: 12 },
+          { partnerCode: 180, partnerIso2: 'CD', share: 0.3, value: 300, scale: { worldExportsUsd: 2_100_000_000, rank: 1, year: 2024 } },
+          // Comtrade reports an unmeasured weight as 0; that is "not reported".
+          { partnerCode: 124, partnerIso2: 'CA', share: 0.2, value: 200, netWeightKg: 0, quantity: 0 },
+        ],
+      }],
+      evidence: { state: 'fresh', source: 'UN Comtrade bilateral HS4', requestedHs4s: ['8105'], missingHs4s: [], lastAttemptAt: '', lastAttemptState: 'observed', recoveredHs4s: [], worldExportsFetchedAt: '2026-09-08T00:00:00Z' },
+    },
+    vulnerabilities: { iso2: 'JP', country: 'Japan', vulnerabilities: [], generatedAt: '', methodologyVersion: '', upstreamUnavailable: true },
+    production: {
+      commodities: [{
+        commodityId: 'cobalt', commodity: 'Cobalt', year: 2024, unit: 't', sources: ['usgs-mcs'],
+        mine: { year: 2024, unit: 't', hhi: 0, withheldCount: 0, countries: [{ iso2: 'CD', country: 'DR Congo', share: 76.2, output: 220000, withheld: false, estimated: false, residual: false }] },
+      }],
+      countries: [], fetchedAt: '2026-09-01T00:00:00Z', upstreamUnavailable: false, dataYear: 2024,
+    },
+  };
+  const s = buildCommodityBrief(selected, data);
+  const nl = s.candidates.find(c => c.origin === 'NL');
+  assert.equal(nl?.netWeightKg, 839);
+  assert.equal(nl?.netWeightEstimated, true);
+  assert.equal(nl?.quantityUnit, 'm³');
+  assert.equal(nl?.transitHub, true);
+  const ca = s.candidates.find(c => c.origin === 'CA');
+  assert.equal(ca?.netWeightKg, null);
+  assert.equal(ca?.quantity, null);
+  assert.equal(ca?.quantityUnit, null);
+  assert.equal(ca?.transitHub, false);
+  assert.deepEqual(s.candidates.find(c => c.origin === 'CD')?.scale, { worldExportsUsd: 2_100_000_000, worldExportsKg: null, rank: 1, year: 2024 });
+  assert.deepEqual(s.candidates.find(c => c.origin === 'CD')?.production, { sharePct: 76.2, stage: 'mine', source: 'USGS MCS', restricted: false });
+  assert.equal(s.candidates.find(c => c.origin === 'NL')?.production, null);
+  assert.match(s.coverage.join(' '), /every partner at or above 1% of the denominator \(3 shown, 12 omitted holding 4\.2% combined\)/);
+  assert.match(s.coverage.join(' '), /Possible transit hubs among shown origins: Netherlands \(NL\)/);
+  assert.match(s.coverage.join(' '), /world exports of HS 8105 fetched 2026-09-08T00:00:00Z/);
+  assert.match(s.coverage.join(' '), /World production: mine-stage shares from USGS MCS/);
+  // R5: NL leads on recorded share but is a hub, so the action names CD instead.
+  assert.match(s.action.text, /Validate CD's/);
+  assert.match(s.action.text, /Netherlands \(NL\) ranks ahead.*skipped/);
+  assert.deepEqual(JSON.parse(JSON.stringify(s.candidates)), s.candidates);
 });
