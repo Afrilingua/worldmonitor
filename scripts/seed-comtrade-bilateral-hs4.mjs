@@ -13,6 +13,8 @@ import {
   releaseLock,
   sleep,
 } from './_seed-utils.mjs';
+import { HS4_CODES, HS4_BATCHES, parseRecords, groupByProduct } from './shared/comtrade-bilateral.mjs';
+export { HS4_CODES, MAX_HS4_CODES_PER_BATCH, groupByProduct } from './shared/comtrade-bilateral.mjs';
 import { candidatePeriods, periodWindow, recentPeriod } from './shared/comtrade-period.mjs';
 
 // Re-exported so existing importers (tests, sibling seeders) keep one source.
@@ -111,8 +113,6 @@ function getNextKey() {
 }
 
 const usePublicApi = COMTRADE_KEYS.length === 0;
-const STRATEGIC_PRODUCT_METADATA = require('./shared/comtrade-strategic-products.json');
-const SUPPLY_VULNERABILITY_METADATA = require('./shared/supply-vulnerability-commodities.json');
 const COMTRADE_API_CLASSIFIER = 'HS'; // API route family; metadata tracks the active H6/HS2022 revision separately.
 const COMTRADE_FETCH_URL = usePublicApi
   ? `https://comtradeapi.un.org/public/v1/preview/C/A/${COMTRADE_API_CLASSIFIER}`
@@ -143,37 +143,8 @@ export function periodCandidates(isPublicRoute, now = new Date()) {
   return isPublicRoute ? candidatePeriods(now) : [periodWindow(now)];
 }
 
-const BILATERAL_PRODUCTS_BY_CODE = new Map();
-for (const product of STRATEGIC_PRODUCT_METADATA.products) {
-  if (product.bilateralHs4Code) BILATERAL_PRODUCTS_BY_CODE.set(product.bilateralHs4Code, product);
-}
-for (const commodity of SUPPLY_VULNERABILITY_METADATA.commodities) {
-  for (const hs4 of commodity.hs4) {
-    if (!BILATERAL_PRODUCTS_BY_CODE.has(hs4)) {
-      BILATERAL_PRODUCTS_BY_CODE.set(hs4, {
-        bilateralHs4Code: hs4,
-        bilateralLabel: commodity.label,
-        label: commodity.label,
-      });
-    }
-  }
-}
-const BILATERAL_PRODUCTS = Array.from(BILATERAL_PRODUCTS_BY_CODE.values());
-export const HS4_CODES = Array.from(BILATERAL_PRODUCTS_BY_CODE.keys());
-const HS4_LABELS = Object.fromEntries(BILATERAL_PRODUCTS.map((product) => [
-  product.bilateralHs4Code,
-  product.bilateralLabel ?? product.label,
-]));
+const [BATCH_1, BATCH_2] = HS4_BATCHES;
 
-export const MAX_HS4_CODES_PER_BATCH = 20;
-if (HS4_CODES.length > MAX_HS4_CODES_PER_BATCH * 2) {
-  throw new Error(
-    `Reviewed bilateral HS4 registry has ${HS4_CODES.length} codes; more than two `
-    + `${MAX_HS4_CODES_PER_BATCH}-code requests would exceed the monthly request budget`,
-  );
-}
-const BATCH_1 = HS4_CODES.slice(0, MAX_HS4_CODES_PER_BATCH);
-const BATCH_2 = HS4_CODES.slice(MAX_HS4_CODES_PER_BATCH);
 
 /** @type {Record<string, {nearestRouteIds: string[], coastSide: string}>} */
 const COUNTRY_PORT_CLUSTERS = require('./shared/country-port-clusters.json');
@@ -310,6 +281,7 @@ function buildFetchUrl(reporterCode, hs4Batch, key, period) {
   url.searchParams.set('cmdCode', hs4Batch.join(','));
   url.searchParams.set('flowCode', 'M');
   url.searchParams.set('period', period);
+  url.searchParams.set('maxRecords', usePublicApi ? '500' : '100000');
   if (key) url.searchParams.set('subscription-key', key);
   return url.toString();
 }
@@ -360,95 +332,20 @@ export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeri
     const tag = (rateLimitedOnce || transientRetries > 0) ? ' (after retries)' : '';
     console.warn(`    HTTP ${resp.status} for reporter ${reporterCode}${tag}`);
     if (resp.status === 429) consecutiveRateLimited++;
-    return [];
+    throw new Error(`Comtrade upstream HTTP ${resp.status}`);
   }
 
   consecutiveRateLimited = 0;
 
   const data = await resp.json();
-  const parsed = parseRecords(data);
+  const parsed = parseRecords(data, usePublicApi ? 500 : 100000);
   if (parsed.length === 0 && data?.count > 0) {
     console.warn(`    Reporter ${reporterCode}: API returned count=${data.count} but parseRecords produced 0 — response shape may have changed`);
   }
   return parsed;
 }
 
-/**
- * @param {unknown} data
- * @returns {Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number}>}
- */
-function parseRecords(data) {
-  const records = /** @type {any[]} */ (/** @type {any} */ (data)?.data ?? []);
-  if (!Array.isArray(records)) return [];
-  return records
-    .filter(r => r && Number(r.primaryValue ?? 0) > 0)
-    .map(r => ({
-      cmdCode: String(r.cmdCode ?? ''),
-      partnerCode: String(r.partnerCode ?? r.partner2Code ?? '000'),
-      primaryValue: Number(r.primaryValue ?? 0),
-      year: Number(r.period ?? r.refYear ?? 0),
-    }));
-}
 
-/**
- * @param {Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number}>} records
- * @param {number} [fallbackYear] year to report when no record carries a usable period/refYear
- * @returns {Array<{hs4: string, description: string, totalValue: number, topExporters: Array<{partnerCode: number, partnerIso2: string, value: number, share: number}>, year: number}>}
- */
-export function groupByProduct(records, fallbackYear = Number(recentPeriod())) {
-  /** @type {Map<string, Map<string, {value: number, year: number}>>} */
-  const byCode = new Map();
-  for (const r of records) {
-    if (!byCode.has(r.cmdCode)) byCode.set(r.cmdCode, new Map());
-    const partners = byCode.get(r.cmdCode);
-    const existing = partners.get(r.partnerCode);
-    // Newest year first, then largest value within it. With a single-period
-    // response every r.year is equal, so this reduces to the previous
-    // largest-value behaviour.
-    if (!existing || r.year > existing.year
-      || (r.year === existing.year && r.primaryValue > existing.value)) {
-      partners.set(r.partnerCode, { value: r.primaryValue, year: r.year });
-    }
-  }
-
-  const products = [];
-  for (const [hs4, partners] of byCode) {
-    const ranked = [...partners.entries()]
-      .sort((a, b) => b[1].value - a[1].value)
-      .filter(([pc]) => pc !== '0' && pc !== '000');
-
-    // Collapse the product to ONE year before aggregating. Newest-year-per-
-    // partner is not enough on the multi-year window: a partner that traded in
-    // an older window year but not the newest would otherwise be summed into
-    // totalValue and ranked into topExporters, so a lapsed relationship could
-    // hold most of the share of a snapshot labelled a year it did not trade in.
-    // A late filer is unaffected — all its rows sit at the same older year.
-    const years = ranked.map(([, v]) => v.year).filter(y => y > 0);
-    // Math.max(...[]) is -Infinity, which is TRUTHY — so `latestYear || fallback`
-    // would return -Infinity and serialize as null, never reaching the fallback.
-    const latestYear = years.length > 0 ? Math.max(...years) : 0;
-    const sorted = latestYear > 0
-      ? ranked.filter(([, v]) => v.year === latestYear)
-      : ranked;
-
-    const totalValue = sorted.reduce((s, [, v]) => s + v.value, 0);
-    if (totalValue <= 0) continue;
-    const top5 = sorted.slice(0, 5);
-    products.push({
-      hs4,
-      description: HS4_LABELS[hs4] ?? hs4,
-      totalValue,
-      topExporters: top5.map(([pc, v]) => ({
-        partnerCode: Number(pc),
-        partnerIso2: UN_TO_ISO2[pc.padStart(3, '0')] ?? '',
-        value: v.value,
-        share: Math.round((v.value / totalValue) * 1000) / 1000,
-      })),
-      year: latestYear > 0 ? latestYear : fallbackYear,
-    });
-  }
-  return products.sort((a, b) => b.totalValue - a.totalValue);
-}
 
 /**
  * @param {{ requestBudget?: number }} [options]
@@ -492,8 +389,9 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
     return;
   }
 
+  const countryCoverage = Object.fromEntries(countries.map(([iso2]) => [iso2, { state: 'not_attempted' }]));
   const writeMeta = async (count, status = 'ok', preserveStreaks = {}) => {
-    const meta = JSON.stringify({ fetchedAt: Date.now(), recordCount: count, status, preserveStreaks });
+    const meta = JSON.stringify({ fetchedAt: Date.now(), recordCount: count, status, preserveStreaks, requestedHs4s: HS4_CODES, countryCoverage });
     // TTL ≥ FRESHNESS_GATE_MS so the gate's "fresh" answer cannot be silently
     // invalidated by Redis eviction. See the SEED_META_TTL_SECONDS comment.
     await redisPipeline([['SET', META_KEY, meta, 'EX', String(SEED_META_TTL_SECONDS)]])
@@ -570,6 +468,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
         }
 
         const products = groupByProduct([...batch1, ...batch2], Number(String(usedPeriod).split(',')[0]));
+        countryCoverage[iso2] = { state: products.length ? 'observed' : 'no_records', attemptedAt: new Date().toISOString(), missingHs4s: HS4_CODES.filter(code => !products.some(p => p.hs4 === code)) };
         if (products.length === 0) {
           console.warn(`    ${iso2}: no products after grouping, skipping write`);
         } else {
@@ -577,6 +476,8 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
             iso2,
             products,
             fetchedAt: new Date().toISOString(),
+            source: usePublicApi ? 'UN Comtrade public preview' : 'UN Comtrade data API',
+            requestedHs4s: HS4_CODES,
           });
           commands.push(['SET', `${KEY_PREFIX}${iso2}:v1`, payload, 'EX', String(TTL_SECONDS)]);
           writtenKeys.add(`${KEY_PREFIX}${iso2}:v1`);
@@ -585,6 +486,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
         }
       } catch (err) {
         console.warn(`  [bilateral-hs4] ${iso2}: fetch failed, preserving existing data: ${err.message}`);
+        countryCoverage[iso2] = { state: err.message?.startsWith('Malformed') ? 'malformed' : err.message?.startsWith('Incomplete') ? 'incomplete' : 'unavailable', attemptedAt: new Date().toISOString() };
         failedCount++;
       }
 

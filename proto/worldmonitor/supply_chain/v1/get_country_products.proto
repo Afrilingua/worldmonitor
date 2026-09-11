@@ -17,6 +17,7 @@ message CountryProduct {
   double total_value = 3;
   repeated ProductExporter top_exporters = 4;
   int32 year = 5;
+  optional string denominator_basis = 6;
 }
 
 message GetCountryProductsRequest {
@@ -27,6 +28,8 @@ message GetCountryProductsRequest {
     (buf.validate.field).string.pattern = "^[A-Z]{2}$",
     (sebuf.http.query) = {name: "iso2"}
   ];
+  // Optional requested heading; permits bounded recovery of a missing product.
+  optional string hs4 = 2 [(sebuf.http.query) = {name: "hs4"}];
 }
 
 message GetCountryProductsResponse {
@@ -34,4 +37,15 @@ message GetCountryProductsResponse {
   repeated CountryProduct products = 2;
   // ISO timestamp from the seeded payload (empty when no data is cached).
   string fetched_at = 3;
+  // Cache evidence state, independent of the annual trade observation year.
+  optional CountryProductEvidence evidence = 4;
+}
+
+message CountryProductEvidence {
+  string state = 1;
+  string source = 2;
+  repeated string requested_hs4s = 3;
+  repeated string missing_hs4s = 4;
+  string last_attempt_at = 5;
+  string last_attempt_state = 6;
 }

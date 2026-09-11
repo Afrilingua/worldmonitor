@@ -283,18 +283,21 @@ export function createDecisionBriefOutput(
 
 export function renderCommodityBrief(snapshot: import('@/types/decision-brief').CommodityBriefSnapshot): HTMLElement {
   const article = h('article', { className: 'cdp-output-paper cdp-commodity-paper' },
-    h('h1', {}, `${snapshot.selection.countryName} · ${snapshot.commodity} sourcing comparison`),
+    h('h1', {}, `${snapshot.selection.countryName} · ${snapshot.commodity}: HS ${snapshot.hs4} trade evidence`),
     h('p', {}, `HS ${snapshot.hs4} · Assumed blocked: ${snapshot.selection.chokepointId} · Retrieved ${snapshot.capturedAt}`),
+    h('p', {}, `Trade basket: ${snapshot.basket}. Shares describe this customs basket, not qualified commodity supply.`),
+    h('h2', {}, 'Evidence coverage'), ...snapshot.coverage.map(text => h('p', {}, text)),
     h('p', {}, snapshot.context), h('p', {}, snapshot.ordering),
-    h('h2', {}, 'Recorded supplier-country comparison'));
+    h('h2', {}, 'Recorded origin-country comparison'));
   for (const candidate of snapshot.candidates) {
     const evidence = snapshot.evidence.find(e => e.id === candidate.shareReference)!;
     article.append(h('section', { className: 'cdp-commodity-candidate', 'data-origin': candidate.origin },
       h('h3', {}, candidate.origin),
       h('dl', {}, ...[
+        ['Provider partner', `${candidate.partnerCode}: ${candidate.partnerScope}`],
         ['Recorded share', `${candidate.sharePct === null ? 'Unknown' : candidate.sharePct.toLocaleString('en-US', { maximumFractionDigits: 2 }) + '% of import value'} [${candidate.shareReference}]`],
         ['Modeled routes', candidate.routeIds.join(', ') || 'Unknown'],
-        ['Transit chokepoints', candidate.transitChokepoints.join(', ') || 'Unknown / none identified'],
+        ['Modeled chokepoints (unordered)', candidate.transitChokepoints.join(', ') || 'Unknown / none identified'],
         ['Affected chokepoints', candidate.routeState === 'unknown' ? 'Unknown' : candidate.affectedChokepoints.join(', ') || 'Selected chokepoint absent from modeled path'],
         ['Source date', evidence.observedAt ?? 'Unknown'],
         ['Evidence basis', `${evidence.source}; geographic route model`],

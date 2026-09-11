@@ -29106,6 +29106,13 @@ paths:
                   schema:
                     type: string
                     pattern: '^[A-Z]{2}$'
+                - name: hs4
+                  in: query
+                  description: Optional requested heading; permits bounded recovery of a missing product.
+                  required: false
+                  example: "example"
+                  schema:
+                    type: string
                 - name: jmespath
                   in: query
                   description: |-
@@ -29120,10 +29127,19 @@ paths:
                     content:
                         application/json:
                             example:
+                                "evidence":
+                                    "lastAttemptAt": "2026-01-15T12:00:00Z"
+                                    "lastAttemptState": "example"
+                                    "missingHs4s":
+                                        - "example"
+                                    "requestedHs4s":
+                                        - "example"
+                                    "source": "example"
                                 "fetchedAt": "2026-01-15T12:00:00Z"
                                 "iso2": "US"
                                 "products":
-                                    - "description": "Example WorldMonitor observation."
+                                    - "denominatorBasis": "example"
+                                      "description": "Example WorldMonitor observation."
                                       "hs4": "example"
                                       "topExporters":
                                           - "partnerCode": 1
@@ -29131,7 +29147,6 @@ paths:
                                             "share": 1.5
                                             "value": 1.5
                                       "totalValue": 1
-                                      "year": 1
                             schema:
                                 $ref: '#/components/schemas/worldmonitor_supply_chain_v1_GetCountryProductsResponse'
                 "400":
@@ -54178,6 +54193,9 @@ components:
                     type: string
                     pattern: ^[A-Z]{2}$
                     description: ISO 3166-1 alpha-2 country code whose strategic products should be returned.
+                hs4:
+                    type: string
+                    description: Optional requested heading; permits bounded recovery of a missing product.
             required:
                 - iso2
         worldmonitor_supply_chain_v1_GetCountryProductsResponse:
@@ -54192,6 +54210,8 @@ components:
                 fetchedAt:
                     type: string
                     description: ISO timestamp from the seeded payload (empty when no data is cached).
+                evidence:
+                    $ref: '#/components/schemas/worldmonitor_supply_chain_v1_CountryProductEvidence'
         worldmonitor_supply_chain_v1_CountryProduct:
             type: object
             properties:
@@ -54209,6 +54229,8 @@ components:
                 year:
                     type: integer
                     format: int32
+                denominatorBasis:
+                    type: string
         worldmonitor_supply_chain_v1_ProductExporter:
             type: object
             properties:
@@ -54223,6 +54245,25 @@ components:
                 share:
                     type: number
                     format: double
+        worldmonitor_supply_chain_v1_CountryProductEvidence:
+            type: object
+            properties:
+                state:
+                    type: string
+                source:
+                    type: string
+                requestedHs4s:
+                    type: array
+                    items:
+                        type: string
+                missingHs4s:
+                    type: array
+                    items:
+                        type: string
+                lastAttemptAt:
+                    type: string
+                lastAttemptState:
+                    type: string
         worldmonitor_supply_chain_v1_GetMultiSectorCostShockRequest:
             type: object
             properties:

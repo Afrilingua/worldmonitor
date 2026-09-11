@@ -43,6 +43,8 @@ export interface CommodityBriefCapture {
 
 export interface CommodityBriefSnapshot {
   kind: 'commodity';
+  basket: string;
+  coverage: string[];
   selection: CommodityBriefSelection;
   capturedAt: string;
   commodity: string;
@@ -51,6 +53,8 @@ export interface CommodityBriefSnapshot {
   evidence: DecisionBriefSnapshot['evidence'];
   candidates: {
     origin: string;
+    partnerCode: number;
+    partnerScope: string;
     shareReference: string;
     sharePct: number | null;
     routeIds: string[];

@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { HS4_CODES, HS4_LABELS } from '../scripts/shared/comtrade-bilateral.mjs';
 import { recentPeriod } from '../scripts/shared/comtrade-period.mjs';
 import { lazyFetchBilateralHs4 } from '../server/worldmonitor/supply-chain/v1/_bilateral-hs4-lazy.js';
 
@@ -47,7 +48,7 @@ afterEach(() => {
 test('lazy fallback requests the stable HS preview route', async () => {
   await lazyFetchBilateralHs4('DE');
 
-  assert.equal(comtradeCalls().length, 1, 'expected exactly one upstream request');
+  assert.equal(comtradeCalls().length, 2, 'expected two bounded catalogue requests');
   assert.equal(new URL(comtradeCalls()[0]).pathname, '/public/v1/preview/C/A/HS');
 });
 
@@ -76,18 +77,12 @@ test('both producers of the shared key request the SAME HS4 catalogue', async ()
   // hardcoded list, adding a product to the catalogue would land in the
   // seeder's payloads and be silently missing from the fallback's — with
   // nothing to surface the divergence.
-  const metadata = JSON.parse(
-    readFileSync(
-      join(import.meta.dirname, '..', 'scripts', 'shared', 'comtrade-strategic-products.json'),
-      'utf8',
-    ),
-  ) as { products: Array<{ bilateralHs4Code?: string }> };
-  const expected = [...new Set(
-    metadata.products.map(p => p.bilateralHs4Code).filter(Boolean),
-  )];
+  const expected = HS4_CODES;
 
   await lazyFetchBilateralHs4('DE');
-  const requested = (new URL(comtradeCalls()[0]).searchParams.get('cmdCode') ?? '').split(',');
+  const batches = comtradeCalls().map(url => (new URL(url).searchParams.get('cmdCode') ?? '').split(','));
+  assert(batches.every(codes => codes.length <= 20));
+  const requested = batches.flat();
 
   assert.deepEqual([...requested].sort(), [...expected].sort());
 });
@@ -121,7 +116,7 @@ test('lazy payload descriptions match the shared HS4 catalogue', async () => {
     const result = await lazyFetchBilateralHs4('DE');
     assert.equal(
       result?.products[0]?.description,
-      product.bilateralLabel ?? product.label,
+      HS4_LABELS[product.bilateralHs4Code],
       `description drifted for HS4 ${product.bilateralHs4Code}`,
     );
   }

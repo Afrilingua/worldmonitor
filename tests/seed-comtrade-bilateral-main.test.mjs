@@ -42,6 +42,7 @@ let rateLimitWaitCount = 0;
 let rateLimitEverything = false;
 /** When true, every Comtrade call answers 503 and consumes all retry slots. */
 let transientEverything = false;
+let failSecondBatch = false;
 
 function respond(body) {
   return new Response(JSON.stringify(body), { status: 200 });
@@ -75,6 +76,7 @@ beforeEach(() => {
   rateLimitWaitCount = 0;
   rateLimitEverything = false;
   transientEverything = false;
+  failSecondBatch = false;
 
   process.env.UPSTASH_REDIS_REST_URL = REDIS_URL;
   process.env.UPSTASH_REDIS_REST_TOKEN = 'fake-token';
@@ -100,6 +102,7 @@ beforeEach(() => {
     if (href.includes('comtradeapi.un.org')) {
       comtradeCallCount++;
       if (rateLimitEverything) return new Response('{}', { status: 429 });
+      if (failSecondBatch && comtradeCallCount > 1) return new Response('{}', { status: 403 });
       if (transientEverything) return new Response('{}', { status: 503 });
       // Two batches per country; give the first N countries real rows.
       const countryIndex = Math.floor((comtradeCallCount - 1) / 2);
@@ -246,4 +249,14 @@ test('the request budget counts retry attempts, not only logical batch fetches',
   const meta = writtenMeta();
   assert.equal(meta.status, 'partial');
   assert.equal(meta.recordCount, 0);
+});
+
+ test('failed second batch cannot replace the previous country with the successful first batch', async () => {
+  countriesWithData = 1;
+  failSecondBatch = true;
+  existingKeys.add(`${KEY_PREFIX}US:v1`);
+  await main({requestBudget:2});
+  assert(!redisCommands.some(c => c[0] === 'SET' && c[1] === `${KEY_PREFIX}US:v1`));
+  assert.equal(writtenMeta().countryCoverage.US.state, 'unavailable');
+  assert.equal(writtenMeta().preserveStreaks.US, 1);
 });

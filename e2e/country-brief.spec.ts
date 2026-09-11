@@ -559,9 +559,10 @@ test('decision brief clears and stays usable when a selection change aborts a ca
   await expect(panel.getByRole('button', { name: 'Capture / refresh both' })).toBeEnabled();
 });
 
-for (const mobile of [false, true]) test(`commodity decision brief ${mobile ? 'mobile' : 'desktop'} captures selection and actual exports`, async ({ page, countryBrief }, testInfo) => {
+for (const mobile of [false, true]) for (const theme of ['dark', 'light']) test(`commodity decision brief ${mobile ? 'mobile' : 'desktop'} ${theme} captures selection and actual exports`, async ({ page, countryBrief }, testInfo) => {
   void countryBrief;
   if (mobile) await page.setViewportSize({ width: 390, height: 844 });
+  await page.addInitScript(theme => localStorage.setItem('worldmonitor-theme', theme), theme);
   await installCommodityBriefData(page);
   await page.goto('/dashboard?country=JP');
   const panel = page.locator('#country-deep-dive-panel');
@@ -581,7 +582,9 @@ for (const mobile of [false, true]) test(`commodity decision brief ${mobile ? 'm
       await expect(paper).toContainText('hospital helium supplier share');
       await expect(paper.locator('[data-origin="QA"]')).toContainText('hormuz_strait');
       expect(snapshot.candidates.find((c: { origin: string }) => c.origin === 'QA').routeState).toBe('exposed');
-      expect(snapshot.candidates.find((c: { origin: string }) => c.origin === 'ZZ').routeState).toBe('unknown');
+      expect(snapshot.candidates.find((c: { origin: string }) => c.origin === 'US').routeState).toBe('unknown');
+      await expect(paper.locator('[data-origin="US"]')).toContainText('39.2%');
+      await expect(paper).toContainText('999 (Unknown partner');
     } else if (commodity === 'wheat') {
       expect(snapshot.candidates.map((c: { origin: string }) => c.origin)).toEqual(['AU']);
       await expect(paper).toContainText('2023');

@@ -1,5 +1,6 @@
 import { IntelligenceServiceClient } from '@/services/generated-rpc-clients';
 import { getRpcBaseUrl } from '@/services/rpc-client';
+import commodityRegistry from '../../scripts/shared/supply-vulnerability-commodities.json';
 import { premiumFetch } from '@/services/premium-fetch';
 import type { DecisionBriefCapture, DecisionBriefSelection } from '@/types/decision-brief';
 
@@ -22,7 +23,7 @@ export async function captureCommodityBrief(
   const supply = new SupplyChainServiceClient(getRpcBaseUrl(), { fetch: premiumFetch });
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
   const [products, vulnerabilities] = await Promise.all([
-    supply.getCountryProducts({ iso2: selection.countryCode }, { signal: requestSignal }),
+    supply.getCountryProducts({ iso2: selection.countryCode, hs4: commodityRegistry.commodities.find(c => c.id === selection.commodityId)?.hs4[0] }, { signal: requestSignal }),
     supply.getCountryVulnerabilities({ iso2: selection.countryCode }, { signal: requestSignal }),
   ]);
   return { products, vulnerabilities, retrievedAt: new Date().toISOString() };

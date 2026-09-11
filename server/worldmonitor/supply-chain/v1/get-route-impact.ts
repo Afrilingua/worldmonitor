@@ -1,3 +1,4 @@
+import { normalizeComtradeProducts } from '../../../../scripts/shared/comtrade-partners.mjs';
 /**
  * GET /api/supply-chain/v1/get-route-impact
  *
@@ -169,7 +170,7 @@ async function computeImpact(req: GetRouteImpactRequest): Promise<GetRouteImpact
   if (!payload.products?.length) return emptyResponse(req, 'empty');
 
   const normalizedHs2 = String(Number.parseInt(hs2, 10));
-  const matchingHs4s = payload.products.filter((p) => hs4ToHs2(p.hs4) === normalizedHs2);
+  const matchingHs4s = normalizeComtradeProducts(payload.products).filter((p) => hs4ToHs2(p.hs4) === normalizedHs2);
   const hs2InSeededUniverse = matchingHs4s.length > 0;
 
   let laneValueUsd = 0;

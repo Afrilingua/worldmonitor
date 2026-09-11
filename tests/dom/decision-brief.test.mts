@@ -1,7 +1,7 @@
 import { initTestI18n } from './helpers/i18n.mts';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDecisionBriefOutput, renderDecisionBrief } from '@/components/CountryBriefOutput';
-import { buildDecisionBrief } from '@/utils/decision-brief';
+import { buildDecisionBrief, buildCommodityBrief } from '@/utils/decision-brief';
 import type { DecisionBriefCapture, DecisionBriefSelection } from '@/types/decision-brief';
 
 import { computeEnergyShockScenario } from '../../server/worldmonitor/intelligence/v1/compute-energy-shock';
@@ -9,7 +9,9 @@ import { computeEnergyShockScenario } from '../../server/worldmonitor/intelligen
 const redis = vi.hoisted(() => new Map<string, unknown>());
 vi.mock('../../server/_shared/redis', () => ({
   getCachedJson: async (key: string) => redis.get(key) ?? null,
-  setCachedJson: async (key: string, value: unknown) => { redis.set(key, value); },
+  readCachedJson: async (key: string) => redis.has(key) ? {status:'hit',value:redis.get(key)} : {status:'miss'},
+  setCachedJsonIfAbsent: async (key: string, value: unknown) => { if (redis.has(key)) return false; redis.set(key, value); return true; },
+  setCachedJson: async (key: string, value: unknown) => { redis.set(key, value); return true; },
 }));
 
 beforeAll(initTestI18n);
@@ -205,4 +207,89 @@ it('commodity denied/failed captures withhold exports and recover with the real 
   }
   click(root, 'Capture commodity comparison');
   await vi.waitFor(() => expect(root.textContent).toContain('No recorded HS 2804 bilateral product evidence'));
+});
+
+import { getCountryProducts } from '../../server/worldmonitor/supply-chain/v1/get-country-products';
+import { renderCommodityBrief } from '@/components/CountryBriefOutput';
+vi.mock('../../server/_shared/premium-check', () => ({ isCallerPremium: async () => true }));
+
+it('legacy JP842 survives real reader to builder to preview and embedded export without renormalization', async () => {
+  redis.clear();
+  redis.set('comtrade:bilateral-hs4:JP:v1', { iso2: 'JP', fetchedAt: new Date().toISOString(), products: [{
+    hs4: '2804', description: 'Helium', year: 2024, totalValue: 1000,
+    topExporters: [{partnerCode:842,partnerIso2:'',value:392,share:0.392},{partnerCode:490,partnerIso2:'',value:100,share:0.1}],
+  }] });
+  const products = await getCountryProducts({request:new Request('https://example.test')} as never, {iso2:'JP',hs4:'2804'});
+  const data = buildCommodityBrief({countryCode:'JP',countryName:'Japan',commodityId:'helium',chokepointId:'hormuz_strait'}, {
+    retrievedAt: new Date().toISOString(), products,
+    vulnerabilities: {iso2:'JP',vulnerabilities:[],upstreamUnavailable:true} as never,
+  });
+  expect(data.candidates.find(c => c.origin === 'US')?.sharePct).toBe(39.2);
+  const preview = renderCommodityBrief(data);
+  const visible = preview.cloneNode(true) as HTMLElement;
+  visible.querySelector('script')?.remove();
+  expect(visible.textContent).toContain('39.2%');
+  expect(visible.textContent).toContain('490');
+  expect(visible.textContent).toContain('Hydrogen, rare gases and other non-metals');
+  expect(visible.textContent).toContain(products.fetchedAt);
+  expect(visible.textContent).toContain('2024');
+  expect(JSON.parse(preview.querySelector('#commodity-brief-snapshot')!.textContent!)).toEqual(data);
+  expect(products.products[0]!.topExporters[0]!.partnerCode).toBe(842);
+});
+
+for (const outcome of ['unavailable','no_records','malformed','incomplete_refresh','recovered']) it(`preserves or recovers Germany with refresh outcome ${outcome}`, async () => {
+  redis.clear();
+  const previous = {iso2:'DE', fetchedAt:'2026-07-27T16:47:53.750Z',products:[{hs4:'1001',description:'Wheat',year:2023,totalValue:100,topExporters:[{partnerCode:251,partnerIso2:'',value:100,share:1}]}]};
+  redis.set('comtrade:bilateral-hs4:DE:v1',previous);
+  vi.spyOn(globalThis,'fetch').mockImplementation(async (input) => {
+    if(outcome==='unavailable') return new Response('upstream failure',{status:503});
+    if(outcome==='malformed') return Response.json({unexpected:true});
+    const codes = new URL(String(input)).searchParams.get('cmdCode')!.split(',');
+    const rows = outcome==='no_records'?[]:[{cmdCode:'2804',partnerCode:842,primaryValue:392,period:2024},...(outcome==='recovered'?[{cmdCode:'1001',partnerCode:251,primaryValue:100,period:2024}]:[])];
+    return Response.json({data:rows.filter(row=>codes.includes(row.cmdCode))});
+  });
+  const result = await getCountryProducts({request:new Request('https://example.test')} as never,{iso2:'DE',hs4:'2804'});
+  if(outcome==='recovered') {
+    expect(result.products.find(p=>p.hs4==='2804')?.topExporters[0]?.partnerIso2).toBe('US');
+    expect(result.fetchedAt).not.toBe(previous.fetchedAt);
+    expect(result.evidence?.requestedHs4s).toContain('2804');
+  } else {
+    expect(result.fetchedAt).toBe(previous.fetchedAt);
+    expect(result.products[0]?.year).toBe(2023);
+    expect(result.evidence?.state).toBe('stale_preserved');
+    expect(result.evidence?.lastAttemptState).toBe(outcome);
+    expect(redis.get('comtrade:bilateral-hs4:DE:v1')).toEqual(previous);
+  }
+});
+
+it('service capture requests the selected heading and carries reader provenance into exports', async () => {
+  redis.clear();
+  redis.set('comtrade:bilateral-hs4:JP:v1',{iso2:'JP',fetchedAt:new Date().toISOString(),products:[{hs4:'2804',description:'Helium',year:2024,totalValue:1000,topExporters:[{partnerCode:842,partnerIso2:'',value:392,share:0.392}]}]});
+  const requests: URL[]=[];
+  vi.spyOn(globalThis,'fetch').mockImplementation(async (input) => {
+    const url = new URL(input instanceof Request ? input.url : String(input), 'https://example.test'); requests.push(url);
+    if(url.pathname.endsWith('/get-country-products')) return Response.json(await getCountryProducts({request:new Request(url)} as never,{iso2:url.searchParams.get('iso2')!,hs4:url.searchParams.get('hs4')!}));
+    return Response.json({iso2:'JP',vulnerabilities:[],upstreamUnavailable:true});
+  });
+  const {captureCommodityBrief}=await import('@/services/decision-brief');
+  const selection={countryCode:'JP',countryName:'Japan',commodityId:'helium',chokepointId:'hormuz_strait'};
+  const capture=await captureCommodityBrief(selection,new AbortController().signal);
+  expect(requests.find(url=>url.pathname.endsWith('/get-country-products'))?.searchParams.get('hs4')).toBe('2804');
+  const snapshot=buildCommodityBrief(selection,capture);
+  expect(snapshot.candidates[0]?.sharePct).toBe(39.2);
+  expect(snapshot.capture.products.evidence?.state).toBe('partial');
+  const article=renderCommodityBrief(snapshot);
+  expect(JSON.parse(article.querySelector('script')!.textContent!)).toEqual(snapshot);
+});
+
+it('valid empty recovery identifies requested headings and never implies zero exposure', async () => {
+  redis.clear();
+  vi.spyOn(globalThis,'fetch').mockImplementation(async () => Response.json({data:[]}));
+  const products=await getCountryProducts({request:new Request('https://example.test')} as never,{iso2:'JP',hs4:'2804'});
+  expect(products.evidence?.state).toBe('no_records');
+  expect(products.evidence?.requestedHs4s).toContain('2804');
+  const snapshot=buildCommodityBrief({countryCode:'JP',countryName:'Japan',commodityId:'helium',chokepointId:'hormuz_strait'}, {retrievedAt:new Date().toISOString(),products,vulnerabilities:{iso2:'JP',vulnerabilities:[],upstreamUnavailable:true} as never});
+  expect(snapshot.coverage.join(' ')).toContain('requested, but no usable positive rows');
+  expect(snapshot.candidates).toEqual([]);
+  expect(snapshot.action.text).toContain('Recover');
 });

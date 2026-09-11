@@ -1,3 +1,4 @@
+import { normalizeComtradePartner } from '../../scripts/shared/comtrade-partners.mjs';
 import commodityRegistry from '../../scripts/shared/supply-vulnerability-commodities.json';
 import { computeSupplierRouteRisk } from './supplier-route-risk';
 import type { CommodityBriefCapture, CommodityBriefSelection, CommodityBriefSnapshot } from '../types/decision-brief';
@@ -88,10 +89,21 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
     'Routes are geographic models, not observed shipments. Only the selected chokepoint is assumed blocked; other disruptions and transport modes are unknown.',
     'A downstream Suez or Cape option cannot bypass an origin blocked at the Strait of Hormuz.'];
   if (hs4 === '2804') caveats.push('Helium uses the HS 2804 commodity-basket proxy, which includes other gases. It cannot establish a hospital helium supplier share.');
+  const coverage = [
+    `Cache state: ${capture.products.evidence?.state ?? 'legacy_unknown'}. Source: ${capture.products.evidence?.source ?? 'UN Comtrade bilateral HS4; retrieval method unknown'}.`,
+    `Source fetched: ${capture.products.fetchedAt || 'unknown'}. Capture retrieved: ${capture.retrievedAt}. Trade observation year: ${observedAt ?? 'unknown'}. Publication lag and fetch age are separate.`,
+    `Last refresh attempt: ${capture.products.evidence?.lastAttemptAt || 'unknown'}; result: ${capture.products.evidence?.lastAttemptState || 'unknown'}.`,
+  ];
+  if (!product) coverage.push(`HS ${hs4}: ${capture.products.evidence?.requestedHs4s.includes(hs4) ? 'requested, but no usable positive rows were returned' : 'requested-heading coverage is missing or unverified'}. Missing data is not zero trade.`);
+  const excluded: string[] = [];
   const seen = new Set<string>();
   const candidates: CommodityBriefSnapshot['candidates'] = [];
   for (const exp of product?.topExporters ?? []) {
-    if (!/^[A-Z]{2}$/.test(exp.partnerIso2) || exp.partnerIso2 === selection.countryCode || seen.has(exp.partnerIso2)) continue;
+    if (!/^[A-Z]{2}$/.test(exp.partnerIso2) || exp.partnerIso2 === selection.countryCode || seen.has(exp.partnerIso2)) {
+      const partner = normalizeComtradePartner(exp.partnerCode);
+      excluded.push(`${exp.partnerCode} (${partner.label}; ${partner.kind}): ${nonnegative(exp.share) && exp.share <= 1 ? (exp.share * 100).toFixed(1) + '%' : 'unknown share'} excluded from country comparison${seen.has(exp.partnerIso2) ? ' as a duplicate country area; not added to avoid overlapping customs areas' : ''}`);
+      continue;
+    }
     seen.add(exp.partnerIso2);
     const sharePct = nonnegative(exp.share) && exp.share <= 1 ? exp.share * 100 : null;
     const shareReference = `share-${selection.countryCode}-${hs4}-${exp.partnerIso2}`;
@@ -104,9 +116,18 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
       : routeState === 'exposed'
         ? 'Modeled route includes the selected blocked chokepoint. A downstream detour does not establish an origin bypass.'
         : 'Selected chokepoint is absent from the modeled path. This supports investigating the origin, not a safe-route or availability conclusion.';
-    candidates.push({ origin: exp.partnerIso2, shareReference, sharePct, routeIds: route.routeIds,
+    candidates.push({ origin: exp.partnerIso2, partnerCode: exp.partnerCode, partnerScope: normalizeComtradePartner(exp.partnerCode).note, shareReference, sharePct, routeIds: route.routeIds,
       transitChokepoints: route.transitChokepoints.map(cp => cp.chokepointId), affectedChokepoints, routeState, reason, constraints });
   }
+  const displayedShare = candidates.reduce((sum, c) => sum + (c.sharePct ?? 0), 0);
+  coverage.push(`Displayed origins cover ${displayedShare.toFixed(1)}% of the stored import-value denominator. ${Math.max(0, 100 - displayedShare).toFixed(1)}% is not represented by displayed usable shares (including unlisted origins and excluded or invalid rows; rounded shares). Shares are not renormalized.`);
+  coverage.push(...excluded);
+  coverage.push(`Modeled routes: ${candidates.filter(c => c.routeState !== 'unknown').length}/${candidates.length} displayed origins. Unknown paths remain unresolved; modeled chokepoints are an unordered set, not a shipment sequence.`);
+  caveats.push(product?.denominatorBasis === 'reported_world'
+    ? 'Shares use the reported World import total for this heading and observation year. Only the stored leading origins are available; unreported trade can affect coverage.'
+    : product?.denominatorBasis === 'observed_partners'
+      ? 'Shares use the sum of observed partner values, without a reported World total. Only the stored leading origins are available; preview limits and unreported trade can affect coverage.'
+      : 'Only the stored leading origins are available. The stored denominator is not independently verified against a complete World total; preview limits and unreported trade can affect coverage.');
   const order = { not_on_modeled_route: 0, unknown: 1, exposed: 2 };
   candidates.sort((a, b) => order[a.routeState] - order[b.routeState] || (b.sharePct ?? -1) - (a.sharePct ?? -1) || a.origin.localeCompare(b.origin));
   const candidate = candidates.find(c => c.routeState !== 'exposed' && c.sharePct !== null && c.sharePct > 0);
@@ -120,7 +141,7 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
       : candidates.every(c => c.routeState === 'exposed') ? 'Every modeled candidate route includes the selected blocked chokepoint.'
         : 'No positive recorded share supports an alternative origin.';
   const action = candidate ? {
-    text: `Investigate recorded ${candidate.origin} supply for ${selection.countryName}'s ${commodity.label} question. ${candidate.reason}`,
+    text: `Validate ${candidate.origin}'s recorded HS ${hs4} basket trade (${commodity.basketLabel}) before investigating ${selection.countryName}'s ${commodity.label} needs. The share is not a commodity-specific supply estimate. ${candidate.reason}`,
     references: [candidate.shareReference], constraint: constraints,
     trigger: `Reassess when ${candidate.origin}'s actual route, usable capacity, qualification, price or delivery date is confirmed, or the recorded trade evidence changes.`,
   } : {
@@ -128,7 +149,7 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
     references: evidence.map(e => e.id), constraint: `${missing} ${constraints}`,
     trigger: 'Reassess when positive bilateral supplier evidence and a usable origin route are available, or the selected chokepoint reopens.',
   };
-  return { kind: 'commodity', selection: { ...selection }, capturedAt: capture.retrievedAt, commodity: commodity.label, hs4, capture,
+  return { kind: 'commodity', selection: { ...selection }, capturedAt: capture.retrievedAt, commodity: commodity.label, basket: commodity.basketLabel, coverage, hs4, capture,
     evidence, candidates, context, caveats,
     ordering: 'Investigation order: selected chokepoint absent from modeled path, unknown route, then exposed route; within each group, descending recorded import-value share. This is not a supplier recommendation score.', action };
 }
