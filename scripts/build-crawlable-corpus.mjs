@@ -26,6 +26,11 @@ import {
   USE_CASES_CONTENT_VERSION,
   writeUseCasesSection,
 } from './build-use-cases.mjs';
+import {
+  ACCURACY_CONTENT_VERSION,
+  ACCURACY_PAGE_PATH,
+  writeAccuracySection,
+} from './build-accuracy-page.mjs';
 import { buildSourceCatalog, buildSourcePages, renderSourcesIndex, sourceCardAnchors } from './crawlable-sources-page.mjs';
 import { sourceOriginFilterValue } from './source-origin.mjs';
 import {
@@ -208,6 +213,8 @@ const CHOKEPOINTS_INDEX_DATASET_DOWNLOAD = 'status.json';
 const CHOKEPOINT_DATASET_DOWNLOAD = 'reference.json';
 const CRISIS_DATASET_DOWNLOAD = 'tracker.json';
 const CONVERGENCE_DATASET_DOWNLOAD = 'reference.json';
+const ACCURACY_DATASET_DOWNLOAD = 'scorecard.json';
+const ACCURACY_PAGE_SOURCE_PATH = 'scripts/build-accuracy-page.mjs';
 const DATA_CATALOG_FRAGMENT = '#data-catalog';
 // Role filler for Dataset.creator / DataCatalog.publisher. The `@id` folds every
 // occurrence into the canonical Organization declared on welcome.html (#7459b),
@@ -322,6 +329,7 @@ export const GENERATED_DIRS = [
   'research',
   'sources',
   'use-cases',
+  'accuracy',
 ];
 
 const MONTHS = [
@@ -1813,6 +1821,13 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
     USE_CASES_CONTENT_VERSION,
     gitFileLastmod(rootDir, 'scripts/build-use-cases.mjs'),
   );
+  // The pulse folds in because the scorecard the page publishes is captured by
+  // the same freeze: a new capture changes every number on the page.
+  const accuracyLastmod = laterDate(
+    ACCURACY_CONTENT_VERSION,
+    gitFileLastmod(rootDir, ACCURACY_PAGE_SOURCE_PATH),
+    livePulse.capturedAt,
+  );
   const comparisonsLastmod = comparisonPageLastmod({
     contentVersion: COMPARISONS_CONTENT_VERSION,
     pathLastmods: COMPARISON_PAGE_LASTMOD_PATHS.map((path) => gitFileLastmod(rootDir, path)),
@@ -1861,6 +1876,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
       crisisRegistry: CRISIS_REGISTRY_PATH,
       researchReports: RESEARCH_REPORTS_INDEX_PATH,
       useCases: 'scripts/build-use-cases.mjs',
+      accuracy: ACCURACY_PAGE_SOURCE_PATH,
       comparisons: 'scripts/build-comparison-pages.mjs',
       sourceAttributionManifest: SOURCE_ATTRIBUTION_MANIFEST_PATH,
       sourcePageRenderer: SOURCE_PAGE_RENDERER_PATH,
@@ -1880,6 +1896,7 @@ export async function loadCorpusData({ rootDir = DEFAULT_ROOT, livePulseSnapshot
       crises: crisesLastmod,
       research: researchLastmod,
       useCases: useCasesLastmod,
+      accuracy: accuracyLastmod,
       comparisons: comparisonsLastmod,
       sources: sourcesLastmod,
     },
@@ -2056,6 +2073,7 @@ function pageDocument({
         <a href="/crises/">Crises</a>
         <a href="/tools/">Live tools</a>
         <a href="/research/">Research</a>
+        <a href="/accuracy/">Accuracy</a>
         <a href="/use-cases/">Use cases</a>
         <a href="/reference/changelog/">Changelog</a>
         <a href="/blog/glossary/">Glossary</a>`;
@@ -2261,6 +2279,7 @@ ${ciiRanking.entries.map((entry) => `            <tr data-cii-country="${escapeH
       <h2>What the CII measures</h2>
       <p>CII combines a 40% structural baseline with 60% live event pressure. The event score weights conflict at 30%, unrest at 25%, information at 25%, and security at 20%. It also applies bounded boosts and conflict or advisory floors. Read the <a href="/docs/methodology/cii-risk-scores">CII ${escapeHtml(ciiRanking.methodologyVersion)} methodology</a> before using a score in an analysis.</p>
       <p>CII measures short-term stress. The separate <a href="/countries/">Country Resilience Index</a> measures longer-term structural capacity across 196 countries. Do not combine the scores.</p>
+      <p>CII is a current-conditions score, not a forecast. Where World Monitor does forecast, the graded record is published on the <a href="/accuracy/">forecast accuracy scorecard</a> with its Brier scores, calibration and sample sizes.</p>
       <a class="cta" href="${escapeHtml(withUtmSource(absoluteUrl(baseUrl, '/dashboard'), 'seo-cii'))}">Open the live CII panel in World Monitor →</a>
       <p class="source">Source: ${escapeHtml(snapshotPath)}. Published ${escapeHtml(prettyDate(capturedAt))}. Current results: <code>/api/intelligence/v1/get-risk-scores</code>.</p>`;
   return pageDocument({
@@ -3683,10 +3702,10 @@ ${renderCountryDevelopments({ countryCode: country.code, countryName: country.na
 ${analysis.html}
 ${renderRelatedChokepoints(relatedChokepoints)}
 ${analysis.readingGuide ? `      <h2>How to use this evidence</h2>
-      <p>${escapeHtml(analysis.readingGuide)} <a href="/docs/methodology/country-resilience-index">Full CRI method</a> · <a href="/docs/corrections">revision log</a>.</p>` : `      <h2>How to read this page</h2>
+      <p>${escapeHtml(analysis.readingGuide)} <a href="/docs/methodology/country-resilience-index">Full CRI method</a> · <a href="/docs/corrections">revision log</a> · <a href="/accuracy/">forecast accuracy scorecard</a>.</p>` : `      <h2>How to read this page</h2>
       <p>The 0-100 index records the ${escapeHtml(prettyDate(capturedAt))} snapshot under ${escapeHtml(methodologyFormula)}. See the <a href="/docs/methodology/country-resilience-index">Country Resilience Index methodology</a> for dimensions, sources and confidence rules. Published revisions that affect ${escapeHtml(country.name)} are in the <a href="/docs/corrections">corrections log</a>.</p>
       <p class="snapshot-note">${escapeHtml(snapshotNote)}</p>
-      <p>Use this dated reference with the live map for active alerts, conflict, market and energy signals.</p>`}
+      <p>Use this dated reference with the live map for active alerts, conflict, market and energy signals. Neither score on this page is a forecast; where World Monitor does forecast, the graded record is on the <a href="/accuracy/">forecast accuracy scorecard</a>.</p>`}
       <p class="source">Download: <a href="${escapeHtml(datasetDownloadHref(path, COUNTRY_DATASET_DOWNLOAD))}">${COUNTRY_DATASET_DOWNLOAD}</a>. Source: ${escapeHtml(snapshotPath)}. Captured ${escapeHtml(capturedAt)}. Methodology: <a href="/docs/methodology/country-resilience-index">Country Resilience Index</a>.</p>`;
   const coreTitle = ciiEntry
     ? `${country.name} Instability Index & Country Risk`
@@ -4602,7 +4621,7 @@ ${snapshotSection}
       <p>${escapeHtml(crisis.coverage.map((country) => `${country.name} (${country.code})`).join(', '))}. Events outside this list are not included in the live totals on this page.</p>
 ${renderRelatedChokepoints(relatedChokepoints)}
       <h2>How to read this tracker</h2>
-      <p>Use these monthly country summaries as a bounded pulse, then inspect the dashboard for event-level context, map layers, and other independent signals. The figures are not forecasts and should not be interpreted as a complete casualty or incident ledger.</p>
+      <p>Use these monthly country summaries as a bounded pulse, then inspect the dashboard for event-level context, map layers, and other independent signals. The figures are not forecasts and should not be interpreted as a complete casualty or incident ledger. World Monitor's forecasts are graded separately, and that record is published on the <a href="/accuracy/">forecast accuracy scorecard</a>.</p>
       <p class="source">Download: <a href="${escapeHtml(datasetDownloadHref(path, CRISIS_DATASET_DOWNLOAD))}">${CRISIS_DATASET_DOWNLOAD}</a>. Scope source: <a href="${CRISIS_REGISTRY_URL}">${CRISIS_REGISTRY_PATH}</a>. Maintained metrics: HAPI/HDX humanitarian conflict summaries from the UN OCHA <a href="https://data.humdata.org/hapi">Humanitarian API</a>.</p>`;
   const coveragePlaces = crisis.coverage.map((country) => ({
     '@type': 'Country',
@@ -5147,6 +5166,12 @@ function buildManifest({ data, baseUrl, changelogPageCount }) {
         index: '/use-cases/',
         routes: USE_CASE_PAGES.map((page) => page.path),
       },
+      accuracy: {
+        count: 1,
+        index: ACCURACY_PAGE_PATH,
+        routes: [],
+        sourceCapturedAt: data.livePulse.capturedAt,
+      },
       comparisons: {
         count: COMPARISON_PAGES.length + 1,
         index: '/compare/',
@@ -5419,6 +5444,25 @@ export async function buildCorpus({
     baseUrl,
     lastmod: data.lastmod.useCases,
     tpl: { escapeHtml, absoluteUrl, breadcrumbLd, withUtmSource, pageDocument },
+  });
+
+  writeAccuracySection({
+    outDir,
+    baseUrl,
+    lastmod: data.lastmod.accuracy,
+    tpl: { escapeHtml, absoluteUrl, breadcrumbLd, withUtmSource, pageDocument },
+    section: data.livePulse.forecastScorecard ?? null,
+    snapshotPath: data.sources.livePulseSnapshot,
+    dataCatalog: dataCatalogLd(baseUrl),
+    dataset: {
+      filename: ACCURACY_DATASET_DOWNLOAD,
+      href: datasetDownloadHref(ACCURACY_PAGE_PATH, ACCURACY_DATASET_DOWNLOAD),
+      file: datasetDownloadFile(ACCURACY_PAGE_PATH, ACCURACY_DATASET_DOWNLOAD),
+      download: dataDownload(
+        absoluteUrl(baseUrl, datasetDownloadHref(ACCURACY_PAGE_PATH, ACCURACY_DATASET_DOWNLOAD)),
+      ),
+      catalog: includedInDataCatalog(baseUrl),
+    },
   });
 
   writeComparisonPages({
