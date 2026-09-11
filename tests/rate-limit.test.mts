@@ -410,6 +410,31 @@ describe('rate-limit fail-open / fail-closed posture (#3531 M9)', () => {
     assert.equal(handlerCalls, 0, 'the gateway must reject before route execution');
   });
 
+  it('anonymous crypto quote requests fail closed before cache or provider I/O', async () => {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    process.env.WM_SESSION_SECRET = 'synthetic-crypto-session-secret-at-least-32-bytes';
+    __resetRateLimitForTest();
+    const { issueSessionToken } = await import('../api/_session.js');
+    const { createDomainGateway } = await import('../server/gateway.ts');
+    const { createMarketServiceRoutes } = await import('../src/generated/server/worldmonitor/market/v1/service_server.ts');
+    const { marketHandler } = await import('../server/worldmonitor/market/v1/handler.ts');
+    const token = (await issueSessionToken()).token;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input) => {
+      calls.push(String(input));
+      return new Response('unexpected I/O', { status: 500 });
+    }) as typeof fetch;
+    const gateway = createDomainGateway(createMarketServiceRoutes(marketHandler));
+    const response = await gateway(new Request(
+      'https://worldmonitor.app/api/market/v1/list-crypto-quotes?ids=dogecoin',
+      { headers: { Origin: 'https://worldmonitor.app', 'X-WorldMonitor-Key': token, 'x-real-ip': '203.0.113.7' } },
+    ));
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('X-RateLimit-Mode'), 'degraded');
+    assert.deepEqual(calls, [], 'no cache or provider transport reached');
+  });
+
   it('paid-provider market routes each have explicit fail-closed policies (#6236)', async () => {
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -418,6 +443,7 @@ describe('rate-limit fail-open / fail-closed posture (#3531 M9)', () => {
       ['/api/market/v1/analyze-stock', { limit: 60, window: '60 s' }],
       ['/api/market/v1/backtest-stock', { limit: 60, window: '60 s' }],
       ['/api/market/v1/get-insider-transactions', { limit: 60, window: '60 s' }],
+      ['/api/market/v1/list-crypto-quotes', { limit: 60, window: '60 s' }],
       ['/api/market/v1/get-country-stock-index', { limit: 30, window: '60 s' }],
       ['/api/economic/v1/list-world-bank-indicators', { limit: 30, window: '60 s' }],
     ] as const);
