@@ -70,6 +70,17 @@ function runProducer(input: Record<string, any>, mode = 'complete', now = NOW, c
             : mode === 'cache-read-type' ? { result: 42 } : { error: 'ERR read failed' };
           return Response.json(replies);
         }
+        if (mode === 'canonical-expired' && u.pathname === '/pipeline'
+          && JSON.parse(init.body).some(([verb]) => verb === 'EXPIRE')) {
+          state.redis.delete('${CANONICAL}');
+        }
+        if (mode === 'canonical-unconfirmed' && u.pathname === '/pipeline'
+          && JSON.parse(init.body).some(([verb]) => verb === 'EXPIRE')) {
+          const response = await state.fetchImpl(url, init);
+          const results = await response.json();
+          results[0] = {};
+          return Response.json(results);
+        }
         if (u.pathname === '/multi-exec') {
           if (mode === 'transaction-rejected') return Response.json({ error: 'write rejected' }, { status: 503 });
           const response = await state.fetchImpl(url, init);
@@ -472,5 +483,17 @@ for (const mode of ['transaction-rejected', 'transaction-ambiguous']) {
     assert.match(result.logs, /Persistence pending/);
     if (mode === 'transaction-rejected') assert.deepEqual(result.redis[CANONICAL], input[CANONICAL]);
     else assert.equal(result.redis[CANONICAL].length, 174, 'write can commit despite an unconfirmed response');
+  });
+}
+
+for (const mode of ['canonical-expired', 'canonical-unconfirmed']) {
+  test(`${mode} during a partial run is not reported as retained publication`, () => {
+    const input = fixtures();
+    const result = runProducer(input, mode);
+    assert.match(result.error, /Incomplete PortWatch coverage/);
+    if (mode === 'canonical-expired') assert.equal(result.redis[CANONICAL], undefined);
+    else assert.deepEqual(result.redis[CANONICAL], input[CANONICAL]);
+    assert.match(result.logs, /Recovery state saved; canonical retention unconfirmed \(168 countries at run start\); usable coverage 60\/174; full publication blocked/);
+    assert.doesNotMatch(result.logs, /canonical list retained at/);
   });
 }

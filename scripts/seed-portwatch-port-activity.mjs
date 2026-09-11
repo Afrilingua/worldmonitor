@@ -7,6 +7,7 @@ import {
   acquireLockSafely,
   releaseLock,
   extendExistingTtl,
+  extendExistingTtlDetailed,
   logSeedResult,
   readSeedSnapshot,
   resolveProxyForConnect,
@@ -1773,8 +1774,10 @@ export async function main() {
       ? { ...buildPortActivityMetaPayload({ countryData, coverage: { ...coverage, status: 'complete', completionRatio: 1 } }), sourceState: 'ok' }
       : buildPortActivityFailureMeta(previousMeta, { coverage });
 
+    let canonicalTtlExtended = false;
     if (!canonicalAdvances) {
-      await extendExistingTtl([CANONICAL_KEY, META_KEY, ...prevCountryKeys], TTL);
+      const retention = await extendExistingTtlDetailed([CANONICAL_KEY, META_KEY, ...prevCountryKeys], TTL);
+      canonicalTtlExtended = retention.extendedKeys.includes(CANONICAL_KEY);
       console.error(
         `  INCOMPLETE RUN: ${countryData.size}/${coverage.target} usable countries; ` +
         `${freshFetchedCount} fetched, ${cacheHitCount} cache-fresh, ${servedStaleCount} stale-served, ` +
@@ -1792,11 +1795,14 @@ export async function main() {
       canonicalAdvances,
     });
     failureRecorded = !canonicalAdvances;
-    const canonicalState = canonicalAdvances
-      ? `canonical list advanced to ${countries.length} countries`
-      : prevIso2List === null
-        ? 'no prior canonical list'
-        : `canonical list retained at ${prevIso2List.length} countries`;
+    let canonicalState = 'no prior canonical list';
+    if (canonicalAdvances) {
+      canonicalState = `canonical list advanced to ${countries.length} countries`;
+    } else if (prevIso2List !== null) {
+      canonicalState = canonicalTtlExtended
+        ? `canonical list retained at ${prevIso2List.length} countries`
+        : `canonical retention unconfirmed (${prevIso2List.length} countries at run start)`;
+    }
     console.log(
       `  ${canonicalAdvances ? 'State saved' : 'Recovery state saved'}; ${canonicalState}; ` +
       `usable coverage ${countryData.size}/${coverage.target}; ` +

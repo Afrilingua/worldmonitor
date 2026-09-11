@@ -384,7 +384,9 @@ countries and unresolved refresh failures still block a healthy publication.
 Run logs separate **usable country payloads** from **canonical-list membership**.
 Batch progress describes data assembled in memory; persistence is still pending.
 Only after the Redis transaction is confirmed does the seeder report saved state
-and whether the canonical list advanced or was retained. For example:
+and whether the canonical list advanced or its TTL extension confirmed retention.
+If retention cannot be confirmed, the log labels the starting count as historical
+and reports `canonical retention unconfirmed`. For example:
 
 ```text
 Recovery state saved; canonical list retained at 60 countries; usable coverage 150/174; full publication blocked; 0 unresolved refresh failures
