@@ -1709,12 +1709,9 @@ export const markFinalizeRecovered = internalMutation({
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
- * Soft-discard. Marks the run failed and rotates `waveLabelOffset` so the
- * NEXT wave doesn't reuse the discarded label. Does NOT physically delete
- * `wavePickedContacts` rows — the daily cleanup cron does that in chunks.
- *
- * Operator must inspect Resend dashboard separately for the segment +
- * any partially-created broadcast.
+ * Discard a terminal pre-broadcast failure and schedule chunked cleanup.
+ * Active and finalize-phase runs must use their recovery path: a send may
+ * already be in flight even when its completion has not been recorded.
  */
 export const discardWaveRun = internalMutation({
   args: {
@@ -1727,6 +1724,13 @@ export const discardWaveRun = internalMutation({
       .withIndex("by_runId", (q) => q.eq("runId", runId))
       .unique();
     if (!run) throw new Error(`[discardWaveRun] no run ${runId}`);
+    if (!canUnstampAbandonedWave(run)) {
+      throw new Error(
+        `[discardWaveRun] cannot discard run ${runId} in status=${run.status} ` +
+        `substatus=${run.failureSubstatus ?? "<none>"}; only terminal pre-broadcast failures can be discarded. ` +
+        `Use resumeStalledWaveRun or resumeFinalizeWaveRun; use markFinalizeRecovered when the provider confirms the broadcast was sent.`,
+      );
+    }
     const config = await ctx.db
       .query("broadcastRampConfig")
       .withIndex("by_key", (q) => q.eq("key", "current"))
@@ -1912,7 +1916,12 @@ export const _cleanupDiscardedWavePickedContacts = internalMutation({
       .query("waveRuns")
       .withIndex("by_runId", (q) => q.eq("runId", runId))
       .unique();
-    const waveLabel = run?.waveLabel;
+    // Recheck in the write transaction; callers and queued cleanup jobs may
+    // hold stale state. A recorded broadcast makes prior delivery uncertain.
+    if (!run || !canUnstampAbandonedWave(run)) {
+      return { deleted: 0, unstamped: 0, hasMore: false };
+    }
+    const waveLabel = run.waveLabel;
 
     const rows = await ctx.db
       .query("wavePickedContacts")
@@ -2050,6 +2059,17 @@ const TERMINAL_FAILURE_SUBSTATUSES = [
   "batch-failure-rate-exceeded",
 ] as const;
 
+function canUnstampAbandonedWave(run: {
+  status: string;
+  broadcastId?: string;
+  failureSubstatus?: string;
+}): boolean {
+  return run.status === "failed"
+    && run.broadcastId === undefined
+    && run.failureSubstatus !== undefined
+    && (TERMINAL_FAILURE_SUBSTATUSES as readonly string[]).includes(run.failureSubstatus);
+}
+
 /** Max failed runs to consider per cleanup cron tick. Bounded so a
  *  long-lived deployment with many discarded waves doesn't load the
  *  whole table into memory at once. The cron runs daily — at 100/day,
@@ -2065,14 +2085,7 @@ export const _listFailedWaveRunsForCleanup = internalQuery({
       .withIndex("by_status", (q) => q.eq("status", "failed"))
       .take(CLEANUP_CANDIDATES_PER_TICK);
     return failed
-      .filter(
-        (r) =>
-          r.updatedAt < cutoff &&
-          r.failureSubstatus !== undefined &&
-          (TERMINAL_FAILURE_SUBSTATUSES as readonly string[]).includes(
-            r.failureSubstatus,
-          ),
-      )
+      .filter((r) => r.updatedAt < cutoff && canUnstampAbandonedWave(r))
       .map((r) => r.runId);
   },
 });
