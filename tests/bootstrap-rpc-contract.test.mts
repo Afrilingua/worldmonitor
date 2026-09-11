@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test, { type TestContext } from 'node:test';
+import { load as loadYaml } from 'js-yaml';
 import { createRedisFetch } from './helpers/fake-upstash-redis.mts';
 import rpc from '../api/infrastructure/v1/[rpc].ts';
 import bootstrap from '../api/bootstrap.js';
@@ -130,6 +131,9 @@ test('RPC still requires a session and does not expose arbitrary Redis keys', as
 test('published RPC query schema documents the single-key selector', () => {
   const spec = JSON.parse(readFileSync(new URL('../docs/api/InfrastructureService.openapi.json', import.meta.url), 'utf8'));
   const parameters = spec.paths['/api/infrastructure/v1/get-bootstrap-data'].get.parameters;
+  const yaml = loadYaml(readFileSync(new URL('../docs/api/InfrastructureService.openapi.yaml', import.meta.url), 'utf8')) as typeof spec;
+  const yamlKeys = yaml.paths['/api/infrastructure/v1/get-bootstrap-data'].get.parameters.find((parameter: { name: string }) => parameter.name === 'keys');
+  assert.deepEqual(yamlKeys.schema, { type: 'array', maxItems: 1, items: { type: 'string', minLength: 1 } });
   const keys = parameters.find((parameter: { name: string }) => parameter.name === 'keys');
   assert.equal(keys.schema.maxItems, 1);
   assert.equal(keys.schema.items.minLength, 1);

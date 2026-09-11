@@ -12738,6 +12738,10 @@ paths:
                       - "example"
                   schema:
                     type: array
+                    maxItems: 1
+                    items:
+                      type: string
+                      minLength: 1
                 - name: jmespath
                   in: query
                   description: |-
