@@ -620,6 +620,17 @@ describe('marketingBeforeSend — injected eval blocked by CSP (WORLDMONITOR-129
     assert.equal(marketingBeforeSend(kept), kept);
   });
 
+  // The same control for our INLINE first-party scripts (welcome.html's WebMCP
+  // bootstrap, prerender.mjs's DEFERRED_STYLES_SCRIPT): an eval they issue puts
+  // the document URL on the stack below the `<anonymous>` frame, and
+  // `hasFirstParty` does not count document frames (PR #8022 review).
+  it('keeps the block when the caller is an inline script on the marketing document', () => {
+    for (const doc of ['https://www.worldmonitor.app/', 'https://www.worldmonitor.app/pro']) {
+      const kept = evalEvent(CSP_EVAL_MESSAGE, ['<anonymous>', doc]);
+      assert.equal(marketingBeforeSend(kept), kept);
+    }
+  });
+
   // Positive control for the evaluated-frame requirement: no frames at all is
   // absence of evidence, not proof of injection.
   it('keeps a frameless block', () => {

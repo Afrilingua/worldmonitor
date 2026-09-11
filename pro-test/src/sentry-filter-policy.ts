@@ -584,11 +584,15 @@ export function marketingBeforeSend<T extends PolicyEvent>(event: T): T | null {
   // the same gap that let WORLDMONITOR-15/-102/-108/-117 through.
   //
   // Frame-gated rather than copied into `MARKETING_IGNORE_ERRORS` (see
-  // CSP_EVAL_BLOCK). Requiring an `<anonymous>` frame keeps a frameless event
-  // reporting, since absence of first-party frames alone is not evidence of
-  // injection; `!hasFirstParty` keeps a block that rides a `/pro/assets/*.js`
-  // frame reporting.
-  if (!hasFirstParty
+  // CSP_EVAL_BLOCK), and gated on the WHOLE stack being `<anonymous>` or infra
+  // rather than on `!hasFirstParty`. `hasFirstParty` does not count document
+  // frames, and this surface ships executable inline script (see
+  // MARKETING_DOCUMENT_FRAME): an eval issued by welcome.html's bootstrap puts
+  // the document URL below the `<anonymous>` frame, and that first-party CSP
+  // break must page (PR #8022 review). Requiring an `<anonymous>` frame keeps a
+  // frameless event reporting, since an empty stack is not evidence of
+  // injection.
+  if (nonInfraFrames.length === 0
       && CSP_EVAL_BLOCK.test(msg)
       && frames.some((f) => f.filename === '<anonymous>')) return null;
 
