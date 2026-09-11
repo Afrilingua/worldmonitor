@@ -313,14 +313,15 @@ async function storeNewTokens(
   clientId: string,
   scope: string,
   familyId: string,
+  kind?: 'user_key',
 ): Promise<boolean> {
   const results = await pipeline([
-    ['SET', `oauth:token:${accessUuid}`, JSON.stringify(apiKeyHash), 'EX', TOKEN_TTL_SECONDS],
+    ['SET', `oauth:token:${accessUuid}`, JSON.stringify(kind === 'user_key' ? { kind, api_key_hash: apiKeyHash } : apiKeyHash), 'EX', TOKEN_TTL_SECONDS],
     ['SET', accessTokenFamilyKey(accessUuid), JSON.stringify(familyId), 'EX', TOKEN_TTL_SECONDS],
     [
       'SET',
       `oauth:refresh:${refreshUuid}`,
-      JSON.stringify({ client_id: clientId, api_key_hash: apiKeyHash, scope, family_id: familyId }),
+      JSON.stringify({ kind, client_id: clientId, api_key_hash: apiKeyHash, scope, family_id: familyId }),
       'EX',
       REFRESH_TTL_SECONDS,
     ],
@@ -426,7 +427,7 @@ interface CodeDataLegacy {
   code_challenge: string;
   scope?: string;
   api_key_hash: string;
-  kind?: undefined;
+  kind?: 'user_key';
 }
 
 interface RefreshDataPro {
@@ -443,7 +444,7 @@ interface RefreshDataLegacy {
   api_key_hash: string;
   scope: string;
   family_id: string;
-  kind?: undefined;
+  kind?: 'user_key';
 }
 
 // ---------------------------------------------------------------------------
@@ -528,8 +529,7 @@ async function handleAuthorizationCode(
   const refreshUuid = deps.randomUuid();
   const familyId = deps.randomUuid();
 
-  // Branch by code-record kind. Pro records carry `userId` + `mcpTokenId`;
-  // legacy records carry the `api_key_hash` SHA-256.
+  // Pro records carry `userId` + `mcpTokenId`; API-key records carry a hash.
   if (codeData.kind === 'pro') {
     const scope = codeData.scope ?? 'mcp_pro';
     const stored = await storeProTokens(
@@ -554,7 +554,7 @@ async function handleAuthorizationCode(
     });
   }
 
-  // Legacy env-key path — unchanged
+  // Preserve dashboard-key identity; only operator keys use the legacy shape.
   const scope = codeData.scope ?? 'mcp';
   const stored = await storeNewTokens(
     deps.redisPipeline,
@@ -564,6 +564,7 @@ async function handleAuthorizationCode(
     clientId,
     scope,
     familyId,
+    codeData.kind,
   );
   if (!stored) {
     return jsonResp({ error: 'server_error', error_description: 'Token storage failed' }, 500);
@@ -770,7 +771,7 @@ async function handleRefreshToken(
     });
   }
 
-  // Legacy env-key path — unchanged
+  // Preserve dashboard-key identity across refresh rotation.
   const scope = refreshData.scope ?? 'mcp';
   const stored = await storeNewTokens(
     deps.redisPipeline,
@@ -780,6 +781,7 @@ async function handleRefreshToken(
     clientId,
     scope,
     refreshData.family_id,
+    refreshData.kind,
   );
   if (!stored) {
     await restoreRefreshAttempt(

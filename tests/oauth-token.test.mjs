@@ -286,6 +286,36 @@ function makeReq(grantType, params) {
   });
 }
 
+it('preserves dashboard key identity through code exchange and refresh', async () => {
+  const { redis, deps } = makeDeps();
+  const keyHash = await sha256Hex(`wm_${'a'.repeat(40)}`);
+  redis.store.set('oauth:code:dashboard', {
+    kind: 'user_key', api_key_hash: keyHash, client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI, code_challenge: CODE_CHALLENGE, scope: 'mcp',
+  });
+  redis.store.set(`oauth:client:${CLIENT_ID}`, CLIENT_RECORD);
+  const response = await tokenHandler(makeReq('authorization_code', {
+    code: 'dashboard', code_verifier: CODE_VERIFIER,
+    client_id: CLIENT_ID, redirect_uri: REDIRECT_URI,
+  }), deps);
+  assert.equal(response.status, 200);
+  const tokens = await response.json();
+  assert.deepEqual(JSON.parse(redis.store.get(`oauth:token:${tokens.access_token}`)), {
+    kind: 'user_key', api_key_hash: keyHash,
+  });
+  const refresh = JSON.parse(redis.store.get(`oauth:refresh:${tokens.refresh_token}`));
+  assert.equal(refresh.kind, 'user_key');
+  const rotated = await tokenHandler(makeReq('refresh_token', {
+    refresh_token: tokens.refresh_token, client_id: CLIENT_ID,
+  }), deps);
+  assert.equal(rotated.status, 200);
+  const next = await rotated.json();
+  assert.deepEqual(JSON.parse(redis.store.get(`oauth:token:${next.access_token}`)), {
+    kind: 'user_key', api_key_hash: keyHash,
+  });
+  assert.equal(JSON.parse(redis.store.get(`oauth:refresh:${next.refresh_token}`)).family_id, refresh.family_id);
+});
+
 describe('OAuth Redis refresh-attempt production contract', () => {
   it('atomically consumes a refresh token and creates a short-lived attempt', async () => {
     const realFetch = globalThis.fetch;
