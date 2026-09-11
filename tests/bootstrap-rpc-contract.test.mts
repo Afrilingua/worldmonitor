@@ -117,4 +117,3 @@ test('RPC still requires a session and does not expose arbitrary Redis keys', as
   assert.equal(unknown.status, 400);
   assert.deepEqual(reads, []);
 });
-
