@@ -120,7 +120,7 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
       transitChokepoints: route.transitChokepoints.map(cp => cp.chokepointId), affectedChokepoints, routeState, reason, constraints });
   }
   const displayedShare = candidates.reduce((sum, c) => sum + (c.sharePct ?? 0), 0);
-  coverage.push(`Displayed origins cover ${displayedShare.toFixed(1)}% of the stored import-value denominator. ${Math.max(0, 100 - displayedShare).toFixed(1)}% is not represented by displayed usable shares (including unlisted origins and excluded or invalid rows; rounded shares). Shares are not renormalized.`);
+  coverage.push(product ? `Displayed origins cover ${displayedShare.toFixed(1)}% of the stored import-value denominator. ${Math.max(0, 100 - displayedShare).toFixed(1)}% is not represented by displayed usable shares (including unlisted origins and excluded or invalid rows; rounded shares). Shares are not renormalized.` : 'Share coverage is unknown: no product denominator is available. Missing data is not zero trade.');
   coverage.push(...excluded);
   coverage.push(`Modeled routes: ${candidates.filter(c => c.routeState !== 'unknown').length}/${candidates.length} displayed origins. Unknown paths remain unresolved; modeled chokepoints are an unordered set, not a shipment sequence.`);
   caveats.push(product?.denominatorBasis === 'reported_world'

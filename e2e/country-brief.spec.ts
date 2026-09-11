@@ -589,7 +589,10 @@ for (const mobile of [false, true]) for (const theme of ['dark', 'light']) test(
       expect(snapshot.candidates.map((c: { origin: string }) => c.origin)).toEqual(['AU']);
       await expect(paper).toContainText('2023');
       await expect(paper).not.toContainText('hospital');
-    } else await expect(paper).toContainText('No recorded HS 2836 bilateral product evidence');
+    } else {
+      await expect(paper).toContainText('No recorded HS 2836 bilateral product evidence');
+      await expect(paper).toContainText('Share coverage is unknown: no product denominator is available');
+    }
     const files: Record<string, string> = {};
     for (const format of ['HTML', 'JSON']) {
       const event = page.waitForEvent('download');
