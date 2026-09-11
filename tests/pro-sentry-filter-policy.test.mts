@@ -588,6 +588,51 @@ describe('marketingBeforeSend — Safari-masked injected script (WORLDMONITOR-11
   });
 });
 
+describe('marketingBeforeSend — injected eval blocked by CSP (WORLDMONITOR-129)', () => {
+  // Verbatim production event: Edge 150 / Windows on `/pro`, an `onerror`
+  // capture whose only frames are two `<anonymous>:1` entries — a script
+  // evaluated by an extension, which our `script-src` (no 'unsafe-eval') refused.
+  const CSP_EVAL_MESSAGE = "Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self' 'strict-dynamic' 'nonce-wm-static-bootstrap'";
+  const evalEvent = (value: string, filenames: string[]): PolicyEvent => ({
+    exception: {
+      values: [{
+        type: 'EvalError',
+        value,
+        stacktrace: { frames: filenames.map((filename) => ({ filename })) },
+      }],
+    },
+  });
+
+  it('drops the CSP eval block raised from an evaluated script', () => {
+    assert.equal(marketingBeforeSend(evalEvent(CSP_EVAL_MESSAGE, ['<anonymous>', '<anonymous>'])), null);
+  });
+
+  it("drops Safari's phrasing of the same block", () => {
+    const safari = "Refused to evaluate a string as JavaScript because 'unsafe-eval' is not an allowed source of script in the following Content Security Policy directive: \"script-src 'self'\".";
+    assert.equal(marketingBeforeSend(evalEvent(safari, ['<anonymous>'])), null);
+  });
+
+  // Positive control for `!hasFirstParty`: if our own bundle ever reaches for
+  // eval or `new Function`, the CSP breaks that code path and it must page. It
+  // would ride a `/pro/assets/*.js` frame. Delete the gate and this goes red.
+  it('keeps the block when a marketing-bundle frame is on the stack', () => {
+    const kept = evalEvent(CSP_EVAL_MESSAGE, ['<anonymous>', '/pro/assets/index-a1b2c3.js']);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+
+  // Positive control for the evaluated-frame requirement: no frames at all is
+  // absence of evidence, not proof of injection.
+  it('keeps a frameless block', () => {
+    const kept = evalEvent(CSP_EVAL_MESSAGE, []);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+
+  it('keeps an unrelated error from an evaluated script', () => {
+    const kept = evalEvent('Invalid array length', ['<anonymous>']);
+    assert.equal(marketingBeforeSend(kept), kept);
+  });
+});
+
 describe('marketingBeforeSend — unparseable module (WORLDMONITOR-TS)', () => {
   // `action: null` means "no tags on the event at all". It must NOT be spelled
   // `undefined`: a default parameter fires on an explicit `undefined` argument,
