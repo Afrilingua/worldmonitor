@@ -435,6 +435,52 @@ describe('rate-limit fail-open / fail-closed posture (#3531 M9)', () => {
     assert.deepEqual(calls, [], 'no cache or provider transport reached');
   });
 
+  it('crypto quote requests stop at the 60/min budget before additional provider work', async () => {
+    const { installRedis } = await import('./helpers/fake-upstash-redis.mts');
+    const redis = installRedis({ 'market:crypto:v1': { quotes: [] } });
+    process.env.WM_SESSION_SECRET = 'synthetic-crypto-cap-secret-at-least-32-bytes';
+    __resetRateLimitForTest();
+    const { issueSessionToken } = await import('../api/_session.js');
+    const { createDomainGateway } = await import('../server/gateway.ts');
+    const { createMarketServiceRoutes } = await import('../src/generated/server/worldmonitor/market/v1/service_server.ts');
+    const { marketHandler } = await import('../server/worldmonitor/market/v1/handler.ts');
+    let providerCalls = 0;
+    let admissions = 0;
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).includes('coingecko.com')) {
+        providerCalls += 1;
+        return Response.json([{ id: 'budget-coin', name: 'Budget coin', symbol: 'bud', current_price: 1 }]);
+      }
+      const response = await redis.fetchImpl(input, init);
+      if (init?.body) {
+        const commands = JSON.parse(String(init.body));
+        if (Array.isArray(commands[0])) {
+          const results = await response.json();
+          for (let i = 0; i < commands.length; i += 1) {
+            if (String(commands[i][0]).toUpperCase() === 'EVALSHA') {
+              // The shared fake is always-allow. Model the storage reply for
+              // this route so the real SDK/gateway also exercise exhaustion.
+              results[i] = { result: [60 - ++admissions, 60] };
+            }
+          }
+          return Response.json(results);
+        }
+      }
+      return response;
+    }) as typeof fetch;
+    const token = (await issueSessionToken()).token;
+    const gateway = createDomainGateway(createMarketServiceRoutes(marketHandler));
+    const request = () => new Request('https://worldmonitor.app/api/market/v1/list-crypto-quotes?ids=budget-coin', {
+      headers: { Origin: 'https://worldmonitor.app', 'X-WorldMonitor-Key': token, 'x-real-ip': '203.0.113.8' },
+    });
+    for (let i = 0; i < 60; i += 1) assert.equal((await gateway(request())).status, 200);
+    assert.equal(providerCalls, 1, 'successful calls reuse the gap cache');
+    const blocked = await gateway(request());
+    assert.equal(blocked.status, 429);
+    assert.ok(Number(blocked.headers.get('Retry-After')) > 0);
+    assert.equal(providerCalls, 1, 'exhausted callers cannot cause provider work');
+  });
+
   it('paid-provider market routes each have explicit fail-closed policies (#6236)', async () => {
     delete process.env.UPSTASH_REDIS_REST_URL;
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
