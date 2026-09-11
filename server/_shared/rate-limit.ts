@@ -300,6 +300,10 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   '/api/news/v1/summarize-article': { limit: 30, window: '60 s' },
   '/api/news/v1/summarize-article-cache': { limit: 3000, window: '60 s' },
   '/api/intelligence/v1/classify-event': { limit: 600, window: '60 s' },
+  // Full Telegram bodies match the first-party feed's 60/min ceiling. Anonymous
+  // sessions remain IP-scoped; verified paid principals retain user identity.
+  // The endpoint registry fails closed so outages cannot lift this cap.
+  '/api/intelligence/v1/list-telegram-feed': { limit: 60, window: '60 s' },
   // LLM-backed situational deduction (imports callLlmReasoning) can drive
   // provider spend on cache misses, so it must fail closed on Redis outage
   // rather than inherit the global fail-open fallback. Mirror the sibling
