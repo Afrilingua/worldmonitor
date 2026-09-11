@@ -74,7 +74,7 @@ export async function listAirportDelays(
     let intlCoverage: IntlCoverage[] = [];
     let intlCoveredIatas = new Set<string>();
     try {
-      const cached = await getCachedJson(INTL_CACHE_KEY) as { alerts: AirportDelayAlert[]; coverage?: IntlCoverage[] } | null;
+      const cached = await getCachedJson(INTL_CACHE_KEY, true) as { alerts: AirportDelayAlert[]; coverage?: IntlCoverage[] } | null;
       if (cached && Array.isArray(cached.alerts)) {
         intlAlerts = cached.alerts;
         if (Array.isArray(cached.coverage)) {
