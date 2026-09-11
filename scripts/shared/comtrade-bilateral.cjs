@@ -1,7 +1,7 @@
-import strategic from './comtrade-strategic-products.json' with { type: 'json' };
-import commodities from './supply-vulnerability-commodities.json' with { type: 'json' };
-import { normalizeComtradePartner } from './comtrade-partners.mjs';
-import { recentPeriod } from './comtrade-period.mjs';
+const strategic = require('./comtrade-strategic-products.json');
+const commodities = require('./supply-vulnerability-commodities.json');
+const { normalizeComtradePartner } = require('./comtrade-partners.cjs');
+const { recentPeriod } = require('./comtrade-period.mjs');
 
 const labels = new Map();
 for (const p of strategic.products) {
@@ -10,17 +10,17 @@ for (const p of strategic.products) {
 for (const c of commodities.commodities) {
   for (const hs4 of c.hs4) labels.set(hs4, c.basketLabel);
 }
-export const HS4_CODES = [...labels.keys()];
-export const HS4_LABELS = Object.fromEntries(labels);
-export const MAX_HS4_CODES_PER_BATCH = 20;
-export const HS4_BATCHES = [HS4_CODES.slice(0, 20), HS4_CODES.slice(20)];
+const HS4_CODES = [...labels.keys()];
+const HS4_LABELS = Object.fromEntries(labels);
+const MAX_HS4_CODES_PER_BATCH = 20;
+const HS4_BATCHES = [HS4_CODES.slice(0, 20), HS4_CODES.slice(20)];
 if (HS4_CODES.length > MAX_HS4_CODES_PER_BATCH * 2) throw new Error('Bilateral catalogue exceeds the two-request budget');
 
 /**
  * @param {unknown} data
  * @returns {Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number}>}
  */
-export function parseRecords(data, maxRecords = Infinity) {
+function parseRecords(data, maxRecords = Infinity) {
   const records = /** @type {any} */ (data)?.data;
   if (!Array.isArray(records)) throw new Error('Malformed Comtrade data array');
   if (records.length >= maxRecords) throw new Error('Incomplete Comtrade response: record limit reached');
@@ -43,7 +43,7 @@ export function parseRecords(data, maxRecords = Infinity) {
  * @param {number} [fallbackYear] year to report when no record carries a usable period/refYear
  * @returns {Array<{hs4: string, description: string, totalValue: number, topExporters: Array<{partnerCode: number, partnerIso2: string, value: number, share: number}>, year: number}>}
  */
-export function groupByProduct(records, fallbackYear = Number(recentPeriod())) {
+function groupByProduct(records, fallbackYear = Number(recentPeriod())) {
   /** @type {Map<string, Map<string, {value: number, year: number}>>} */
   const byCode = new Map();
   for (const r of records) {
@@ -104,3 +104,10 @@ export function groupByProduct(records, fallbackYear = Number(recentPeriod())) {
   }
   return products.sort((a, b) => b.totalValue - a.totalValue);
 }
+
+exports.HS4_CODES = HS4_CODES;
+exports.HS4_LABELS = HS4_LABELS;
+exports.MAX_HS4_CODES_PER_BATCH = MAX_HS4_CODES_PER_BATCH;
+exports.HS4_BATCHES = HS4_BATCHES;
+exports.parseRecords = parseRecords;
+exports.groupByProduct = groupByProduct;

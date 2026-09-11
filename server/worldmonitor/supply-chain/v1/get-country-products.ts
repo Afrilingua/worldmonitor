@@ -2,8 +2,8 @@ import type {
   ServerContext, GetCountryProductsRequest, GetCountryProductsResponse, CountryProduct,
 } from '../../../../src/generated/server/worldmonitor/supply_chain/v1/service_server';
 import { ValidationError } from '../../../../src/generated/server/worldmonitor/supply_chain/v1/service_server';
-import { normalizeComtradeProducts } from '../../../../scripts/shared/comtrade-partners.mjs';
-import { HS4_CODES, HS4_LABELS } from '../../../../scripts/shared/comtrade-bilateral.mjs';
+import { normalizeComtradeProducts } from '../../../../scripts/shared/comtrade-partners.cjs';
+import { HS4_CODES, HS4_LABELS } from '../../../../scripts/shared/comtrade-bilateral.cjs';
 import { isCallerPremium } from '../../../_shared/premium-check';
 import { getCachedJson, readCachedJson } from '../../../_shared/redis';
 import { lazyFetchBilateralHs4 } from './_bilateral-hs4-lazy';

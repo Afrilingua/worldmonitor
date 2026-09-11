@@ -1,8 +1,8 @@
-import registry from './comtrade-partners.json' with { type: 'json' };
-import standardCodes from './un-to-iso2.json' with { type: 'json' };
+const registry = require('./comtrade-partners.json');
+const standardCodes = require('./un-to-iso2.json');
 
 /** Resolve provider semantics first; reporter overrides are not partner identities. */
-export function normalizeComtradePartner(code) {
+function normalizeComtradePartner(code) {
   const key = String(code ?? '');
   if (!/^\d{1,3}$/.test(key)) return { iso2: '', kind: 'unknown', label: 'Unknown partner', note: '' };
   const provider = registry.partners[String(Number(key))];
@@ -12,7 +12,7 @@ export function normalizeComtradePartner(code) {
 }
 
 /** Preserve the cached denominator, numeric partner code and all other evidence. */
-export function normalizeComtradeProducts(products) {
+function normalizeComtradeProducts(products) {
   return products.map(product => ({
     ...product,
     topExporters: (product.topExporters ?? []).map(exporter => ({
@@ -21,3 +21,6 @@ export function normalizeComtradeProducts(products) {
     })),
   }));
 }
+
+exports.normalizeComtradePartner = normalizeComtradePartner;
+exports.normalizeComtradeProducts = normalizeComtradeProducts;

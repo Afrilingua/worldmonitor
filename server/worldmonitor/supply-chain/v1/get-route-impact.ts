@@ -1,4 +1,4 @@
-import { normalizeComtradeProducts } from '../../../../scripts/shared/comtrade-partners.mjs';
+import { normalizeComtradeProducts } from '../../../../scripts/shared/comtrade-partners.cjs';
 /**
  * GET /api/supply-chain/v1/get-route-impact
  *
