@@ -99,6 +99,15 @@ export async function fetchComtradeBilateral(reporterCode: string): Promise<Comt
     url.searchParams.set('cmdCode', codes.join(','));
     url.searchParams.set('flowCode', 'M');
     url.searchParams.set('period', recentPeriod());
+    // Aggregate-only rows, matching the scheduled seeder. Without these
+    // Comtrade returns one row per partner x second partner x transport mode x
+    // customs procedure — about 9x — and a large importer fills the preview
+    // route's 500-row cap, so every attempt ends `incomplete` no matter how few
+    // headings it asked for. groupByProduct already kept the aggregate row per
+    // partner, so only the row count changes.
+    url.searchParams.set('partner2Code', '0');
+    url.searchParams.set('motCode', '0');
+    url.searchParams.set('customsCode', 'C00');
     url.searchParams.set('maxRecords', String(PREVIEW_MAX_RECORDS));
     const resp = await fetch(url.toString(), {
       headers: { 'User-Agent': CHROME_UA, Accept: 'application/json' }, signal,

@@ -285,6 +285,15 @@ function buildFetchUrl(reporterCode, hs4Batch, key, period) {
   url.searchParams.set('cmdCode', hs4Batch.join(','));
   url.searchParams.set('flowCode', 'M');
   url.searchParams.set('period', period);
+  // Aggregate-only rows, mirroring seed-recovery-import-hhi.mjs. Without these
+  // Comtrade returns one row per partner x second partner x transport mode x
+  // customs procedure — about 9x — which fills the public preview's 500-row cap
+  // and inflates authenticated payloads. groupByProduct already kept only the
+  // aggregate row per partner, so the result is unchanged and only the row
+  // count falls.
+  url.searchParams.set('partner2Code', '0');
+  url.searchParams.set('motCode', '0');
+  url.searchParams.set('customsCode', 'C00');
   url.searchParams.set('maxRecords', String(MAX_RECORDS));
   if (key) url.searchParams.set('subscription-key', key);
   return url.toString();
@@ -299,9 +308,12 @@ function buildFetchUrl(reporterCode, hs4Batch, key, period) {
  * @param {string[]} hs4Batch
  * @param {string} [period]
  * @param {(() => void) | undefined} [reserveRequest]
+ * @param {((rawRowCount: number) => void) | undefined} [onRawRowCount] called with the
+ *   provider's raw row count before parsing, so a batch that ends `incomplete`
+ *   still reports the number of rows it saw.
  * @returns {Promise<Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number}>>}
  */
-export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeriod(), reserveRequest) {
+export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeriod(), reserveRequest, onRawRowCount) {
   let rateLimitedOnce = false;
   let transientRetries = 0;
   const MAX_TRANSIENT_RETRIES = 2;
@@ -342,6 +354,10 @@ export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeri
   consecutiveRateLimited = 0;
 
   const data = await resp.json();
+  // Report the count before parseRecords, which drops zero-value rows and
+  // throws outright on a capped response — the one case where knowing how many
+  // rows arrived matters most.
+  if (Array.isArray(data?.data)) onRawRowCount?.(data.data.length);
   const parsed = parseRecords(data, MAX_RECORDS);
   if (parsed.length === 0 && data?.count > 0) {
     console.warn(`    Reporter ${reporterCode}: API returned count=${data.count} but parseRecords produced 0 — response shape may have changed`);
@@ -442,6 +458,13 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
 
       if (requestCount > 0) await _paceSleep(INTER_REQUEST_DELAY_MS);
 
+      // Raw provider row counts for the batches of the period actually used.
+      // Declared outside the try so a batch that throws still reports the rows
+      // it saw, and reset per period attempt so a fallback does not append the
+      // empty counts of the period it replaced.
+      let rowCounts = [];
+      const recordRowCount = n => rowCounts.push(n);
+
       try {
         let batch1 = [];
         let batch2 = [];
@@ -453,16 +476,17 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
             break;
           }
           usedPeriod = PERIODS[p];
+          rowCounts = [];
 
           console.log(`  [${i + 1}/${countries.length}] ${iso2} batch 1/2 (period ${usedPeriod})...`);
-          batch1 = await fetchBilateral(unCode, BATCH_1, usedPeriod, reserveRequest);
+          batch1 = await fetchBilateral(unCode, BATCH_1, usedPeriod, reserveRequest, recordRowCount);
           if (consecutiveRateLimited >= MAX_CONSECUTIVE_RATE_LIMITED_FETCHES) break;
 
           if (BATCH_2.length > 0) {
             await _paceSleep(INTER_REQUEST_DELAY_MS);
 
             console.log(`  [${i + 1}/${countries.length}] ${iso2} batch 2/2 (period ${usedPeriod})...`);
-            batch2 = await fetchBilateral(unCode, BATCH_2, usedPeriod, reserveRequest);
+            batch2 = await fetchBilateral(unCode, BATCH_2, usedPeriod, reserveRequest, recordRowCount);
             if (consecutiveRateLimited >= MAX_CONSECUTIVE_RATE_LIMITED_FETCHES) break;
           }
 
@@ -474,7 +498,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
         }
 
         const products = groupByProduct([...batch1, ...batch2], Number(String(usedPeriod).split(',')[0]));
-        countryCoverage[iso2] = { state: products.length ? 'observed' : 'no_records', attemptedAt: new Date().toISOString(), missingHs4s: HS4_CODES.filter(code => !products.some(p => p.hs4 === code)) };
+        countryCoverage[iso2] = { state: products.length ? 'observed' : 'no_records', attemptedAt: new Date().toISOString(), missingHs4s: HS4_CODES.filter(code => !products.some(p => p.hs4 === code)), rowCounts };
         if (products.length === 0) {
           console.warn(`    ${iso2}: no products after grouping, skipping write`);
         } else {
@@ -492,7 +516,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
         }
       } catch (err) {
         console.warn(`  [bilateral-hs4] ${iso2}: fetch failed, preserving existing data: ${err.message}`);
-        countryCoverage[iso2] = { state: comtradeFailureState(err), attemptedAt: new Date().toISOString() };
+        countryCoverage[iso2] = { state: comtradeFailureState(err), attemptedAt: new Date().toISOString(), rowCounts };
         failedCount++;
       }
 

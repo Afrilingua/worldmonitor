@@ -32,7 +32,7 @@ for (const [label, details] of failures) {
 // and a reporter with no positive rows. Flagging them would keep the domain
 // partial on every healthy run and hide the failures above.
 const healthy = {countryCoverage:{
-  DE:{state:'observed',missingHs4s:['2612','2804']},
+  DE:{state:'observed',missingHs4s:['2612','2804'],rowCounts:[412,308]},
   JP:{state:'observed',missingHs4s:[]},
   TV:{state:'no_records',missingHs4s:['1001','2804']},
   bad:{state:'unavailable'},
@@ -44,4 +44,14 @@ test('observed heading gaps and valid empty reporters keep the domain ok while s
   assert.deepEqual(Object.keys(entry.bilateralCoverage.countryCoverage).sort(),['DE','JP','TV']);
   assert.deepEqual(entry.bilateralCoverage.countryCoverage.DE.missingHs4s,['2612','2804']);
   assert.equal(entry.bilateralCoverage.productCoverageKnown,true);
+});
+
+// R9: the per-batch row counts are diagnostic only. They must reach the operator
+// intact, and a reporter that returned rows must not be reclassified for it.
+test('per-batch row counts reach the health payload without changing status', async () => {
+  const entry = await bilateralEntry(healthy);
+  assert.deepEqual(entry.bilateralCoverage.countryCoverage.DE.rowCounts,[412,308]);
+  assert.equal(entry.bilateralCoverage.countryCoverage.JP.rowCounts,undefined,
+    'a country recorded before rowCounts existed stays readable');
+  assert.equal(entry.status,'ok');
 });

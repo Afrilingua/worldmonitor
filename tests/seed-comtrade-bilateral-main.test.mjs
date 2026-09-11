@@ -45,6 +45,14 @@ let transientEverything = false;
 let failSecondBatch = false;
 /** 'malformed' answers a body without a data array; 'capped' fills the requested maxRecords. */
 let providerDefect = null;
+/** Every Comtrade URL the run requested, in order. */
+let comtradeUrls = [];
+/**
+ * Rows the mocked provider returns per batch index, when set. Each entry is the
+ * RAW row count; the first row of every batch carries primaryValue 0 so the raw
+ * count differs from what parseRecords keeps.
+ */
+let batchRawRowCounts = null;
 
 function respond(body) {
   return new Response(JSON.stringify(body), { status: 200 });
@@ -80,6 +88,8 @@ beforeEach(() => {
   transientEverything = false;
   failSecondBatch = false;
   providerDefect = null;
+  comtradeUrls = [];
+  batchRawRowCounts = null;
 
   process.env.UPSTASH_REDIS_REST_URL = REDIS_URL;
   process.env.UPSTASH_REDIS_REST_TOKEN = 'fake-token';
@@ -104,6 +114,7 @@ beforeEach(() => {
 
     if (href.includes('comtradeapi.un.org')) {
       comtradeCallCount++;
+      comtradeUrls.push(href);
       if (rateLimitEverything) return new Response('{}', { status: 429 });
       if (failSecondBatch && comtradeCallCount > 1) return new Response('{}', { status: 403 });
       if (transientEverything) return new Response('{}', { status: 503 });
@@ -117,6 +128,20 @@ beforeEach(() => {
         return respond({
           count: cap,
           data: Array.from({ length: cap }, (_, i) => ({ cmdCode, partnerCode: String(1 + (i % 890)), primaryValue: 1, period: 2024 })),
+        });
+      }
+      if (batchRawRowCounts) {
+        const batchIndex = (comtradeCallCount - 1) % batchRawRowCounts.length;
+        const rows = batchRawRowCounts[batchIndex];
+        const cmdCode = new URL(href).searchParams.get('cmdCode').split(',')[0];
+        return respond({
+          count: rows,
+          // A zero-value row is a real Comtrade row that parseRecords drops, so
+          // a rowCounts assertion that matches this length can only be reading
+          // the raw array and not the parsed one.
+          data: Array.from({ length: rows }, (_, i) => ({
+            cmdCode, partnerCode: String(100 + i), primaryValue: i === 0 ? 0 : 1000 * (i + 1), period: 2024,
+          })),
         });
       }
       // Two batches per country; give the first N countries real rows.
@@ -286,3 +311,51 @@ for (const [defect, state] of [['malformed', 'malformed'], ['capped', 'incomplet
     assert.equal(writtenMeta().preserveStreaks.US, 1);
   });
 }
+
+test('every batch asks Comtrade for aggregate-only rows', async () => {
+  // Without these three filters Comtrade returns one row per partner x second
+  // partner x transport mode x customs procedure — about 9x the rows — which
+  // fills the preview route's 500-row cap and inflates authenticated payloads.
+  // The seeder's grouping already collapsed the duplicates, so the filters
+  // change the row count, not the result.
+  countriesWithData = 1;
+
+  await main({ requestBudget: 2 });
+
+  assert.equal(comtradeUrls.length, 2, 'expected both catalogue batches to be requested');
+  for (const href of comtradeUrls) {
+    const params = new URL(href).searchParams;
+    assert.equal(params.get('partner2Code'), '0', `partner2Code missing from ${params.get('cmdCode')}`);
+    assert.equal(params.get('motCode'), '0', `motCode missing from ${params.get('cmdCode')}`);
+    assert.equal(params.get('customsCode'), 'C00', `customsCode missing from ${params.get('cmdCode')}`);
+  }
+});
+
+test('coverage records the raw row count each batch returned', async () => {
+  // R9: an operator cannot tell a reporter that genuinely trades three headings
+  // from one whose response was silently trimmed, unless the run records what
+  // the provider actually sent back.
+  batchRawRowCounts = [4, 3];
+
+  await main({ requestBudget: 2 });
+
+  const coverage = writtenMeta().countryCoverage.US;
+  assert.equal(coverage.state, 'observed');
+  assert.deepEqual(coverage.rowCounts, [4, 3],
+    'rowCounts must be the provider row counts per batch, before the zero-value rows are filtered out');
+});
+
+test('a capped batch records the count it saw alongside the incomplete state', async () => {
+  // The cap throws inside parseRecords, so a count captured only on the success
+  // path would leave the one state an operator most needs sized as a blank.
+  providerDefect = 'capped';
+  existingKeys.add(`${KEY_PREFIX}US:v1`);
+
+  await main({ requestBudget: 2 });
+
+  const cap = Number(new URL(comtradeUrls[0]).searchParams.get('maxRecords'));
+  const coverage = writtenMeta().countryCoverage.US;
+  assert.equal(coverage.state, 'incomplete');
+  // Batch 1 threw, so batch 2 never ran: a single-element array, not a pair.
+  assert.deepEqual(coverage.rowCounts, [cap]);
+});

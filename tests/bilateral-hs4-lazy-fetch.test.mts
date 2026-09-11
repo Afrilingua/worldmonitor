@@ -61,6 +61,22 @@ test('lazy fallback sends an explicit annual period', async () => {
   assert.equal(period, recentPeriod());
 });
 
+test('lazy fallback asks the preview route for aggregate-only rows', async () => {
+  // The preview route caps every response at 500 rows. Without these filters
+  // Comtrade returns one row per partner x second partner x transport mode x
+  // customs procedure — about 9x — so a large importer fills the cap and the
+  // attempt is recorded `incomplete` however few headings it asked for.
+  await lazyFetchBilateralHs4('DE');
+
+  assert.equal(comtradeCalls().length, 2, 'expected two bounded catalogue requests');
+  for (const href of comtradeCalls()) {
+    const params = new URL(href).searchParams;
+    assert.equal(params.get('partner2Code'), '0');
+    assert.equal(params.get('motCode'), '0');
+    assert.equal(params.get('customsCode'), 'C00');
+  }
+});
+
 test('lazy fallback sends a single period, not a list', async () => {
   // The public preview route answers HTTP 400 to a comma-separated period
   // (probed 2026-07-26), so the multi-year window used by the bulk seeder must
