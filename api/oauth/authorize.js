@@ -202,6 +202,30 @@ export default async function handler(req) {
     return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' } });
   }
 
+  if (method === 'POST') {
+    // Origin validation: allow any first-party worldmonitor.app host (the consent
+    // page is served host-derived — apex/www/api/variant — so a same-origin JS
+    // fetch or the native form POST to api.worldmonitor.app arrives with any of
+    // those Origins), plus absent origin (server/CLI) and 'null' (WebView with
+    // opaque/sandboxed origin). CSRF nonce provides the actual protection.
+    const origin = req.headers.get('origin');
+    if (origin && origin !== 'null' && !WM_ORIGIN.test(origin)) {
+      return new Response('Forbidden', { status: 403 });
+    }
+  }
+
+  if (method === 'GET' || method === 'POST') {
+    const rl = getRatelimit();
+    if (rl) {
+      try {
+        const { success } = await rl.limit(`ip:${getClientIp(req)}`);
+        if (!success) {
+          return new Response('Too Many Requests', { status: 429 });
+        }
+      } catch { /* graceful degradation */ }
+    }
+  }
+
   if (method === 'GET') {
     const url = new URL(req.url);
     const p = url.searchParams;
@@ -236,9 +260,6 @@ export default async function handler(req) {
       return htmlError('Redirect URI Mismatch', 'The redirect_uri does not match any registered redirect URI for this client.');
     }
 
-    // Reset client TTL (sliding 90-day window)
-    await redisSet(`oauth:client:${client_id}`, { ...client, last_used: Date.now() }, CLIENT_TTL_SECONDS);
-
     const nonce = crypto.randomUUID();
     const nonceStored = await redisSet(`oauth:nonce:${nonce}`, { client_id, redirect_uri, code_challenge, state, created_at: Date.now() }, 600);
     if (!nonceStored) {
@@ -252,26 +273,6 @@ export default async function handler(req) {
   }
 
   if (method === 'POST') {
-    // Origin validation: allow any first-party worldmonitor.app host (the consent
-    // page is served host-derived — apex/www/api/variant — so a same-origin JS
-    // fetch or the native form POST to api.worldmonitor.app arrives with any of
-    // those Origins), plus absent origin (server/CLI) and 'null' (WebView with
-    // opaque/sandboxed origin). CSRF nonce provides the actual protection.
-    const origin = req.headers.get('origin');
-    if (origin && origin !== 'null' && !WM_ORIGIN.test(origin)) {
-      return new Response('Forbidden', { status: 403 });
-    }
-
-    const rl = getRatelimit();
-    if (rl) {
-      try {
-        const { success } = await rl.limit(`ip:${getClientIp(req)}`);
-        if (!success) {
-          return new Response('Too Many Requests', { status: 429 });
-        }
-      } catch { /* graceful degradation */ }
-    }
-
     let params;
     try {
       params = new URLSearchParams(await req.text());
