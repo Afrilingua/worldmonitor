@@ -1,4 +1,4 @@
-import { normalizeComtradeProducts, HS4_CODES, HS4_LABELS } from '../scripts/shared/comtrade';
+import { normalizeComtradeProducts, HS4_CODES, HS4_LABELS } from '../scripts/shared/comtrade.mjs';
 import type { Page } from '@playwright/test';
 import us from './fixtures/country-brief-us.json' with { type: 'json' };
 
