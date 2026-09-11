@@ -4,6 +4,8 @@ import type {
     TrackAircraftResponse,
     PositionSample,
 } from '../../../../src/generated/server/worldmonitor/aviation/v1/service_server';
+import { ApiError } from '../../../../src/generated/server/worldmonitor/aviation/v1/service_server';
+import { checkScopedRateLimit, getClientIp } from '../../../_shared/rate-limit';
 import { getRelayBaseUrl, getRelayHeaders } from './_shared';
 import { cachedFetchJson } from '../../../_shared/redis';
 import { isOpenSkyProvider, requiresRedistributableProviders } from '../../../_shared/provider-redistribution';
@@ -18,6 +20,25 @@ const CACHE_TTL = 120;
 const CALLSIGN_CACHE_TTL = 60;
 const CALLSIGN_NEGATIVE_TTL = 10;
 const BBOX_RELAY_TIMEOUT_MS = 6_000;
+const IDENTIFIER_RATE_SCOPE = 'track-aircraft-identifiers';
+const IDENTIFIER_RATE_LIMIT = 30;
+const IDENTIFIER_RATE_WINDOW_MS = 60_000;
+let nativeIdentifierAdmissions: number[] = [];
+
+async function admitIdentifierLookup(request: Request): Promise<void> {
+    // Native transport authentication precedes the handler; its cache and budget
+    // remain local, while cloud and Docker require a healthy shared limiter.
+    if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
+        const now = Date.now();
+        nativeIdentifierAdmissions = nativeIdentifierAdmissions.filter(time => time > now - IDENTIFIER_RATE_WINDOW_MS);
+        if (nativeIdentifierAdmissions.length >= IDENTIFIER_RATE_LIMIT) throw new ApiError(429, 'Too many requests', '');
+        nativeIdentifierAdmissions.push(now);
+        return;
+    }
+    const limit = await checkScopedRateLimit(IDENTIFIER_RATE_SCOPE, IDENTIFIER_RATE_LIMIT, '60 s', getClientIp(request));
+    if (limit.degraded) throw new ApiError(503, 'Rate-limit service temporarily unavailable', '');
+    if (!limit.allowed) throw new ApiError(429, 'Too many requests', '');
+}
 
 function isDegenerateBbox(req: TrackAircraftRequest): boolean {
     return req.swLat === req.neLat && req.swLon === req.neLon;
@@ -76,6 +97,16 @@ export async function trackAircraft(
     ctx: ServerContext,
     req: TrackAircraftRequest,
 ): Promise<TrackAircraftResponse> {
+    const rawIcao24 = req.icao24 ?? '';
+    const rawCallsign = req.callsign ?? '';
+    if (rawIcao24.length > 16 || rawCallsign.length > 16) throw new ApiError(400, 'Aircraft identifier is too long', '');
+    const icao24 = rawIcao24.trim().toLowerCase();
+    const callsign = rawCallsign.trim().toUpperCase();
+    if (rawIcao24 && !/^[0-9a-f]{6}$/.test(icao24)) throw new ApiError(400, 'Expected a six-character hexadecimal ICAO address', '');
+    if (rawCallsign && !/^[A-Z0-9]{1,8}$/.test(callsign)) throw new ApiError(400, 'Expected an alphanumeric callsign of at most eight characters', '');
+    req = { ...req, icao24, callsign };
+    if (icao24 || callsign) await admitIdentifierLookup(ctx.request);
+
     const redistributableOnly = requiresRedistributableProviders(ctx.request);
     const cacheKey = `${buildCacheKey(req)}${redistributableOnly ? ':redistributable' : ''}`;
 
@@ -161,7 +192,7 @@ export async function trackAircraft(
                 // For icao24-only queries, try the OpenSky relay
                 if (!redistributableOnly && !isCallsignOnly && relayBase && req.icao24) {
                     try {
-                        const osUrl = `${relayBase}/opensky/states/all?icao24=${req.icao24}`;
+                        const osUrl = `${relayBase}/opensky/states/all?icao24=${encodeURIComponent(req.icao24)}`;
                         const resp = await fetch(osUrl, { headers: getRelayHeaders({}), signal: AbortSignal.timeout(8_000) });
                         if (resp.ok) {
                             const data = await resp.json() as OpenSkyResponse;

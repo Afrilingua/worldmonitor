@@ -619,6 +619,11 @@ describe('rate-limit fail-closed call-site policy (#3531)', () => {
 describe('scoped rate-limit degraded call-site policy (#3531)', () => {
   const SCOPED_RATE_LIMIT_CALLERS = [
     {
+      path: 'server/worldmonitor/aviation/v1/track-aircraft.ts',
+      expected: /if\s*\(limit\.degraded\)\s*throw new ApiError\(503,/,
+      reason: 'aircraft identifier lookups must fail closed before cache or provider work when the shared limiter is unavailable',
+    },
+    {
       path: 'api/reverse-geocode.js',
       expected: /failClosed:\s*true/,
       reason: 'the provider-wide Nominatim bucket is shared across both routes and must fail closed before upstream work',

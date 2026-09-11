@@ -2462,12 +2462,20 @@ describe('country intel brief caching behavior', { concurrency: 1 }, () => {
 
 describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
   async function importTrackAircraft() {
-    return importPatchedTsModule('server/worldmonitor/aviation/v1/track-aircraft.ts', {
+    // Provider-priority tests isolate admission; aircraft-input-boundary tests
+    // exercise the real scoped limiter through the generated gateway.
+    const stubDir = createTempDir('wm-aircraft-rate-');
+    const rateStub = join(stubDir, 'rate.mjs');
+    writeFileSync(rateStub, `export const getClientIp = () => 'test';
+export const checkScopedRateLimit = async () => ({ allowed: true, degraded: false });`);
+    const imported = await importPatchedTsModule('server/worldmonitor/aviation/v1/track-aircraft.ts', {
       './_shared': resolve(root, 'server/_shared/relay.ts'),
       '../../../_shared/constants': resolve(root, 'server/_shared/constants.ts'),
       '../../../_shared/redis': resolve(root, 'server/_shared/redis.ts'),
       '../../../_shared/provider-redistribution': resolve(root, 'server/_shared/provider-redistribution.ts'),
+      '../../../_shared/rate-limit': rateStub,
     });
+    return { module: imported.module, cleanup() { imported.cleanup(); removeTempDir(stubDir); } };
   }
 
   it('serves a bbox from Wingbits without spending an OpenSky request', async () => {
