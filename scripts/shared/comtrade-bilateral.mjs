@@ -34,12 +34,63 @@ export function comtradeFailureState(error) {
   return kind === 'malformed' || kind === 'incomplete' ? kind : 'unavailable';
 }
 
+/** Smallest unrounded import share an origin needs to reach the brief. */
+export const MIN_PARTNER_SHARE = 0.01;
+/** Origins shown even when they fall below MIN_PARTNER_SHARE. */
+export const MIN_PARTNERS = 5;
+/** Hard ceiling on origins per heading, whatever their share. */
+export const MAX_PARTNERS = 25;
+
+/**
+ * The origins a brief may name for one heading, and what it leaves out.
+ *
+ * Rank the product's partners by value, cap the list at `maxPartners`, keep the
+ * ones holding at least `minShare` of the denominator, and pad back up to
+ * `minPartners` so a heading with one dominant origin still gets context. What
+ * is left of the ranked list becomes `omittedCount` and `omittedShare`, so the
+ * brief can state how much of the trade it is not showing.
+ *
+ * Retention reads the unrounded ratio rather than the stored `share`: that
+ * field is rounded to three decimals for display, and 0.96% rounds to 0.01,
+ * which would promote exactly the origin the threshold exists to omit.
+ *
+ * @param {{totalValue?: number, partners?: Array<{value: number}>}} product
+ * @param {{minShare?: number, minPartners?: number, maxPartners?: number}} [options]
+ * @returns {{partners: Array<any>, omittedCount: number, omittedShare: number}}
+ */
+export function selectPartners(product, { minShare = MIN_PARTNER_SHARE, minPartners = MIN_PARTNERS, maxPartners = MAX_PARTNERS } = {}) {
+  const ranked = (Array.isArray(product?.partners) ? [...product.partners] : [])
+    .sort((a, b) => Number(b?.value) - Number(a?.value));
+  const total = Number(product?.totalValue);
+  const shareOf = (partner) => (total > 0 ? Number(partner?.value) / total : 0);
+
+  // Ranking by value makes the retained set a prefix of the capped list, so
+  // padding and the omitted tail are both plain slices.
+  const capped = ranked.slice(0, maxPartners);
+  const retained = capped.filter((partner) => shareOf(partner) >= minShare).length;
+  const partners = capped.slice(0, Math.max(retained, minPartners));
+  const omitted = ranked.slice(partners.length);
+  return {
+    partners,
+    omittedCount: omitted.length,
+    omittedShare: Math.round(omitted.reduce((sum, partner) => sum + shareOf(partner), 0) * 1000) / 1000,
+  };
+}
+
+/** The leading `n` origins — the slice the canonical payload has always held. */
+export function leadingExporters(product, n = 5) {
+  return (Array.isArray(product?.topExporters) ? product.topExporters : []).slice(0, n);
+}
+
 /**
  * The bilateral HS4 catalogue and its parsers, shared so the scheduled seeder
  * and the lazy fetch request the same headings and publish the same shape.
  * Parsers throw ComtradeResponseError rather than return a partial subset.
  */
-export function createComtradeBilateralCatalogue(strategic, commodities, normalizeComtradePartner) {
+export function createComtradeBilateralCatalogue(strategic, commodities, normalizeComtradePartner, quantityUnits) {
+  // The pinned QuantityUnits reference. Without it no quantity is mappable, so
+  // every parsed row reports `quantity: null` rather than an unlabelled number.
+  const units = quantityUnits?.units ?? {};
   const labels = new Map();
   for (const p of strategic.products) {
     if (p.bilateralHs4Code) labels.set(p.bilateralHs4Code, p.bilateralLabel ?? p.label);
@@ -55,8 +106,14 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
     .filter(batch => batch.length > 0);
 
   /**
+   * Weight and quantity are optional on every row and the provider writes 0 for
+   * "not reported" (Qatar reports 0 t of its 2804 world exports), so only a
+   * positive number is carried; a 0 that survived would read as "ships nothing".
+   * A quantity is kept only with a unit code the pinned registry names, because
+   * an unlabelled number cannot be rendered or compared.
+   *
    * @param {unknown} data
-   * @returns {Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number}>}
+   * @returns {Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number, netWeightKg: number | null, netWeightEstimated: boolean, quantity: number | null, quantityUnitCode: number | null}>}
    */
   function parseRecords(data, maxRecords = Infinity) {
     const records = /** @type {any} */ (data)?.data;
@@ -72,17 +129,36 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
         || !Number.isInteger(year) || year < 1900 || year > 2100) {
         throw new ComtradeResponseError('malformed', 'Malformed Comtrade trade row');
       }
-      return { cmdCode, partnerCode, primaryValue: value, year };
+      const netWeightKg = Number(r.netWgt);
+      const quantity = Number(r.qty);
+      const quantityUnitCode = Number(r.qtyUnitCode);
+      const reportedQuantity = Number.isFinite(quantity) && quantity > 0
+        && Number.isFinite(quantityUnitCode) && units[String(quantityUnitCode)] != null;
+      return {
+        cmdCode,
+        partnerCode,
+        primaryValue: value,
+        year,
+        netWeightKg: Number.isFinite(netWeightKg) && netWeightKg > 0 ? netWeightKg : null,
+        netWeightEstimated: r.isNetWgtEstimated === true,
+        quantity: reportedQuantity ? quantity : null,
+        quantityUnitCode: reportedQuantity ? quantityUnitCode : null,
+      };
     }).filter(r => r.primaryValue > 0);
   }
 
   /**
-   * @param {Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number}>} records
+   * `topExporters` is the canonical leading-5 contract every derived scorer sums
+   * over, so it stays exactly as it was. `partners` is the same ranking without
+   * the slice, carrying weight and quantity, for the brief's sibling key; no
+   * canonical consumer reads it.
+   *
+   * @param {Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number, netWeightKg?: number | null, netWeightEstimated?: boolean, quantity?: number | null, quantityUnitCode?: number | null}>} records
    * @param {number} [fallbackYear] year to report when no record carries a usable period/refYear
-   * @returns {Array<{hs4: string, description: string, totalValue: number, topExporters: Array<{partnerCode: number, partnerIso2: string, value: number, share: number}>, year: number}>}
+   * @returns {Array<{hs4: string, description: string, totalValue: number, topExporters: Array<{partnerCode: number, partnerIso2: string, value: number, share: number}>, partners: Array<{partnerCode: number, partnerIso2: string, value: number, share: number, netWeightKg: number | null, netWeightEstimated: boolean, quantity: number | null, quantityUnitCode: number | null}>, worldNetWeightKg: number | null, year: number}>}
    */
   function groupByProduct(records, fallbackYear = Number(recentPeriod())) {
-    /** @type {Map<string, Map<string, {value: number, year: number}>>} */
+    /** @type {Map<string, Map<string, {value: number, year: number, netWeightKg: number | null, netWeightEstimated: boolean, quantity: number | null, quantityUnitCode: number | null}>>} */
     const byCode = new Map();
     for (const r of records) {
       if (!byCode.has(r.cmdCode)) byCode.set(r.cmdCode, new Map());
@@ -93,7 +169,16 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
       // largest-value behaviour.
       if (!existing || r.year > existing.year
         || (r.year === existing.year && r.primaryValue > existing.value)) {
-        partners.set(r.partnerCode, { value: r.primaryValue, year: r.year });
+        partners.set(r.partnerCode, {
+          value: r.primaryValue,
+          year: r.year,
+          // The winning row's own weight and quantity travel with its value, so
+          // volume and value always describe the same observation.
+          netWeightKg: r.netWeightKg ?? null,
+          netWeightEstimated: r.netWeightEstimated === true,
+          quantity: r.quantity ?? null,
+          quantityUnitCode: r.quantityUnitCode ?? null,
+        });
       }
     }
 
@@ -125,24 +210,46 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
       }
       const totalValue = hasWorld ? world.value : observedValue;
       if (totalValue <= 0) continue;
+      const exporter = ([pc, v]) => ({
+        partnerCode: Number(pc),
+        partnerIso2: normalizeComtradePartner(pc).iso2,
+        value: v.value,
+        share: Math.round((v.value / totalValue) * 1000) / 1000,
+      });
       const top5 = sorted.slice(0, 5);
       products.push({
         hs4,
         description: HS4_LABELS[hs4] ?? hs4,
         totalValue,
         denominatorBasis: hasWorld ? 'reported_world' : 'observed_partners',
-        topExporters: top5.map(([pc, v]) => ({
-          partnerCode: Number(pc),
-          partnerIso2: normalizeComtradePartner(pc).iso2,
-          value: v.value,
-          share: Math.round((v.value / totalValue) * 1000) / 1000,
+        topExporters: top5.map(exporter),
+        partners: sorted.map(entry => ({
+          ...exporter(entry),
+          netWeightKg: entry[1].netWeightKg,
+          netWeightEstimated: entry[1].netWeightEstimated,
+          quantity: entry[1].quantity,
+          quantityUnitCode: entry[1].quantityUnitCode,
         })),
+        // The World row's own weight, so the brief can state the tonnage the
+        // shown origins are a share of. Only meaningful at the collapsed year.
+        worldNetWeightKg: hasWorld ? world.netWeightKg ?? null : null,
         year: latestYear > 0 ? latestYear : fallbackYear,
       });
     }
     return products.sort((a, b) => b.totalValue - a.totalValue);
   }
 
-  return { HS4_CODES, HS4_LABELS, MAX_HS4_CODES_PER_BATCH, HS4_BATCHES, parseRecords, groupByProduct };
+  /**
+   * The registry's abbreviation for a Comtrade quantity unit code, or null when
+   * the code is unknown — including -1, which the provider uses for "no
+   * quantity" and the pinned registry therefore omits.
+   * @param {unknown} code
+   * @returns {string | null}
+   */
+  function quantityUnitAbbr(code) {
+    return units[String(code)]?.abbr ?? null;
+  }
+
+  return { HS4_CODES, HS4_LABELS, MAX_HS4_CODES_PER_BATCH, HS4_BATCHES, parseRecords, groupByProduct, quantityUnitAbbr };
 
 }
