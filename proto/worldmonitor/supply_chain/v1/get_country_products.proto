@@ -4,11 +4,39 @@ package worldmonitor.supply_chain.v1;
 import "buf/validate/validate.proto";
 import "sebuf/http/annotations.proto";
 
+// An origin's reported world exports of the same heading, so a shown share can
+// be read against the supplier's total capacity rather than this importer alone.
+message ExporterScale {
+  // Reported world exports of this heading by this origin, in USD.
+  double world_exports_usd = 1;
+  // Reported world-export weight in kilograms. Absent when the origin reported
+  // no weight (the provider writes 0 for "not reported"), never 0 for absent.
+  optional double world_exports_kg = 2;
+  // 1-based position among world exporters of this heading, ranked by value.
+  int32 rank = 3;
+  // Trade observation year of the world-export figures, not the fetch year.
+  int32 year = 4;
+}
+
 message ProductExporter {
   int32 partner_code = 1;
   string partner_iso2 = 2;
   double value = 3;
   double share = 4;
+  // Net weight of the shown flow in kilograms. Absent when the provider
+  // reported no weight; "not reported" is never rendered as 0 trade.
+  optional double net_weight_kg = 5;
+  // True when the provider flagged the net weight as its own estimate.
+  optional bool net_weight_estimated = 6;
+  // Reported quantity in the unit named by quantity_unit_code. Absent when no
+  // quantity was reported or its unit is outside the pinned unit registry.
+  optional double quantity = 7;
+  // UN Comtrade quantity unit code (8 = kg, 12 = m3, 5 = items, 7 = litres).
+  // Absent whenever quantity is absent.
+  optional int32 quantity_unit_code = 8;
+  // World-export scale of this origin for this heading. Absent for a legacy row
+  // and for an origin the world-export snapshot does not cover.
+  optional ExporterScale scale = 9;
 }
 
 message CountryProduct {
@@ -21,6 +49,18 @@ message CountryProduct {
   // this heading and year) or "observed_partners" (the sum of observed partner
   // values). Absent on legacy rows, whose denominator is unverified.
   optional string denominator_basis = 6;
+  // ISO timestamp this heading alone was fetched at. Present only on a heading
+  // recovered on demand, whose fetch time differs from the payload's.
+  optional string fetched_at = 7;
+  // How top_exporters was selected: "share_threshold" (every origin at or above
+  // 1% of the denominator, padded to 5 and capped at 25) or "leading_5" (the
+  // canonical leading five). Absent when no origins are shown.
+  optional string partner_basis = 8;
+  // Origins ranked below the ones shown. Absent under "leading_5", where the
+  // omitted set is not measured.
+  optional int32 omitted_partner_count = 9;
+  // Combined share of the omitted origins, 0-1. Absent under "leading_5".
+  optional double omitted_partner_share = 10;
 }
 
 message GetCountryProductsRequest {
@@ -65,4 +105,10 @@ message CountryProductEvidence {
   // "cache_write_failed", "busy", "not_attempted", "preserved_reason_unknown"
   // or "unknown".
   string last_attempt_state = 6;
+  // Headings served from an on-demand single-heading fetch rather than the
+  // stored payload. Empty when every row came from the stored payload.
+  repeated string recovered_hs4s = 7;
+  // ISO timestamp of the world-export snapshot the scale figures came from.
+  // Absent when no snapshot is cached, in which case no row carries a scale.
+  optional string world_exports_fetched_at = 8;
 }

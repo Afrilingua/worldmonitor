@@ -312,6 +312,10 @@ export interface CountryProduct {
   topExporters: ProductExporter[];
   year: number;
   denominatorBasis?: string;
+  fetchedAt?: string;
+  partnerBasis?: string;
+  omittedPartnerCount?: number;
+  omittedPartnerShare?: number;
 }
 
 export interface ProductExporter {
@@ -319,6 +323,18 @@ export interface ProductExporter {
   partnerIso2: string;
   value: number;
   share: number;
+  netWeightKg?: number;
+  netWeightEstimated?: boolean;
+  quantity?: number;
+  quantityUnitCode?: number;
+  scale?: ExporterScale;
+}
+
+export interface ExporterScale {
+  worldExportsUsd: number;
+  worldExportsKg?: number;
+  rank: number;
+  year: number;
 }
 
 export interface CountryProductEvidence {
@@ -328,6 +344,8 @@ export interface CountryProductEvidence {
   missingHs4s: string[];
   lastAttemptAt: string;
   lastAttemptState: string;
+  recoveredHs4s: string[];
+  worldExportsFetchedAt?: string;
 }
 
 export interface GetMultiSectorCostShockRequest {

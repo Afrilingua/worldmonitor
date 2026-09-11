@@ -18,12 +18,15 @@ vi.mock('../../server/_shared/redis', () => ({
 }));
 vi.mock('../../server/_shared/premium-check', () => ({ isCallerPremium: async () => true }));
 
-import { lazyFetchBilateralHs4 } from '../../server/worldmonitor/supply-chain/v1/_bilateral-hs4-lazy';
+import { lazyFetchBilateralHs4, lazyFetchHeading } from '../../server/worldmonitor/supply-chain/v1/_bilateral-hs4-lazy';
 import { getCountryProducts } from '../../server/worldmonitor/supply-chain/v1/get-country-products';
 import { ValidationError } from '../../src/generated/server/worldmonitor/supply_chain/v1/service_server';
 
 const SENTINEL = (iso2: string) => `comtrade:bilateral-hs4-lazy-sentinel:${iso2}:v1`;
 const CANONICAL = (iso2: string) => `comtrade:bilateral-hs4:${iso2}:v1`;
+const PARTNERS = (iso2: string) => `comtrade:bilateral-hs4-partners:${iso2}:v1`;
+const HEADING = (iso2: string, hs4: string) => `comtrade:bilateral-hs4-lazy-heading:${iso2}:${hs4}:v1`;
+const WORLD_EXPORTS = 'comtrade:world-exports-hs4:v1';
 const DAY = 86_400;
 
 let upstreamCalls = 0;
@@ -85,11 +88,19 @@ it('a response filling the requested cap is incomplete and publishes nothing', a
 });
 
 it('a cold success publishes the canonical key with NX and reports observed', async () => {
-  upstream(url => rows(url, [{ cmdCode: '2804', partnerCode: 842, primaryValue: 392, period: 2024 }]));
+  upstream(url => rows(url, [
+    { cmdCode: '2804', partnerCode: 0, primaryValue: 1000, netWgt: 5000, period: 2024 },
+    { cmdCode: '2804', partnerCode: 842, primaryValue: 392, netWgt: 1960, period: 2024 },
+  ]));
   const result = await lazyFetchBilateralHs4('JP');
   expect(result).toMatchObject({ comtradeSource: 'bilateral-hs4', state: 'observed' });
   expect(redis.ttl.get(CANONICAL('JP'))).toBe(40 * DAY);
-  expect((redis.store.get(CANONICAL('JP')) as { products: Array<{ hs4: string }> }).products.map(p => p.hs4)).toEqual(['2804']);
+  const stored = redis.store.get(CANONICAL('JP')) as { products: Array<Record<string, unknown>> };
+  expect(stored.products.map(p => p.hs4)).toEqual(['2804']);
+  // The canonical key is read by three scorers and two bulk pipelines under a
+  // 4.5 MB ceiling (KTD1). Partner detail belongs to the sibling key only.
+  expect(stored.products[0]).not.toHaveProperty('partners');
+  expect(stored.products[0]).not.toHaveProperty('worldNetWeightKg');
 });
 
 it('a scheduled write that lands during a cold fetch is not overwritten', async () => {
@@ -119,6 +130,19 @@ for (const [label, recovered] of [
   });
 }
 
+it('the warm sentinel payload carries the canonical shape, not the partner detail', async () => {
+  upstream(url => rows(url, [
+    { cmdCode: '1001', partnerCode: 0, primaryValue: 200, netWgt: 900, period: 2024 },
+    { cmdCode: '1001', partnerCode: 251, primaryValue: 100, netWgt: 450, period: 2024 },
+  ]));
+  await lazyFetchBilateralHs4('DE', previous);
+  const sentinel = redis.store.get(SENTINEL('DE')) as { payload: { products: Array<Record<string, unknown>> } };
+  // A warm sentinel payload is read straight back as the canonical payload, so
+  // it must not smuggle partner detail into the canonical contract.
+  expect(sentinel.payload.products[0]).not.toHaveProperty('partners');
+  expect(sentinel.payload.products[0]).not.toHaveProperty('worldNetWeightKg');
+});
+
 it('a cache read error is reported and never triggers a provider fetch', async () => {
   redis.errors.add(CANONICAL('DE'));
   upstream(url => rows(url, []));
@@ -140,4 +164,229 @@ it('an unsupported heading is rejected before any cache or provider access', asy
   upstream(url => rows(url, []));
   await expect(read({ iso2: 'DE', hs4: '9999' })).rejects.toBeInstanceOf(ValidationError);
   expect(upstreamCalls).toBe(0);
+});
+
+// --- Single-heading recovery and the sibling/world-exports merge (KTD5, KTD6, KTD8) ---
+
+const fresh = () => new Date().toISOString();
+/** One heading's worth of preview rows: a World total, two sizeable origins, and a long tail below 1%. */
+const helium = (year = 2024) => [
+  { cmdCode: '2804', partnerCode: 0, primaryValue: 1000, netWgt: 5000, period: year },
+  { cmdCode: '2804', partnerCode: 842, primaryValue: 392, netWgt: 1960, isNetWgtEstimated: false, qty: 1960, qtyUnitCode: 8, period: year },
+  { cmdCode: '2804', partnerCode: 490, primaryValue: 100, period: year },
+  ...Array.from({ length: 8 }, (_, i) => ({ cmdCode: '2804', partnerCode: 300 + i, primaryValue: 1, period: year })),
+];
+// An hour old: well inside the 35-day freshness window, and far enough from
+// the recovery's own timestamp to tell the two fetch times apart.
+const wheatOnly = (iso2: string) => ({
+  iso2, fetchedAt: new Date(Date.now() - 3_600_000).toISOString(), source: 'UN Comtrade bilateral HS4', requestedHs4s: ['1001'],
+  products: [{
+    hs4: '1001', description: 'Wheat', year: 2024, totalValue: 100, denominatorBasis: 'reported_world',
+    topExporters: [{ partnerCode: 251, partnerIso2: 'FR', value: 100, share: 1 }],
+  }],
+});
+
+it('a heading the stored payload lacks is recovered in one request without touching the canonical key', async () => {
+  const canonical = wheatOnly('DE');
+  redis.store.set(CANONICAL('DE'), canonical);
+  const requested: URL[] = [];
+  upstream(url => { requested.push(url); return rows(url, helium()); });
+
+  const result = await read({ iso2: 'DE', hs4: '2804' });
+
+  expect(requested).toHaveLength(1);
+  expect(requested[0]!.searchParams.get('cmdCode')).toBe('2804');
+  expect(requested[0]!.searchParams.get('partner2Code')).toBe('0');
+  expect(requested[0]!.searchParams.get('motCode')).toBe('0');
+  expect(requested[0]!.searchParams.get('customsCode')).toBe('C00');
+
+  const recovered = result.products.find(p => p.hs4 === '2804')!;
+  expect(recovered.partnerBasis).toBe('share_threshold');
+  // Padded to MIN_PARTNERS: only 842 and 490 clear the 1% threshold.
+  expect(recovered.topExporters).toHaveLength(5);
+  expect(recovered.topExporters[0]).toMatchObject({ partnerCode: 842, partnerIso2: 'US', netWeightKg: 1960, quantity: 1960, quantityUnitCode: 8 });
+  expect(recovered.omittedPartnerCount).toBe(5);
+  expect(recovered.omittedPartnerShare).toBe(0.005);
+  // The recovered heading carries its own fetch time; the payload keeps the canonical one.
+  expect(recovered.fetchedAt).toBeTruthy();
+  expect(recovered.fetchedAt).not.toBe(canonical.fetchedAt);
+  expect(result.fetchedAt).toBe(canonical.fetchedAt);
+  expect(result.evidence?.recoveredHs4s).toEqual(['2804']);
+  expect(result.evidence?.lastAttemptState).toBe('observed');
+
+  expect(redis.store.get(CANONICAL('DE'))).toBe(canonical);
+  expect(redis.store.has(SENTINEL('DE'))).toBe(false);
+  expect((redis.store.get(HEADING('DE', '2804')) as { state: string }).state).toBe('observed');
+  expect(redis.ttl.get(HEADING('DE', '2804'))).toBe(DAY);
+});
+
+it('a second missing heading for the same country within the day gets its own request', async () => {
+  redis.store.set(CANONICAL('DE'), wheatOnly('DE'));
+  const requested: string[] = [];
+  upstream(url => {
+    requested.push(url.searchParams.get('cmdCode')!);
+    return rows(url, [...helium(), { cmdCode: '1005', partnerCode: 842, primaryValue: 50, period: 2024 }]);
+  });
+
+  await read({ iso2: 'DE', hs4: '2804' });
+  const repeat = await read({ iso2: 'DE', hs4: '2804' });
+  const second = await read({ iso2: 'DE', hs4: '1005' });
+
+  // The 2804 sentinel answers the repeat; it must not suppress 1005 as well.
+  expect(requested).toEqual(['2804', '1005']);
+  expect(repeat.products.find(p => p.hs4 === '2804')?.partnerBasis).toBe('share_threshold');
+  expect(second.products.find(p => p.hs4 === '1005')?.partnerBasis).toBe('share_threshold');
+  expect(second.evidence?.recoveredHs4s).toEqual(['1005']);
+});
+
+it('single-heading recovery leaves a cold canonical key absent and never blocks the full catalogue path', async () => {
+  upstream(url => rows(url, helium()));
+
+  const heading = await lazyFetchHeading('DE', '2804');
+  expect(heading).toMatchObject({ state: 'observed' });
+  expect(heading?.product?.partners?.[0]?.partnerCode).toBe(842);
+  expect(redis.store.has(CANONICAL('DE'))).toBe(false);
+  expect((redis.store.get(HEADING('DE', '2804')) as { state: string }).state).toBe('observed');
+
+  // get-route-impact passes no hs4 and reads the country sentinel; the heading
+  // sentinel must not short-circuit it.
+  const callsAfterHeading = upstreamCalls;
+  const full = await lazyFetchBilateralHs4('DE');
+  expect(upstreamCalls).toBe(callsAfterHeading + 2);
+  expect(full?.state).toBe('observed');
+  expect(redis.store.has(CANONICAL('DE'))).toBe(true);
+});
+
+it('an observed heading sentinel with no usable product is refetched, not reported as observed', async () => {
+  redis.store.set(HEADING('DE', '2804'), { state: 'observed', attemptedAt: fresh(), product: { hs4: '1001', partners: [] } });
+  upstream(url => rows(url, helium()));
+
+  const result = await lazyFetchHeading('DE', '2804');
+
+  expect(upstreamCalls).toBe(1);
+  expect(result?.product?.hs4).toBe('2804');
+});
+
+it('a recovered heading older than the stored year is rejected and the stored row is served', async () => {
+  upstream(url => rows(url, helium(2022)));
+  const rejected = await lazyFetchHeading('DE', '2804', 2024);
+  expect(rejected).toMatchObject({ state: 'regression_rejected' });
+  expect(rejected?.product).toBeUndefined();
+  expect(redis.ttl.get(HEADING('DE', '2804'))).toBe(DAY);
+
+  redis.store.set(CANONICAL('DE'), {
+    iso2: 'DE', fetchedAt: fresh(), requestedHs4s: ['2804'],
+    products: [{ hs4: '2804', description: 'Helium', year: 2024, totalValue: 1000, denominatorBasis: 'reported_world',
+      topExporters: [{ partnerCode: 842, partnerIso2: '', value: 392, share: 0.392 }] }],
+  });
+  const callsBefore = upstreamCalls;
+  const result = await read({ iso2: 'DE', hs4: '2804' });
+  expect(upstreamCalls).toBe(callsBefore);
+  expect(result.products.find(p => p.hs4 === '2804')?.year).toBe(2024);
+});
+
+const canonicalHelium = (iso2: string) => ({
+  iso2, fetchedAt: fresh(), source: 'UN Comtrade bilateral HS4', requestedHs4s: ['2804'],
+  products: [{
+    hs4: '2804', description: 'Helium', year: 2024, totalValue: 1000, denominatorBasis: 'reported_world',
+    topExporters: [
+      { partnerCode: 842, partnerIso2: '', value: 392, share: 0.392 },
+      { partnerCode: 490, partnerIso2: '', value: 100, share: 0.1 },
+    ],
+  }],
+});
+const siblingHelium = (iso2: string, year: number) => ({
+  iso2, fetchedAt: fresh(), source: 'UN Comtrade bilateral HS4', requestedHs4s: ['2804'],
+  products: [{
+    hs4: '2804', year, denominatorBasis: 'reported_world', totalValue: 1000, worldNetWeightKg: 5000,
+    partners: [
+      { partnerCode: 842, partnerIso2: '', value: 392, share: 0.392, netWeightKg: 1960, netWeightEstimated: false, quantity: 1960, quantityUnitCode: 8 },
+      { partnerCode: 490, partnerIso2: '', value: 100, share: 0.1, netWeightKg: null, netWeightEstimated: false, quantity: null, quantityUnitCode: null },
+      { partnerCode: 156, partnerIso2: '', value: 30, share: 0.03, netWeightKg: 90, netWeightEstimated: true, quantity: null, quantityUnitCode: null },
+    ],
+    omittedCount: 12, omittedShare: 0.041,
+  }],
+});
+
+for (const [label, siblingYear, basis, partnerCount] of [
+  ['a later year', 2025, 'share_threshold', 3],
+  ['the same year', 2024, 'share_threshold', 3],
+  ['an older year', 2023, 'leading_5', 2],
+] as const) {
+  it(`a sibling row at ${label} than the canonical row yields ${basis}`, async () => {
+    redis.store.set(CANONICAL('JP'), canonicalHelium('JP'));
+    redis.store.set(PARTNERS('JP'), siblingHelium('JP', siblingYear));
+    upstream(url => rows(url, []));
+
+    const result = await read({ iso2: 'JP', hs4: '2804' });
+
+    const product = result.products.find(p => p.hs4 === '2804')!;
+    expect(upstreamCalls).toBe(0);
+    expect(product.partnerBasis).toBe(basis);
+    expect(product.topExporters).toHaveLength(partnerCount);
+    // Partner-code normalization applies to whichever list is served.
+    expect(product.topExporters[0]!.partnerIso2).toBe('US');
+    if (basis === 'share_threshold') {
+      expect(product.omittedPartnerCount).toBe(12);
+      expect(product.omittedPartnerShare).toBe(0.041);
+      expect(product.topExporters[0]!.netWeightKg).toBe(1960);
+      // A partner that reported no weight must omit the field, never send 0.
+      expect(product.topExporters[1]).not.toHaveProperty('netWeightKg');
+      expect(product.topExporters[2]!.netWeightEstimated).toBe(true);
+    } else {
+      expect(product).not.toHaveProperty('omittedPartnerCount');
+      expect(product.topExporters[0]).not.toHaveProperty('netWeightKg');
+    }
+    // The payload-level fetch time is always the canonical one.
+    expect(product).not.toHaveProperty('fetchedAt');
+    expect(result.evidence?.recoveredHs4s).toEqual([]);
+  });
+}
+
+it('a malformed sibling key is treated as absent, not as a cache failure', async () => {
+  redis.store.set(CANONICAL('JP'), canonicalHelium('JP'));
+  redis.store.set(PARTNERS('JP'), { iso2: 'JP', products: 'not-an-array' });
+  upstream(url => rows(url, []));
+
+  const result = await read({ iso2: 'JP', hs4: '2804' });
+
+  expect(result.evidence?.state).toBe('partial');
+  expect(result.products.find(p => p.hs4 === '2804')?.partnerBasis).toBe('leading_5');
+});
+
+it('a legacy country with no sibling and no world exports reports leading_5 with no volume or scale', async () => {
+  redis.store.set(CANONICAL('JP'), canonicalHelium('JP'));
+  upstream(url => rows(url, []));
+
+  const result = await read({ iso2: 'JP', hs4: '2804' });
+
+  const product = result.products.find(p => p.hs4 === '2804')!;
+  expect(product.partnerBasis).toBe('leading_5');
+  expect(product.topExporters[0]).not.toHaveProperty('netWeightKg');
+  expect(product.topExporters[0]).not.toHaveProperty('scale');
+  expect(result.evidence).not.toHaveProperty('worldExportsFetchedAt');
+});
+
+it('world exports attach rank and value to the origins they cover and nothing to the rest', async () => {
+  redis.store.set(CANONICAL('JP'), canonicalHelium('JP'));
+  redis.store.set(WORLD_EXPORTS, {
+    fetchedAt: '2026-09-01T00:00:00.000Z', period: '2024', source: 'UN Comtrade',
+    headings: {
+      '2804': {
+        year: 2024,
+        exporters: [
+          { reporterCode: 156, iso2: 'CN', valueUsd: 2_107_000_000, netWeightKg: 875_000_000 },
+          { reporterCode: 842, iso2: 'US', valueUsd: 1_809_000_000, netWeightKg: null },
+        ],
+      },
+    },
+  });
+  upstream(url => rows(url, []));
+
+  const result = await read({ iso2: 'JP', hs4: '2804' });
+
+  const product = result.products.find(p => p.hs4 === '2804')!;
+  expect(product.topExporters[0]!.scale).toEqual({ worldExportsUsd: 1_809_000_000, rank: 2, year: 2024 });
+  expect(product.topExporters[1]).not.toHaveProperty('scale');
+  expect(result.evidence?.worldExportsFetchedAt).toBe('2026-09-01T00:00:00.000Z');
 });
