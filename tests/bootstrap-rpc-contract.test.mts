@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test, { type TestContext } from 'node:test';
+import { createRedisFetch } from './helpers/fake-upstash-redis.mts';
 import rpc from '../api/infrastructure/v1/[rpc].ts';
 import bootstrap from '../api/bootstrap.js';
 import { issueSessionToken } from '../api/_session.js';
@@ -18,6 +19,10 @@ async function setup(t: TestContext) {
     const previous = process.env[name]; process.env[name] = value;
     t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
   }
+  const rateRedis = createRedisFetch({});
+  const warnings: string[] = [];
+  t.mock.method(console, 'warn', (...args: unknown[]) => warnings.push(args.map(String).join(' ')));
+  t.after(() => assert.ok(warnings.every(line => !line.includes('[rate-limit]')), warnings.join('\n')));
   const values = new Map<string, unknown>();
   const reads: string[] = [];
   const origins = new Set<string>();
@@ -27,6 +32,9 @@ async function setup(t: TestContext) {
     origins.add(origin);
     assert.equal(origin, 'https://redis.test');
     const commands = JSON.parse(String(init?.body));
+    if (!Array.isArray(commands[0]) || commands.some(([op]: string[]) => op !== 'GET')) {
+      return rateRedis.fetchImpl(input, init);
+    }
     return Response.json(commands.map(([op, key]: string[]) => {
       if (op !== 'GET') return { result: 1 };
       reads.push(key);
