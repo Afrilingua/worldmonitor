@@ -1,7 +1,8 @@
 name: Refresh Crawlable Live Pulse
 
 # The committed pulse snapshot is published as "Current signal" on every
-# country, chokepoint and crisis page, and as the homepage teaser strip's
+# country, chokepoint and crisis page, as the forecast scorecard on /accuracy/,
+# and as the homepage teaser strip's
 # prerendered fallback. build-crawlable-corpus.mjs rejects a snapshot older than
 # MAX_LIVE_PULSE_SNAPSHOT_AGE_DAYS (10), so this weekly refresh is what keeps
 # the corpus buildable as well as truthful.
@@ -134,6 +135,7 @@ jobs:
           # the drift that produced #7608 — and red the unit gate on this PR.
           npm run teasers:welcome
           node --import tsx --test --test-concurrency=1 \
+            tests/accuracy-corpus.test.mjs \
             tests/crawlable-corpus.test.mjs \
             tests/crawlable-developments.test.mjs \
             tests/crawlable-live-tools.test.mjs \
