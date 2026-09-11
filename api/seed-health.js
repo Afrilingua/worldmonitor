@@ -582,6 +582,10 @@ async function getSeedBatch(entries) {
   return { metaMap, probeMap, activatedMap, contentFreshnessActivatedMap };
 }
 
+// Per-country states the bilateral HS4 seeder records when it could not
+// observe a reporter this run (see scripts/seed-comtrade-bilateral-hs4.mjs).
+const BILATERAL_FAILURE_STATES = new Set(['unavailable', 'malformed', 'incomplete', 'not_attempted']);
+
 export async function handleSeedHealth(req, options = {}) {
   const hasInjectedClock = Object.hasOwn(options, 'now');
   const now = hasInjectedClock ? options.now : Date.now();
@@ -688,8 +692,12 @@ export async function handleSeedHealth(req, options = {}) {
       countryCoverage: Object.fromEntries(Object.entries(meta.countryCoverage ?? {}).filter(([iso]) => /^[A-Z]{2}$/.test(iso))),
       productCoverageKnown: Boolean(meta.countryCoverage),
     } : null;
+    // Only failures are a coverage gap. A reporter with no positive rows
+    // (no_records) and an observed importer that does not trade every reviewed
+    // heading are valid observations; flagging them would keep the domain
+    // partial on every healthy run. Both stay visible in bilateralCoverage.
     const bilateralPartial = bilateralGaps && (bilateralGaps.preservedCountries.length > 0
-      || Object.values(bilateralGaps.countryCoverage).some(c => c?.state !== 'observed' || c?.missingHs4s?.length > 0));
+      || Object.values(bilateralGaps.countryCoverage).some(c => BILATERAL_FAILURE_STATES.has(c?.state)));
     const coveragePartial = Boolean(bilateralPartial) || recordCoveragePartial
       || rankableCoveragePartial
       || poolCoveragePartial
