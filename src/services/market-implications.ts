@@ -1,6 +1,5 @@
 import { toApiUrl } from '@/services/runtime';
 import { premiumFetch } from '@/services/premium-fetch';
-import { getHydratedData } from '@/services/bootstrap';
 
 export interface TransmissionNode {
   node: string;
@@ -69,20 +68,6 @@ export async function fetchMarketImplications(frameworkId = ''): Promise<MarketI
   const now = Date.now();
   const cached = cache.get(frameworkId);
   if (cached && !cached.data.degraded && now - cached.cachedAt < CACHE_TTL) return cached.data;
-
-  if (!frameworkId) {
-    const hydrated = getHydratedData('marketImplications') as { cards?: unknown[]; degraded?: boolean; emptyReason?: string; generatedAt?: string } | undefined;
-    if (hydrated?.cards && Array.isArray(hydrated.cards) && hydrated.cards.length > 0 && !hydrated.degraded) {
-      const data: MarketImplicationsData = {
-        cards: hydrated.cards.map(c => normalizeCard(c as Record<string, unknown>)),
-        degraded: false,
-        emptyReason: hydrated.emptyReason ?? '',
-        generatedAt: hydrated.generatedAt ?? '',
-      };
-      cache.set('', { data, cachedAt: now });
-      return data;
-    }
-  }
 
   try {
     const url = new URL(toApiUrl('/api/intelligence/v1/list-market-implications'));
