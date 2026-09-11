@@ -127,7 +127,7 @@ describe('getForecastScorecard backend status', () => {
           },
         }) });
       }
-      assert.ok(url.startsWith('https://fake-upstash.example'), 'all I/O must stay in the mock');
+      assert.equal(new URL(url).origin, 'https://fake-upstash.example', 'all I/O must stay in the mock');
       return fetchImpl(input, init);
     };
     const response = await forecastRoute(new Request(makeCtx().request.url, {
