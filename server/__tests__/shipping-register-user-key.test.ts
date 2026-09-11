@@ -29,14 +29,24 @@ vi.mock('../_shared/api-key-rate-limit', () => ({
   reserveDailyMeter: vi.fn().mockResolvedValue({ count: 1, overLimit: false, metered: true, retryAfterSec: 100, rollback: async () => {} }),
   rateLimitHeaders: () => ({}), ENTERPRISE_API_RATE_LIMIT: 1000,
 }));
-const runRedisPipeline = vi.fn(async (commands: string[][]) => commands.map(() => ({ result: 'OK' })));
+const records = new Map<string, Record<string, unknown>>();
+const getCachedJson = vi.fn(async (key: string) => records.get(key) ?? null);
+const setCachedJson = vi.fn(async (key: string, value: Record<string, unknown>, _ttl: number) => { records.set(key, value); });
+const runRedisPipeline = vi.fn(async (commands: string[][]) => commands.map(command => {
+  if (command[0] === 'SET') records.set(command[1], JSON.parse(command[2]));
+  return { result: 'OK' };
+}));
 vi.mock('../_shared/redis', async (importOriginal) => ({
   ...await importOriginal<typeof import('../_shared/redis')>(),
   runRedisPipeline: (...args: [string[][]]) => runRedisPipeline(...args),
+  getCachedJson: (key: string) => getCachedJson(key),
+  setCachedJson: (key: string, value: Record<string, unknown>, ttl: number) => setCachedJson(key, value, ttl),
 }));
 
 import { createDomainGateway, serverOptions } from '../gateway';
 import { createShippingV2ServiceRoutes } from '../../src/generated/server/worldmonitor/shipping/v2/service_server';
+import statusHandler from '../../api/v2/shipping/webhooks/[subscriberId]';
+import actionHandler from '../../api/v2/shipping/webhooks/[subscriberId]/[action]';
 import { registerWebhook } from '../worldmonitor/shipping/v2/register-webhook';
 const registerHandler = vi.fn(registerWebhook);
 const routes = createShippingV2ServiceRoutes({ listWebhooks: vi.fn(), registerWebhook: registerHandler, routeIntelligence: vi.fn() }, serverOptions);
@@ -47,7 +57,7 @@ const request = (key?: string, extra: Record<string, string> = {}, body = payloa
 });
 const context = { waitUntil: () => {} };
 beforeEach(() => {
-  apiAccess = true; vi.clearAllMocks();
+  apiAccess = true; records.clear(); vi.clearAllMocks();
   validateUserApiKey.mockReset().mockImplementation(async (key: string) => key === keyA ? { userId: 'owner-a' } : key === keyB ? { userId: 'owner-b' } : null);
   vi.stubEnv('WORLDMONITOR_VALID_KEYS', 'enterprise-test');
 });
@@ -112,3 +122,74 @@ test('enterprise cookie keeps its owner with an anonymous header', async () => {
   expect(JSON.parse(commands[0][2]).ownerTag).toBe(hash('enterprise-test'));
   expect(commands[1][1]).toBe(`webhook:owner:${hash('enterprise-test')}:v1`);
 });
+
+const manage = (subscriberId: string, action: string, key?: string, extra: Record<string, string> = {}) => {
+  const req = new Request(`https://www.worldmonitor.app/api/v2/shipping/webhooks/${subscriberId}${action ? `/${action}` : ''}`, {
+    method: action ? 'POST' : 'GET', headers: { ...(key ? { 'X-Api-Key': key } : {}), ...extra },
+  });
+  return action ? actionHandler(req) : statusHandler(req);
+};
+
+test('gateway registrations support owner-only status, rotation and reactivation', async () => {
+  const a = await (await gateway(request(keyA), context)).json();
+  const b = await (await gateway(request(keyB), context)).json();
+  for (const [owner, own, foreign] of [[keyA, a, b], [keyB, b, a]] as const) {
+    const status = await manage(own.subscriberId, '', owner);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ subscriberId: own.subscriberId, active: true });
+    const before = structuredClone(records);
+    for (const action of ['', 'rotate-secret', 'reactivate']) {
+      const denied = await manage(foreign.subscriberId, action, owner, { 'x-user-id': 'owner-b' });
+      expect(denied.status).toBe(403);
+      expect(await denied.text()).not.toContain(foreign.secret);
+    }
+    expect(records).toEqual(before);
+    const rotated = await manage(own.subscriberId, 'rotate-secret', owner);
+    expect(rotated.status).toBe(200);
+    const body = await rotated.json();
+    expect(body.secret).toMatch(/^[a-f0-9]{64}$/);
+    expect(body.secret).not.toBe(own.secret);
+    const storageKey = `webhook:sub:${own.subscriberId}:v1`;
+    expect(records.get(storageKey)?.secret).toBe(body.secret);
+    records.set(storageKey, { ...records.get(storageKey), active: false });
+    expect((await manage(own.subscriberId, 'reactivate', owner)).status).toBe(200);
+    expect(records.get(storageKey)).toMatchObject({ active: true, secret: body.secret, ownerTag: hash(owner) });
+    expect(await (await manage(own.subscriberId, '', owner)).json()).not.toHaveProperty('secret');
+    expect(setCachedJson.mock.calls.at(-1)?.[2]).toBe(86400 * 30);
+  }
+});
+
+for (const action of ['', 'rotate-secret', 'reactivate']) {
+  test(`management ${action || 'status'} rejects invalid, missing and unentitled keys before storage`, async () => {
+    for (const key of [invalidKey, undefined]) {
+      const denied = await manage('wh_test', action, key, { 'x-user-id': 'owner-a' });
+      expect(denied.status).toBe(401);
+      expect(await denied.text()).not.toContain('gateway validation');
+    }
+    expect((await manage('wh_test', action, invalidKey, { Cookie: 'wm-pro-key=enterprise-test' })).status).toBe(401);
+    apiAccess = false;
+    expect((await manage('wh_test', action, keyA)).status).toBe(403);
+    expect(getCachedJson).not.toHaveBeenCalled();
+    expect(setCachedJson).not.toHaveBeenCalled();
+  });
+  test(`management ${action || 'status'} returns 503 on key lookup outage before storage`, async () => {
+    validateUserApiKey.mockRejectedValue(new Error('synthetic outage'));
+    const response = await manage('wh_test', action, keyA);
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain('synthetic outage');
+    expect(getCachedJson).not.toHaveBeenCalled();
+    expect(setCachedJson).not.toHaveBeenCalled();
+  });
+  test(`management ${action || 'status'} preserves a premium recheck outage as 503`, async () => {
+    validateUserApiKey.mockResolvedValueOnce({ userId: 'owner-a' }).mockRejectedValueOnce(new Error('synthetic outage'));
+    expect((await manage('wh_test', action, keyA)).status).toBe(503);
+    expect(getCachedJson).not.toHaveBeenCalled();
+    expect(setCachedJson).not.toHaveBeenCalled();
+  });
+  test(`management ${action || 'status'} keeps enterprise cookie credential ownership`, async () => {
+    const extra = { Cookie: 'wm-pro-key=enterprise-test' };
+    const own = await (await gateway(request('wms_anonymous', extra), context)).json();
+    expect((await manage(own.subscriberId, action, 'wms_anonymous', extra)).status).toBe(200);
+    expect(records.get(`webhook:sub:${own.subscriberId}:v1`)?.ownerTag).toBe(hash('enterprise-test'));
+  });
+}
