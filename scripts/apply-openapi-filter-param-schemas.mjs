@@ -20,6 +20,12 @@ function quotedList(values) {
 
 export const OPENAPI_FILTER_PARAM_SCHEMA_OVERRIDES = [
   {
+    path: '/api/infrastructure/v1/get-bootstrap-data',
+    method: 'get',
+    name: 'keys',
+    schema: { type: 'array', maxItems: 1, items: { type: 'string', minLength: 1 } },
+  },
+  {
     path: '/api/conflict/v1/get-humanitarian-summary',
     method: 'get',
     name: 'country_code',

@@ -125,3 +125,14 @@ test('RPC still requires a session and does not expose arbitrary Redis keys', as
   assert.equal(unknown.status, 400);
   assert.deepEqual(reads, []);
 });
+
+
+test('published RPC query schema documents the single-key selector', () => {
+  const spec = JSON.parse(readFileSync(new URL('../docs/api/InfrastructureService.openapi.json', import.meta.url), 'utf8'));
+  const parameters = spec.paths['/api/infrastructure/v1/get-bootstrap-data'].get.parameters;
+  const keys = parameters.find((parameter: { name: string }) => parameter.name === 'keys');
+  assert.equal(keys.schema.maxItems, 1);
+  assert.equal(keys.schema.items.minLength, 1);
+  const tier = parameters.find((parameter: { name: string }) => parameter.name === 'tier');
+  assert.equal(tier.schema.pattern, '^(fast|slow)$');
+});
