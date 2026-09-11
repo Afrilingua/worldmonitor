@@ -109,8 +109,19 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
   const sourceFetched = product?.fetchedAt
     ? `${product.fetchedAt} (HS ${hs4} recovered on demand; stored catalogue: ${capture.products.fetchedAt || 'none'})`
     : capture.products.fetchedAt || 'unknown';
+  // The cache state and source describe the stored catalogue. A recovered
+  // heading came from the public preview instead, so the line names that route
+  // first and labels the catalogue's state and source as the catalogue's.
+  const cacheState = capture.products.evidence?.state ?? 'legacy_unknown';
+  const cacheSource = capture.products.evidence?.source ?? 'UN Comtrade bilateral HS4; retrieval method unknown';
+  const recoveredSource = `UN Comtrade public preview (HS ${hs4} recovered on demand)`;
+  const cacheLine = !capture.products.evidence?.recoveredHs4s?.includes(hs4)
+    ? `Cache state: ${cacheState}. Source: ${cacheSource}.`
+    : capture.products.fetchedAt
+      ? `Cache state: ${cacheState} (stored catalogue). Source: ${recoveredSource}; stored catalogue: ${cacheSource}.`
+      : `Cache state: ${cacheState}. Source: ${recoveredSource}.`;
   const coverage = [
-    `Cache state: ${capture.products.evidence?.state ?? 'legacy_unknown'}. Source: ${capture.products.evidence?.source ?? 'UN Comtrade bilateral HS4; retrieval method unknown'}.`,
+    cacheLine,
     `Source fetched: ${sourceFetched}. Capture retrieved: ${capture.retrievedAt}. Trade observation year: ${observedAt ?? 'unknown'}. Publication lag and fetch age are separate.`,
     `Last refresh attempt: ${capture.products.evidence?.lastAttemptAt || 'unknown'}; result: ${capture.products.evidence?.lastAttemptState || 'unknown'}.`,
   ];
@@ -167,6 +178,9 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
         worldExportsUsd: scale.worldExportsUsd,
         worldExportsKg: nonnegative(scale.worldExportsKg) && scale.worldExportsKg > 0 ? scale.worldExportsKg : null,
         rank: scale.rank, year: scale.year,
+        // The population the rank is out of, and the reporters it leaves out.
+        reporterCount: nonnegative(scale.reporterCount) && scale.reporterCount > 0 ? scale.reporterCount : null,
+        unrankedReporterCount: nonnegative(scale.unrankedReporterCount) ? scale.unrankedReporterCount : null,
       } : null,
       production: producer && productionStage ? {
         // Percent of named producers as published (0-100), deliberately not
@@ -181,17 +195,24 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
   // order the reader meets them in the candidate list.
   const order = { not_on_modeled_route: 0, unknown: 1, exposed: 2 };
   candidates.sort((a, b) => order[a.routeState] - order[b.routeState] || (b.sharePct ?? -1) - (a.sharePct ?? -1) || a.origin.localeCompare(b.origin));
-  const displayedShare = candidates.reduce((sum, c) => sum + (c.sharePct ?? 0), 0);
-  coverage.push(product ? `Displayed origins cover ${displayedShare.toFixed(1)}% of the stored import-value denominator. ${Math.max(0, 100 - displayedShare).toFixed(1)}% is not represented by displayed usable shares (including unlisted origins and excluded or invalid rows; rounded shares). Shares are not renormalized.` : 'Share coverage is unknown: no product denominator is available. Missing data is not zero trade.');
+  // "Listed" throughout: these lines count every origin in the brief, which the
+  // export prints in full and the in-panel preview only in part.
+  const listedShare = candidates.reduce((sum, c) => sum + (c.sharePct ?? 0), 0);
+  coverage.push(product ? `Listed origins cover ${listedShare.toFixed(1)}% of the stored import-value denominator. ${Math.max(0, 100 - listedShare).toFixed(1)}% is not represented by listed usable shares (including unlisted origins and excluded or invalid rows; rounded shares). Shares are not renormalized.` : 'Share coverage is unknown: no product denominator is available. Missing data is not zero trade.');
   const hubs = candidates.filter(c => c.transitHub);
   if (product) {
+    // The threshold list is padded to 5 and capped at 25, so "every origin at
+    // or above 1%" would be false at both ends; the basis states both.
     coverage.push(product.partnerBasis === 'share_threshold'
-      ? `Origins shown: every partner at or above 1% of the denominator (${candidates.length} shown, ${product.omittedPartnerCount ?? 0} omitted holding ${((product.omittedPartnerShare ?? 0) * 100).toFixed(1)}% combined).`
-      : 'Origins shown: the stored leading 5 origins; smaller partners were not retained.');
-    if (hubs.length) coverage.push(`Possible transit hubs among shown origins: ${hubs.map(c => hubName(c.origin)).join(', ')}. Recorded exports from a hub can be re-exports rather than origin production, so a hub share does not establish origin capacity.`);
+      ? `Origins listed: partners holding at least 1% of the denominator, padded to 5 and capped at 25 (${candidates.length} listed; ${product.omittedPartnerCount ?? 0} omitted holding ${((product.omittedPartnerShare ?? 0) * 100).toFixed(1)}% combined).`
+      : 'Origins listed: the stored leading 5 origins; smaller partners were not retained.');
+    if (hubs.length) coverage.push(`Possible transit hubs among listed origins: ${hubs.map(c => hubName(c.origin)).join(', ')}. Recorded exports from a hub can be re-exports rather than origin production, so a hub share does not establish origin capacity.`);
     const worldExportsFetchedAt = capture.products.evidence?.worldExportsFetchedAt;
+    // Reporters that have not filed the ranking year are left out of it, which
+    // moves every rank below them; the count is stated wherever it is known.
+    const unranked = Math.max(0, ...candidates.map(c => c.scale?.unrankedReporterCount ?? 0));
     coverage.push(worldExportsFetchedAt
-      ? `Supplier scale: world exports of HS ${hs4} fetched ${worldExportsFetchedAt}; ${candidates.filter(c => c.scale).length} of ${candidates.length} shown origins matched.`
+      ? `Supplier scale: world exports of HS ${hs4} fetched ${worldExportsFetchedAt}; ${candidates.filter(c => c.scale).length} of ${candidates.length} listed origins matched.${unranked > 0 ? ` Ranks count only reporters that filed the ranking year; ${unranked} reporters whose newest HS ${hs4} filing is older are not ranked, so an origin's rank can change when they file.` : ''}`
       : 'Supplier scale unavailable: no world-export snapshot could be joined to these origins (not yet seeded, or unreadable at capture time). Recorded import share alone does not describe an origin\'s size as an exporter.');
     if (mineralId) {
       coverage.push(productionSnapshot && productionStage
@@ -200,7 +221,7 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
     }
   }
   coverage.push(...excluded);
-  coverage.push(`Modeled routes: ${candidates.filter(c => c.routeState !== 'unknown').length}/${candidates.length} displayed origins. Unknown paths remain unresolved; modeled chokepoints are an unordered set, not a shipment sequence.`);
+  coverage.push(`Modeled routes: ${candidates.filter(c => c.routeState !== 'unknown').length}/${candidates.length} listed origins. Unknown paths remain unresolved; modeled chokepoints are an unordered set, not a shipment sequence.`);
   // What the origin list can and cannot hold, worded for the basis actually served.
   const originsAvailable = product?.partnerBasis === 'share_threshold'
     ? 'Origins at or above 1% of the denominator are available (at least 5, at most 25); smaller partners are summarised, not listed'

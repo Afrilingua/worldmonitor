@@ -215,9 +215,13 @@ sibling key shares the country shard's 40-day TTL and the same preservation and
 TTL-extension rules. Only `get-country-products` reads it.
 
 `comtrade:world-exports-hs4:v1` is one run-level snapshot of every reporter's
-exports of every reviewed heading: per heading, the observation year and the
-reporters ranked by exported value, each with value in USD and net weight when
-reported. The run reserves two requests for it against the request budget
+exports of every reviewed heading: per heading, the observation year, the
+reporters that filed that year ranked by exported value, each with value in USD
+and net weight when reported, and `unrankedReporterCount`, the reporters whose
+newest filing for the heading is older. Those late filers or lapsed exporters
+are left out of the ranking, so a rank is a rank among that year's filers and
+can change when they file: the brief prints it as "rank N of M reporters filing
+YEAR" and states the unranked count. The run reserves two requests for it against the request budget
 before it attempts the first reporter — one per catalogue batch, with the
 reporter omitted and the partner pinned to World, so a single request answers
 for every reporter at once. Reserving first keeps the per-reporter budget

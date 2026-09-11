@@ -644,6 +644,40 @@ describe('ensureInlineTypedInput (fixture)', () => {
     ensureInlineTypedInput(spec);
     assert.equal(spec.paths['/only-ref'].get.parameters[0].description, 'Opaque page cursor.');
   });
+
+  it('cuts an over-budget lead at a word boundary and marks the cut', () => {
+    // No sentence break and no curated summary: the lead is the whole text, so
+    // only the truncation loop can bring it under the cap. Mixed word lengths
+    // keep the byte cap off a word boundary, so a cut that ignores words ends
+    // mid-word here (one repeated word can line the cap up with a word end).
+    const vocabulary = ['alpha', 'beta', 'gamma', 'delta', 'epsilon'];
+    const full = Array.from({ length: 80 }, (_, i) => vocabulary[i % vocabulary.length]).join(' ');
+    const spec = {
+      openapi: '3.1.0',
+      paths: { '/only-ref': { get: { parameters: [{ $ref: '#/components/parameters/LongParam' }] } } },
+      components: {
+        parameters: {
+          LongParam: { name: 'long', in: 'query', description: full, schema: { type: 'string' } },
+        },
+      },
+    };
+
+    ensureInlineTypedInput(spec);
+    const restored = spec.paths['/only-ref'].get.parameters[0].description;
+    assert.ok(
+      Buffer.byteLength(restored, 'utf8') <= INLINE_DESCRIPTION_MAX_BYTES,
+      `restored description is ${Buffer.byteLength(restored, 'utf8')} bytes`,
+    );
+    const [lead, pointer] = restored.split('… ');
+    assert.equal(pointer, 'Full text: #/components/parameters/LongParam.');
+    const fullWords = full.split(' ');
+    const leadWords = lead.split(' ');
+    // Whole words from the start of the text: no partial word, no trailing space.
+    assert.deepEqual(leadWords, fullWords.slice(0, leadWords.length), `cut mid-word: "…${lead.slice(-20)}"`);
+    // As many whole words as fit: one more would break the cap.
+    assert.ok(Buffer.byteLength(`${lead} ${fullWords[leadWords.length]}… ${pointer}`, 'utf8') > INLINE_DESCRIPTION_MAX_BYTES);
+    assert.equal(spec.components.parameters.LongParam.description, full);
+  });
 });
 
 describe('public OpenAPI dedupe (real bundle)', () => {

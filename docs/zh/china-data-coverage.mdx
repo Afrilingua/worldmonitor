@@ -175,8 +175,11 @@ SZSE [适用规则与公告](https://www.szse.cn/application/laws/)，robots.txt
 以及相同的保留与 TTL 延长规则。只有 `get-country-products` 读取它。
 
 `comtrade:world-exports-hs4:v1` 是每次运行一份的全局快照：记录每个 reporter 对每个
-受审品目的出口。按品目保存观测年份，以及按出口额排序的 reporter 列表，每行含
-美元金额和已报告的净重。运行会在尝试第一个 reporter 之前，就为它在请求预算中
+受审品目的出口。按品目保存观测年份、在该年份申报并按出口额排序的 reporter 列表
+（每行含美元金额和已报告的净重），以及 `unrankedReporterCount`：该品目最新申报
+早于这一年份的 reporter 数量。这些延迟申报方或已停止出口的 reporter 不参与排名，
+因此排名只是该年份申报方之间的排名，并可能在它们申报后变化：简报将其写作
+"rank N of M reporters filing YEAR"，并注明未排名的数量。运行会在尝试第一个 reporter 之前，就为它在请求预算中
 预留两次请求——每个目录批次一次，省略 reporter 并把伙伴固定为 World，因此单次请求
 即可覆盖全部 reporter。先预留可以让逐 reporter 的预算预检保持正确，并避免预算中止
 把该快照整个丢掉。它共享 40 天 TTL。其结果写入 seed metadata 并通过

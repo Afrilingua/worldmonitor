@@ -492,6 +492,7 @@ test('an observed world-exports fetch is published and summarised in seed-meta',
   assert.equal(Object.keys(payload.headings).length, 2);
   const heading = payload.headings[Object.keys(payload.headings)[0]];
   assert.equal(heading.year, 2024);
+  assert.equal(heading.unrankedReporterCount, 0, 'the rank basis travels with the snapshot');
   assert.deepEqual(heading.exporters, [
     { reporterCode: 156, iso2: 'CN', valueUsd: 2_107_000, netWeightKg: 875_000 },
     { reporterCode: 842, iso2: 'US', valueUsd: 1_809_000, netWeightKg: null },

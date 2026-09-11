@@ -85,9 +85,9 @@ export async function installCommodityBriefData(page: Page) {
       { hs4: '2804', description: 'Hydrogen and rare gases', totalValue: 1000, year: 2024,
         partnerBasis: 'share_threshold', omittedPartnerCount: 39, omittedPartnerShare: 0.031, topExporters: [
           { partnerCode: 634, partnerIso2: 'QA', share: 0.408, value: 408, netWeightKg: 1_204_000, netWeightEstimated: false, quantity: 8600, quantityUnitCode: 12,
-            scale: { worldExportsUsd: 2_100_000_000, worldExportsKg: 2_400_000, rank: 1, year: 2024 } },
+            scale: { worldExportsUsd: 2_100_000_000, worldExportsKg: 2_400_000, rank: 1, year: 2024, reporterCount: 118, unrankedReporterCount: 22 } },
           { partnerCode: 842, partnerIso2: '', share: 0.392, value: 392, netWeightKg: 839, netWeightEstimated: true,
-            scale: { worldExportsUsd: 1_450_000_000, rank: 2, year: 2024 } },
+            scale: { worldExportsUsd: 1_450_000_000, rank: 2, year: 2024, reporterCount: 118, unrankedReporterCount: 22 } },
           // A hub origin with neither weight nor scale: the "not reported" states.
           { partnerCode: 528, partnerIso2: 'NL', share: 0.1, value: 100 },
           { partnerCode: 999, partnerIso2: 'ZZ', share: 0.1, value: 100 },

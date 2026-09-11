@@ -13,7 +13,7 @@ import {
   releaseLock,
   sleep,
 } from './_seed-utils.mjs';
-import { HS4_CODES, HS4_BATCHES, PREVIEW_MAX_RECORDS, parseRecords, groupByProduct, groupWorldExports, selectPartners, leadingExporters, comtradeFailureState } from './shared/comtrade.mjs';
+import { HS4_CODES, HS4_BATCHES, PREVIEW_MAX_RECORDS, parseRecords, groupByProduct, groupWorldExports, toCanonicalProduct, toPartnersProduct, comtradeFailureState } from './shared/comtrade.mjs';
 export { HS4_CODES, MAX_HS4_CODES_PER_BATCH, groupByProduct } from './shared/comtrade.mjs';
 import { candidatePeriods, periodWindow, recentPeriod } from './shared/comtrade-period.mjs';
 
@@ -610,12 +610,11 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
           // The canonical payload keeps exactly the shape every derived scorer
           // and both bulk readers have always seen: the leading five origins,
           // with none of the new per-partner detail.
+          // Both row shapes come from the shared catalogue module, which the
+          // lazy fetch also uses to write the same two keys.
           const payload = JSON.stringify({
             iso2,
-            products: products.map(({ partners, worldNetWeightKg, ...product }) => ({
-              ...product,
-              topExporters: leadingExporters(product),
-            })),
+            products: products.map(toCanonicalProduct),
             fetchedAt,
             source,
             requestedHs4s: HS4_CODES,
@@ -628,19 +627,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
             fetchedAt,
             source,
             requestedHs4s: HS4_CODES,
-            products: products.map((product) => {
-              const { partners, omittedCount, omittedShare } = selectPartners(product);
-              return {
-                hs4: product.hs4,
-                year: product.year,
-                denominatorBasis: product.denominatorBasis,
-                totalValue: product.totalValue,
-                worldNetWeightKg: product.worldNetWeightKg,
-                partners,
-                omittedCount,
-                omittedShare,
-              };
-            }),
+            products: products.map(toPartnersProduct),
           }));
           writtenCount++;
           console.log(`    ${iso2}: ${products.length} products, ${batch1.length + batch2.length} records`);

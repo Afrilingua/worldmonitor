@@ -12,11 +12,19 @@ message ExporterScale {
   // Reported world-export weight in kilograms. Absent when the origin reported
   // no weight (the provider writes 0 for "not reported"), never 0 for absent.
   optional double world_exports_kg = 2;
-  // 1-based position among world exporters of this heading, ranked by value.
+  // 1-based position by value among the reporters that filed this heading for
+  // `year` (see reporter_count), not among every world exporter.
   int32 rank = 3;
   // Trade observation year of the world-export figures, not the fetch year.
   // Always equal to the row's year: a scale from another year is not attached.
   int32 year = 4;
+  // Reporters ranked for this heading and year: rank is out of this many.
+  int32 reporter_count = 5;
+  // Reporters whose newest filing for this heading predates `year` (late filers
+  // or lapsed exporters). They are left out of the ranking, so one that files
+  // later can move every rank below it. Absent on a snapshot written before the
+  // count was recorded.
+  optional int32 unranked_reporter_count = 6;
 }
 
 message ProductExporter {
@@ -88,12 +96,14 @@ message GetCountryProductsResponse {
 
 // Cache evidence for the returned products. Missing data is not zero trade.
 message CountryProductEvidence {
-  // Reader state: "observed", "partial" (some catalogue headings absent),
+  // Reader state: "observed", "partial" (some catalogue headings absent, which
+  // includes a response holding only a heading recovered on demand),
   // "stale_preserved" (older than 35 days; last-good data kept),
-  // "cache_unavailable", or, when no payload exists, the last attempt state
-  // (see last_attempt_state) or "missing".
+  // "cache_unavailable", or, when no payload exists and nothing was recovered,
+  // the last attempt state (see last_attempt_state) or "missing".
   string state = 1;
-  // Retrieval route of the cached payload, or a legacy-cache label when unknown.
+  // Retrieval route of the cached payload; with no payload, the single-heading
+  // recovery route when a heading was recovered, else a legacy-cache label.
   string source = 2;
   // HS4 headings the producing request asked for; empty when unknown (legacy cache).
   repeated string requested_hs4s = 3;

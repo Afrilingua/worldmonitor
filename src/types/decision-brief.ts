@@ -80,7 +80,13 @@ export interface CommodityBriefSnapshot {
     /** Provider abbreviation for `quantity` (e.g. `m³`), rendered as published. */
     quantityUnit: string | null;
     transitHub: boolean;
-    scale: { worldExportsUsd: number; worldExportsKg: number | null; rank: number; year: number } | null;
+    /**
+     * `rank` is among the `reporterCount` reporters that filed `year`;
+     * `unrankedReporterCount` filed only earlier years and is left out, so
+     * the rank is not a rank among every world exporter. Counts are null on a
+     * snapshot written before they were recorded.
+     */
+    scale: { worldExportsUsd: number; worldExportsKg: number | null; rank: number; year: number; reporterCount: number | null; unrankedReporterCount: number | null } | null;
     /** `sharePct` is percent of named producers (0-100), not the 0-1 trade share. */
     production: { sharePct: number | null; stage: 'mine' | 'refinery'; source: string; restricted: boolean } | null;
   }[];

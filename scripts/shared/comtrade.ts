@@ -10,6 +10,7 @@ import { createComtradeBilateralCatalogue } from './comtrade-bilateral.mjs';
 export {
   PREVIEW_MAX_RECORDS, ComtradeResponseError, comtradeFailureState,
   MIN_PARTNER_SHARE, MIN_PARTNERS, MAX_PARTNERS, selectPartners, leadingExporters,
+  toCanonicalProduct, toPartnersProduct,
 } from './comtrade-bilateral.mjs';
 
 export const { normalizeComtradePartner, normalizeComtradeProducts } = createComtradePartnerNormalizer(registry, standardCodes);

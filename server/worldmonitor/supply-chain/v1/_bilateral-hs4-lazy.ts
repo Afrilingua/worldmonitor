@@ -1,6 +1,6 @@
 import {
   HS4_CODES, HS4_BATCHES, PREVIEW_MAX_RECORDS, parseRecords, groupByProduct, comtradeFailureState,
-  selectPartners, leadingExporters,
+  toCanonicalProduct, toPartnersProduct,
 } from '../../../../scripts/shared/comtrade';
 /**
  * Lazy-fetch fallback for the bilateral-hs4 store.
@@ -130,17 +130,32 @@ export type LazyAttemptState =
 // Read back as the same permanent `empty` source the first response returned.
 const PERMANENT_EMPTY_STATES = new Set<string>(['no_records', 'unsupported_reporter']);
 
+/** Gap the public preview route needs between two requests (about 1 per second). */
+export const UPSTREAM_GAP_MS = 1100;
+
+/** When one call's provider requests may start and must finish. */
+export interface FetchWindow {
+  /** Epoch ms before which no request may start: the caller's previous request plus UPSTREAM_GAP_MS. */
+  notBefore?: number;
+  /** Epoch ms deadline shared with the caller's other requests; capped at FETCH_TIMEOUT_MS from the start. */
+  deadlineAt?: number;
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 /**
  * Fetch one or more batches of headings for a reporter. The default is the
  * whole catalogue; a single-heading recovery passes `[[hs4]]`, which makes one
  * request and skips the inter-batch pause entirely.
  */
-export async function fetchComtradeBilateral(reporterCode: string, batches: string[][] = HS4_BATCHES): Promise<ComtradeResult> {
+export async function fetchComtradeBilateral(reporterCode: string, batches: string[][] = HS4_BATCHES, timing: FetchWindow = {}): Promise<ComtradeResult> {
   const records = [];
+  const wait = (timing.notBefore ?? 0) - Date.now();
+  if (wait > 0) await sleep(wait);
   // Every batch shares one request deadline. No partial result is published.
-  const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
+  const signal = AbortSignal.timeout(Math.max(1, Math.min(FETCH_TIMEOUT_MS, (timing.deadlineAt ?? Infinity) - Date.now())));
   for (const [index, codes] of batches.entries()) {
-    if (index > 0) await new Promise(resolve => setTimeout(resolve, 1100));
+    if (index > 0) await sleep(UPSTREAM_GAP_MS);
     const url = new URL(COMTRADE_BASE);
     url.searchParams.set('reporterCode', reporterCode);
     url.searchParams.set('cmdCode', codes.join(','));
@@ -167,32 +182,6 @@ export async function fetchComtradeBilateral(reporterCode: string, batches: stri
   return { products: groupByProduct(records), rateLimited: false, failed: false };
 }
 
-/**
- * The canonical row: the leading 5 origins and nothing else. The shared
- * catalogue now also returns the full ranked partner list and the World row's
- * weight; both belong to the sibling key, and a canonical write that carried
- * them would push the two bulk pipelines past their 4.5 MB ceiling (KTD1).
- */
-function toCanonicalProduct(product: CatalogueProduct): CountryProduct {
-  const { partners: _partners, worldNetWeightKg: _worldNetWeightKg, ...canonical } = product;
-  return { ...canonical, topExporters: leadingExporters(product) };
-}
-
-/** The sibling row: the threshold origins with weight, and what was left out. */
-function toPartnersProduct(product: CatalogueProduct): PartnersProduct {
-  const { partners, omittedCount, omittedShare } = selectPartners(product);
-  return {
-    hs4: product.hs4,
-    year: product.year,
-    denominatorBasis: product.denominatorBasis,
-    totalValue: product.totalValue,
-    worldNetWeightKg: product.worldNetWeightKg ?? null,
-    partners,
-    omittedCount,
-    omittedShare,
-  };
-}
-
 export interface LazyFetchResult {
   products: CountryProduct[];
   comtradeSource: 'bilateral-hs4' | 'lazy' | 'empty';
@@ -200,6 +189,8 @@ export interface LazyFetchResult {
   state?: LazyAttemptState;
   attemptedAt?: string;
   payload?: BilateralHs4Payload;
+  /** Epoch ms at which this call's provider request settled; absent when a sentinel answered without one. */
+  upstreamSettledAt?: number;
 }
 
 /**
@@ -249,24 +240,28 @@ export async function lazyFetchBilateralHs4(iso2: string, previous?: BilateralHs
   }
 
   const attemptedAt = new Date().toISOString();
+  // When the provider request settled, so the caller's next request on the same
+  // rate-limited route can wait out the gap after it.
+  let upstreamSettledAt: number | undefined;
+  const settled = (result: LazyFetchResult): LazyFetchResult => ({ ...result, upstreamSettledAt });
   try {
-    const result = await fetchComtradeBilateral(unCode);
+    const result = await fetchComtradeBilateral(unCode).finally(() => { upstreamSettledAt = Date.now(); });
 
     if (result.rateLimited) {
       await setCachedJson(sentinelKey, { rateLimited: true, attemptedAt }, EMPTY_TTL, true);
-      return { products: [], comtradeSource: 'empty', rateLimited: true, state: 'rate_limited', attemptedAt };
+      return settled({ products: [], comtradeSource: 'empty', rateLimited: true, state: 'rate_limited', attemptedAt });
     }
 
     // Provider failure: a short sentinel stops every read from re-requesting a
     // failing provider, without suppressing recovery for a day.
     if (result.failed) {
       await setCachedJson(sentinelKey, { state: 'unavailable', attemptedAt }, FAILURE_TTL, true);
-      return { products: [], comtradeSource: 'lazy', state: 'unavailable', attemptedAt };
+      return settled({ products: [], comtradeSource: 'lazy', state: 'unavailable', attemptedAt });
     }
 
     if (result.products.length === 0) {
       await setCachedJson(sentinelKey, { state: 'no_records', attemptedAt }, EMPTY_TTL, true);
-      return { products: [], comtradeSource: 'empty', state: 'no_records', attemptedAt };
+      return settled({ products: [], comtradeSource: 'empty', state: 'no_records', attemptedAt });
     }
 
     const cacheKey = `${KEY_PREFIX}${iso2}:v1`;
@@ -274,8 +269,9 @@ export async function lazyFetchBilateralHs4(iso2: string, previous?: BilateralHs
     // the previous payload stays authoritative.
     if (previous?.products.some(old => !result.products.some(p => p.hs4 === old.hs4 && p.year >= old.year))) {
       await setCachedJson(sentinelKey, { state: 'regression_rejected', attemptedAt }, EMPTY_TTL, true);
-      return { products: [], comtradeSource: 'lazy', state: 'regression_rejected', attemptedAt };
+      return settled({ products: [], comtradeSource: 'lazy', state: 'regression_rejected', attemptedAt });
     }
+    // Canonical rows only: leading five origins, no partner detail (KTD1).
     const products = result.products.map(toCanonicalProduct);
     const payload = { iso2, products, fetchedAt: attemptedAt, source: 'UN Comtrade public preview', requestedHs4s: HS4_CODES };
     // A scheduled write may have advanced the canonical key during this fetch.
@@ -283,14 +279,14 @@ export async function lazyFetchBilateralHs4(iso2: string, previous?: BilateralHs
     const written = previous
       ? await setCachedJson(sentinelKey, { state: 'observed', attemptedAt, payload }, EMPTY_TTL, true)
       : await setCachedJsonIfAbsent(cacheKey, payload, SUCCESS_TTL, true);
-    if (!written) return { products, comtradeSource: 'lazy', state: 'cache_write_failed', attemptedAt };
-    return { products, comtradeSource: 'bilateral-hs4', state: 'observed', attemptedAt, payload };
+    if (!written) return settled({ products, comtradeSource: 'lazy', state: 'cache_write_failed', attemptedAt });
+    return settled({ products, comtradeSource: 'bilateral-hs4', state: 'observed', attemptedAt, payload });
   } catch (error) {
     const state = comtradeFailureState(error);
     // Capped or World-inconsistent data will not change within the day; a
     // malformed body, timeout or network failure may, so it is only briefly suppressed.
     await setCachedJson(sentinelKey, { state, attemptedAt }, state === 'incomplete' ? EMPTY_TTL : FAILURE_TTL, true);
-    return { products: [], comtradeSource: 'lazy', state, attemptedAt };
+    return settled({ products: [], comtradeSource: 'lazy', state, attemptedAt });
   } finally {
     fetchInFlight = false;
   }
@@ -322,9 +318,16 @@ export interface LazyHeadingResult {
  * `storedYear`, when given, is the observation year the caller already holds;
  * an older recovery is rejected rather than served as a refresh.
  *
- * Returns null only while another fetch is in flight on this instance.
+ * `timing` places the request after the caller's previous one on this
+ * rate-limited route and inside the caller's shared deadline. With `cacheOnly`
+ * the sentinel is read and no request is made.
+ *
+ * Returns null while another fetch is in flight on this instance, and when a
+ * cache-only read finds no sentinel.
  */
-export async function lazyFetchHeading(iso2: string, hs4: string, storedYear?: number): Promise<LazyHeadingResult | null> {
+export async function lazyFetchHeading(
+  iso2: string, hs4: string, storedYear?: number, timing: FetchWindow & { cacheOnly?: boolean } = {},
+): Promise<LazyHeadingResult | null> {
   const sentinelKey = `${LAZY_HEADING_PREFIX}${iso2}:${hs4}:v1`;
   const cached = await readCachedJson(sentinelKey, true);
   if (cached.status === 'error') return { state: 'cache_unavailable' };
@@ -339,6 +342,7 @@ export async function lazyFetchHeading(iso2: string, hs4: string, storedYear?: n
   } else if (sentinel?.state) {
     return { state: sentinel.state, attemptedAt: sentinel.attemptedAt };
   }
+  if (timing.cacheOnly) return null;
 
   if (fetchInFlight) return null;
   fetchInFlight = true;
@@ -352,7 +356,7 @@ export async function lazyFetchHeading(iso2: string, hs4: string, storedYear?: n
 
   const attemptedAt = new Date().toISOString();
   try {
-    const result = await fetchComtradeBilateral(unCode, [[hs4]]);
+    const result = await fetchComtradeBilateral(unCode, [[hs4]], timing);
 
     // The public route rate-limits at roughly one request per second and
     // recovers within seconds, so a 429 is suppressed as briefly as any other

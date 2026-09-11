@@ -192,15 +192,19 @@ function isCuratedOmission(key, context = {}) {
       || where.includes('gettarifftrends') || where.includes('get-tariff-trends'))) {
     return true;
   }
-  // GetCountryProducts: every CountryProduct field is optional in the generated
-  // schema, so the optional-slot cap picks the alphabetically first ones and the
-  // example lost topExporters and totalValue — the two fields the row exists
-  // for. The recovery/threshold bookkeeping is dropped so those slots go to
-  // the trade evidence.
+  // GetCountryProducts: none of its objects has a `required` list, so the
+  // optional-slot cap keeps the alphabetically first fields, and bookkeeping
+  // that sorts early pushes out the fields each object exists for. Each list
+  // below is dropped so those slots go to the trade evidence.
+  if (!where.includes('getcountryproducts') && !where.includes('get-country-products')) return false;
   // The array's item object carries the array's own key as its `name`.
-  return (context.name === 'products')
-    && (where.includes('getcountryproducts') || where.includes('get-country-products'))
-    && ['fetchedAt', 'omittedPartnerCount', 'omittedPartnerShare', 'partnerBasis'].includes(key);
+  // CountryProduct: the recovery/threshold fields pushed out topExporters and totalValue.
+  if (context.name === 'products') return ['fetchedAt', 'omittedPartnerCount', 'omittedPartnerShare', 'partnerBasis'].includes(key);
+  // ProductExporter: the volume and scale fields pushed out share and value.
+  if (context.name === 'topExporters') return ['netWeightEstimated', 'quantity', 'quantityUnitCode', 'scale'].includes(key);
+  // CountryProductEvidence: the recovery and world-export fields pushed out source.
+  if (context.name === 'evidence') return ['recoveredHs4s', 'worldExportsFetchedAt'].includes(key);
+  return false;
 }
 
 function overrideStringExample(key, context = {}) {

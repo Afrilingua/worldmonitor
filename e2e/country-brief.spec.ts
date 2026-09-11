@@ -637,7 +637,8 @@ for (const { mobile, light } of [{ mobile: false, light: false }, { mobile: true
     if (commodity === 'helium') {
       // Export details are open, so the per-origin evidence rows are readable.
       await expect(exported.locator('[data-origin="US"]')).toContainText('839 kg (estimated)');
-      await expect(exported.locator('[data-origin="US"]')).toContainText('$1.5B world exports of HS 2804, rank 2 (2024)');
+      await expect(exported.locator('[data-origin="US"]')).toContainText('$1.5B world exports of HS 2804, rank 2 of 118 reporters filing 2024');
+      await expect(exported.locator('body')).toContainText('22 reporters whose newest HS 2804 filing is older are not ranked');
       await expect(exported.locator('[data-origin="US"]')).toContainText('46.2% of world mine output (USGS MCS)');
       await expect(exported.locator('[data-origin="NL"]')).toContainText('Volume not reported');
       await expect(exported.locator('[data-origin="NL"]')).toContainText('Supplier scale unavailable');

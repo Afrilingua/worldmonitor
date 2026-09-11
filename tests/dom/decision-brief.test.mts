@@ -381,8 +381,12 @@ describe('commodity brief evidence depth', () => {
     expect(preview.querySelectorAll('.cdp-commodity-candidate')).toHaveLength(10);
     expect(report.querySelectorAll('.cdp-commodity-candidate')).toHaveLength(14);
     expect(preview.textContent).toContain('+4 more origins in the export');
+    // The coverage lines below the cards count every listed origin, so the
+    // preview says which population they describe.
+    expect(preview.textContent).toContain('Coverage figures describe all 14 listed origins');
     expect(report.textContent).not.toContain('more origins in the export');
-    expect(data.coverage.join(' ')).toContain('every partner at or above 1% of the denominator (14 shown, 39 omitted holding 3.1% combined)');
+    expect(data.coverage.join(' ')).toContain('Origins listed: partners holding at least 1% of the denominator, padded to 5 and capped at 25 (14 listed; 39 omitted holding 3.1% combined)');
+    expect(data.coverage.join(' ')).not.toMatch(/\b(shown|displayed|Displayed)\b/);
     // Preview affordances stay as they are today.
     expect(preview.querySelectorAll('details[open]')).toHaveLength(0);
     expect(preview.querySelector('h3')!.textContent).toBe(new Intl.DisplayNames(['en'], { type: 'region' }).of(data.candidates[0]!.origin));
@@ -424,13 +428,15 @@ describe('commodity brief evidence depth', () => {
     const data = build({ hs4: '2804', description: '', totalValue: 1000, year: 2024, partnerBasis: 'share_threshold',
       omittedPartnerCount: 0, omittedPartnerShare: 0,
       topExporters: [
-        partner('US', 842, 0.5, { scale: { worldExportsUsd: 2_100_000_000, worldExportsKg: 2_400_000, rank: 1, year: 2024 } }),
+        partner('US', 842, 0.5, { scale: { worldExportsUsd: 2_100_000_000, worldExportsKg: 2_400_000, rank: 1, year: 2024, reporterCount: 118, unrankedReporterCount: 0 } }),
         partner('CA', 124, 0.3),
       ] }, { worldExportsFetchedAt: '2026-09-08T00:00:00Z' });
-    expect(data.candidates.find(c => c.origin === 'US')!.scale).toEqual({ worldExportsUsd: 2_100_000_000, worldExportsKg: 2_400_000, rank: 1, year: 2024 });
+    expect(data.candidates.find(c => c.origin === 'US')!.scale).toEqual({ worldExportsUsd: 2_100_000_000, worldExportsKg: 2_400_000, rank: 1, year: 2024, reporterCount: 118, unrankedReporterCount: 0 });
     expect(data.candidates.find(c => c.origin === 'CA')!.scale).toBeNull();
     const report = renderCommodityBrief(data);
-    expect(report.querySelector('[data-origin="US"]')!.textContent).toContain('$2.1B world exports of HS 2804, rank 1 (2024)');
+    expect(report.querySelector('[data-origin="US"]')!.textContent).toContain('$2.1B world exports of HS 2804, rank 1 of 118 reporters filing 2024');
+    // Every reporter filed the ranking year, so no late-filer caveat is printed.
+    expect(data.coverage.join(' ')).not.toContain('not ranked');
     expect(report.querySelector('[data-origin="CA"]')!.textContent).toContain('Supplier scale unavailable');
     expect(data.coverage.join(' ')).toContain('world exports of HS 2804 fetched 2026-09-08T00:00:00Z');
   });
@@ -446,7 +452,7 @@ describe('commodity brief evidence depth', () => {
     expect(data.candidates.find(c => c.origin === 'FR')!.transitHub).toBe(false);
     expect(data.action.text).toContain("Validate FR's");
     expect(data.action.text).toMatch(/Netherlands \(NL\) holds a larger recorded share with the same route state .* skipped/);
-    expect(data.coverage.join(' ')).toContain('Possible transit hubs among shown origins: Netherlands (NL)');
+    expect(data.coverage.join(' ')).toContain('Possible transit hubs among listed origins: Netherlands (NL)');
     const report = renderCommodityBrief(data);
     expect(report.querySelector('[data-origin="NL"]')!.textContent).toContain('Possible transit hub');
     expect(report.querySelector('[data-origin="FR"]')!.textContent).not.toContain('Possible transit hub');

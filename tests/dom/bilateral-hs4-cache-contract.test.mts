@@ -387,7 +387,12 @@ const largeImporter = (heading: Array<Record<string, unknown>>) => (url: URL) =>
 
 it('a cold cache still recovers the requested heading after the catalogue attempt fills the cap', async () => {
   const requested: string[] = [];
-  upstream(url => { requested.push(url.searchParams.get('cmdCode')!); return largeImporter(helium())(url); });
+  const requestedAt: number[] = [];
+  upstream(url => {
+    requested.push(url.searchParams.get('cmdCode')!);
+    requestedAt.push(performance.now());
+    return largeImporter(helium())(url);
+  });
 
   const result = await read({ iso2: 'DE', hs4: '2804' });
 
@@ -396,10 +401,17 @@ it('a cold cache still recovers the requested heading after the catalogue attemp
   expect(requested).toHaveLength(2);
   expect(requested[0]!.includes(',')).toBe(true);
   expect(requested[1]).toBe('2804');
+  // The public preview route allows about one request per second, so the
+  // heading request waits out that gap after the catalogue request it follows.
+  expect(requestedAt[1]! - requestedAt[0]!).toBeGreaterThanOrEqual(1_000);
   expect(result.products.map(p => p.hs4)).toEqual(['2804']);
   expect(result.products[0]!.partnerBasis).toBe('share_threshold');
   expect(result.evidence?.recoveredHs4s).toEqual(['2804']);
   expect(result.evidence?.lastAttemptState).toBe('observed');
+  // Nothing is stored and one heading was recovered: a partial answer from the
+  // public preview, not an observed catalogue from an unknown legacy cache.
+  expect(result.evidence?.state).toBe('partial');
+  expect(result.evidence?.source).toBe('UN Comtrade public preview (single-heading recovery)');
   expect(redis.store.has(CANONICAL('DE'))).toBe(false);
   expect((redis.store.get(SENTINEL('DE')) as { state: string }).state).toBe('incomplete');
 });
@@ -485,6 +497,7 @@ const worldExportsHelium = (year = 2024) => ({
         { reporterCode: 156, iso2: 'CN', valueUsd: 2_107_000_000, netWeightKg: 875_000_000 },
         { reporterCode: 842, iso2: 'US', valueUsd: 1_809_000_000, netWeightKg: null },
       ],
+      unrankedReporterCount: 3,
     },
   },
 });
@@ -497,7 +510,9 @@ it('world exports attach rank and value to the origins they cover and nothing to
   const result = await read({ iso2: 'JP', hs4: '2804' });
 
   const product = result.products.find(p => p.hs4 === '2804')!;
-  expect(product.topExporters[0]!.scale).toEqual({ worldExportsUsd: 1_809_000_000, rank: 2, year: 2024 });
+  // The rank basis travels with the rank: 2 ranked reporters, and 3 whose
+  // newest filing predates the heading year and so are not in the ranking.
+  expect(product.topExporters[0]!.scale).toEqual({ worldExportsUsd: 1_809_000_000, rank: 2, year: 2024, reporterCount: 2, unrankedReporterCount: 3 });
   expect(product.topExporters[1]).not.toHaveProperty('scale');
   expect(result.evidence?.worldExportsFetchedAt).toBe('2026-09-01T00:00:00.000Z');
 });
@@ -536,4 +551,60 @@ it('a caller without hs4 reads neither the world-exports snapshot nor the siblin
   expect(product.partnerBasis).toBe('leading_5');
   expect(product.topExporters[0]).not.toHaveProperty('scale');
   expect(result.evidence).not.toHaveProperty('worldExportsFetchedAt');
+});
+
+// --- One lazy budget per request: pacing, redundancy, deadline ---
+
+it('an empty single-heading answer adds exactly that heading to the requested set', async () => {
+  // A fresh payload that never asked for 2804, so only the heading attempt runs.
+  redis.store.set(CANONICAL('DE'), wheatOnly('DE'));
+  upstream(url => rows(url, []));
+
+  const result = await read({ iso2: 'DE', hs4: '2804' });
+
+  expect(result.evidence?.lastAttemptState).toBe('no_records');
+  // Not the whole catalogue: only 1001 (the payload's) and 2804 (this attempt's)
+  // were asked for, and the brief reads this list as "asked and answered empty".
+  expect(result.evidence?.requestedHs4s).toEqual(['1001', '2804']);
+});
+
+for (const [label, catalogue, state] of [
+  ['returns no records at all', [], 'no_records'],
+  ['is observed without the heading', [{ cmdCode: '1001', partnerCode: 251, primaryValue: 100, period: 2024 }], 'observed'],
+] as const) {
+  it(`a catalogue attempt that ${label} is not followed by the same request for one heading`, async () => {
+    const requested: string[] = [];
+    upstream(url => { requested.push(url.searchParams.get('cmdCode')!); return rows(url, [...catalogue]); });
+
+    const result = await read({ iso2: 'JP', hs4: '2804' });
+
+    // The catalogue request already asked the same route for the same period
+    // about 2804; asking again for that heading alone cannot answer differently.
+    expect(requested.every(codes => codes.includes(','))).toBe(true);
+    expect(redis.store.has(HEADING('JP', '2804'))).toBe(false);
+    expect(result.evidence?.lastAttemptState).toBe(state);
+    expect(result.evidence?.requestedHs4s).toContain('2804');
+  });
+}
+
+it('the heading attempt is skipped when the catalogue attempt used up the request budget', async () => {
+  // Clock skew stands in for a slow provider: the catalogue attempt returns
+  // with less budget left than a heading request needs.
+  const realNow = Date.now.bind(Date);
+  let skew = 0;
+  vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skew);
+  const requested: string[] = [];
+  upstream(url => {
+    requested.push(url.searchParams.get('cmdCode')!);
+    skew = 8_500;
+    return largeImporter(helium())(url);
+  });
+
+  const result = await read({ iso2: 'DE', hs4: '2804' });
+
+  expect(requested).toHaveLength(1);
+  expect(redis.store.has(HEADING('DE', '2804'))).toBe(false);
+  // The catalogue attempt is the last attempt this request made.
+  expect(result.evidence?.lastAttemptState).toBe('incomplete');
+  expect(result.evidence?.recoveredHs4s).toEqual([]);
 });

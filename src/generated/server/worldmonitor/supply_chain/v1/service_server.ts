@@ -335,6 +335,8 @@ export interface ExporterScale {
   worldExportsKg?: number;
   rank: number;
   year: number;
+  reporterCount: number;
+  unrankedReporterCount?: number;
 }
 
 export interface CountryProductEvidence {

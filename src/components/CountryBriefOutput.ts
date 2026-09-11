@@ -305,9 +305,14 @@ function candidateEvidenceRows(candidate: CommodityCandidate, hs4: string): [str
   if (candidate.quantity !== null) {
     rows.push(['Reported quantity', `${decimal(candidate.quantity, 2)}${candidate.quantityUnit ? ` ${candidate.quantityUnit}` : ' (unit not reported)'}`]);
   }
+  // A rank is only among the reporters that filed its year, so it is printed
+  // with that count; a snapshot without the count keeps the bare year.
+  const rankBasis = (scale: NonNullable<CommodityCandidate['scale']>) => scale.reporterCount === null
+    ? `rank ${scale.rank} (${scale.year})`
+    : `rank ${scale.rank} of ${decimal(scale.reporterCount)} reporters filing ${scale.year}`;
   rows.push(['Supplier scale', candidate.scale === null
     ? 'Supplier scale unavailable'
-    : `${compactUsd(candidate.scale.worldExportsUsd)} world exports of HS ${hs4}, rank ${candidate.scale.rank} (${candidate.scale.year})${candidate.scale.worldExportsKg === null ? '' : ` · ${decimal(candidate.scale.worldExportsKg)} kg reported`}`]);
+    : `${compactUsd(candidate.scale.worldExportsUsd)} world exports of HS ${hs4}, ${rankBasis(candidate.scale)}${candidate.scale.worldExportsKg === null ? '' : ` · ${decimal(candidate.scale.worldExportsKg)} kg reported`}`]);
   if (candidate.production) {
     const { sharePct, stage, source, restricted } = candidate.production;
     // A redistribution-restricted source is named without its number (R4).
@@ -361,7 +366,8 @@ export function renderCommodityBrief(snapshot: import('@/types/decision-brief').
         h('p', {}, candidate.reason))));
   }
   if (!snapshot.candidates.length) candidates.append(h('p', { className: 'cdp-commodity-empty' }, 'No recorded supplier countries for this selection. See the next action below.'));
-  if (shown.length < snapshot.candidates.length) candidates.append(h('p', { className: 'cdp-commodity-note cdp-commodity-more' }, `+${snapshot.candidates.length - shown.length} more origins in the export`));
+  // The coverage lines count every listed origin, not the cards above them.
+  if (shown.length < snapshot.candidates.length) candidates.append(h('p', { className: 'cdp-commodity-note cdp-commodity-more' }, `+${snapshot.candidates.length - shown.length} more origins in the export. Coverage figures describe all ${snapshot.candidates.length} listed origins.`));
   article.append(candidates,
     h('section', { className: 'cdp-commodity-action' },
       h('h2', { className: 'cdp-commodity-section-title' }, 'Next action'), h('p', { className: 'cdp-decision-action' }, snapshot.action.text),

@@ -83,6 +83,44 @@ export function leadingExporters(product, n = 5) {
 }
 
 /**
+ * The canonical row: the leading five origins and nothing else. Three scorers
+ * sum over every `topExporters` row and two bulk readers pull every canonical
+ * key in one pipeline, so the partner list and World weight groupByProduct also
+ * returns never reach it (KTD1). The seeder and the lazy fetch both write this
+ * key, so both build the row here.
+ *
+ * @template {{topExporters: Array<any>}} T
+ * @param {T & {partners?: unknown, worldNetWeightKg?: unknown}} product
+ */
+export function toCanonicalProduct(product) {
+  const { partners: _partners, worldNetWeightKg: _worldNetWeightKg, ...canonical } = product;
+  return { ...canonical, topExporters: leadingExporters(product) };
+}
+
+/**
+ * The sibling row of `comtrade:bilateral-hs4-partners:{iso2}:v1`: the
+ * threshold origins with weight and quantity, and what the threshold left out.
+ * The seeder and the single-heading recovery both produce it, and the reader
+ * merges either through one branch with no runtime validation, so both build
+ * the row here.
+ *
+ * @param {{hs4: string, year: number, denominatorBasis?: string, totalValue: number, worldNetWeightKg?: number | null, partners?: Array<any>}} product
+ */
+export function toPartnersProduct(product) {
+  const { partners, omittedCount, omittedShare } = selectPartners(product);
+  return {
+    hs4: product.hs4,
+    year: product.year,
+    denominatorBasis: product.denominatorBasis,
+    totalValue: product.totalValue,
+    worldNetWeightKg: product.worldNetWeightKg ?? null,
+    partners,
+    omittedCount,
+    omittedShare,
+  };
+}
+
+/**
  * The bilateral HS4 catalogue and its parsers, shared so the scheduled seeder
  * and the lazy fetch request the same headings and publish the same shape.
  * Parsers throw ComtradeResponseError rather than return a partial subset.
@@ -258,8 +296,13 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
    * heading keeps only the reporters that filed in its newest year — so a
    * lapsed exporter cannot be ranked into a year it did not trade in.
    *
+   * Leaving a late filer out moves every exporter below it up one place, so a
+   * rank is only a rank among that year's filers. `unrankedReporterCount`
+   * counts the reporters left out — whose newest filing predates the heading
+   * year — and the brief prints both counts beside the rank.
+   *
    * @param {Array<{cmdCode: string, partnerCode: string, reporterCode?: string, primaryValue: number, year: number, netWeightKg?: number | null}>} records
-   * @returns {Record<string, {year: number, exporters: Array<{reporterCode: number, iso2: string, valueUsd: number, netWeightKg: number | null}>}>}
+   * @returns {Record<string, {year: number, exporters: Array<{reporterCode: number, iso2: string, valueUsd: number, netWeightKg: number | null}>, unrankedReporterCount: number}>}
    */
   function groupWorldExports(records) {
     /** @type {Map<string, Map<string, {value: number, year: number, netWeightKg: number | null}>>} */
@@ -281,12 +324,13 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
       }
     }
 
-    /** @type {Record<string, {year: number, exporters: Array<any>}>} */
+    /** @type {Record<string, {year: number, exporters: Array<any>, unrankedReporterCount: number}>} */
     const headings = {};
     for (const [hs4, reporters] of byCode) {
       const rows = [...reporters.entries()];
       const years = rows.map(([, v]) => v.year).filter(y => y > 0);
       const latestYear = years.length > 0 ? Math.max(...years) : 0;
+      const unrankedReporterCount = latestYear > 0 ? rows.filter(([, v]) => v.year < latestYear).length : 0;
       const exporters = (latestYear > 0 ? rows.filter(([, v]) => v.year === latestYear) : rows)
         .sort((a, b) => b[1].value - a[1].value)
         .map(([reporterCode, v]) => ({
@@ -296,7 +340,7 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
           netWeightKg: v.netWeightKg,
         }));
       if (exporters.length === 0) continue;
-      headings[hs4] = { year: latestYear, exporters };
+      headings[hs4] = { year: latestYear, exporters, unrankedReporterCount };
     }
     return headings;
   }

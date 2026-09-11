@@ -6,8 +6,16 @@ import { ValidationError } from '../../../../src/generated/server/worldmonitor/s
 import { normalizeComtradeProducts, HS4_CODES, HS4_LABELS } from '../../../../scripts/shared/comtrade';
 import { isCallerPremium } from '../../../_shared/premium-check';
 import { getCachedJson, getLargeRawJson, logCacheReadError, readCachedJson } from '../../../_shared/redis';
-import { lazyFetchBilateralHs4, lazyFetchHeading } from './_bilateral-hs4-lazy';
-import type { PartnerRow, PartnersProduct } from './_bilateral-hs4-lazy';
+import { lazyFetchBilateralHs4, lazyFetchHeading, UPSTREAM_GAP_MS } from './_bilateral-hs4-lazy';
+import type { LazyFetchResult, PartnerRow, PartnersProduct } from './_bilateral-hs4-lazy';
+
+// One budget for every provider request a single call can make: the catalogue
+// attempt and the single-heading attempt after it. A heading request that
+// cannot get MIN_HEADING_BUDGET_MS of it reads only what is cached.
+const LAZY_BUDGET_MS = 9_000;
+const MIN_HEADING_BUDGET_MS = 1_500;
+// Retrieval route of a heading recovered on demand when nothing is stored.
+const RECOVERY_SOURCE = 'UN Comtrade public preview (single-heading recovery)';
 
 export interface BilateralHs4Payload {
   iso2: string;
@@ -31,7 +39,11 @@ interface BilateralHs4PartnersPayload {
  */
 interface WorldExportsPayload {
   fetchedAt?: string;
-  headings?: Record<string, { year?: number; exporters?: Array<{ reporterCode?: number; valueUsd?: number; netWeightKg?: number | null }> }>;
+  headings?: Record<string, {
+    year?: number;
+    exporters?: Array<{ reporterCode?: number; valueUsd?: number; netWeightKg?: number | null }>;
+    unrankedReporterCount?: number;
+  }>;
 }
 
 const PARTNERS_KEY = (iso2: string): string => `comtrade:bilateral-hs4-partners:${iso2}:v1`;
@@ -115,7 +127,8 @@ function siblingIsCurrent(siblingFetchedAt: string | undefined, payloadFetchedAt
 
 /**
  * World-export scale per heading, keyed by exporter code. The producer already
- * ranked `exporters` by value, so rank is the position in that list.
+ * ranked `exporters` by value, so rank is the position in that list, and the
+ * list's length is the number of reporters the rank is out of.
  *
  * A heading whose year is unusable is skipped: a supplier's world exports can
  * only be read against an import share of the same observation year, and a
@@ -127,6 +140,11 @@ function readWorldExports(value: unknown): { fetchedAt?: string; byHeading: Map<
   for (const [hs4, heading] of Object.entries(payload?.headings ?? {})) {
     const year = Number(heading?.year);
     if (!Array.isArray(heading?.exporters) || !Number.isInteger(year)) continue;
+    const reporterCount = heading.exporters.length;
+    // Reporters left out of the ranking because their newest filing is older.
+    // Absent on a snapshot written before the count existed: unknown, not zero.
+    const unranked = Number(heading.unrankedReporterCount);
+    const unrankedReporterCount = Number.isInteger(unranked) && unranked >= 0 ? unranked : undefined;
     const byCode = new Map<number, ExporterScale>();
     heading.exporters.forEach((exporter, index) => {
       const code = Number(exporter?.reporterCode);
@@ -138,6 +156,8 @@ function readWorldExports(value: unknown): { fetchedAt?: string; byHeading: Map<
         worldExportsKg: Number.isFinite(worldExportsKg) && worldExportsKg > 0 ? worldExportsKg : undefined,
         rank: index + 1,
         year,
+        reporterCount,
+        unrankedReporterCount,
       }) as ExporterScale);
     });
     byHeading.set(hs4, byCode);
@@ -226,11 +246,15 @@ export async function getCountryProducts(
   let recoveredFetchedAt: string | undefined;
   let headingAttempted = false;
 
+  // Every provider request this call can make shares one budget: the catalogue
+  // attempt, then the heading attempt after it.
+  const lazyDeadline = Date.now() + LAZY_BUDGET_MS;
+  let refreshed: LazyFetchResult | null = null;
   // Cache read failure is not a cache miss. Do not overwrite unseen last-good data.
   if (!cacheFailed && (!payload || isStale(payload.fetchedAt))) {
     // Nothing stored, or the whole payload is past its freshness window: the
     // full catalogue is refetched, exactly as get-route-impact does.
-    const refreshed = await lazyFetchBilateralHs4(iso2, payload ?? undefined);
+    refreshed = await lazyFetchBilateralHs4(iso2, payload ?? undefined);
     attempt = { state: refreshed?.state ?? 'busy', attemptedAt: refreshed?.attemptedAt ?? '' };
     if (refreshed?.payload) payload = refreshed.payload;
   }
@@ -241,13 +265,27 @@ export async function getCountryProducts(
   // incomplete, so without this the heading users ask for would never recover.
   // The stored row's year, when there is one, arms the regression guard.
   const storedRow = hs4 ? payload?.products.find(p => p.hs4 === hs4) : undefined;
-  if (!cacheFailed && hs4 && (!storedRow || isStale(payload?.fetchedAt))) {
-    headingAttempted = true;
+  // The catalogue attempt just asked the same route, for the same period, about
+  // every catalogue heading. An empty answer, or an observed one without this
+  // heading, already answers for it; asking for the heading alone cannot differ.
+  const catalogueAnswered = refreshed?.state === 'no_records'
+    || (refreshed?.state === 'observed' && hs4 != null && refreshed.payload?.requestedHs4s?.includes(hs4) === true);
+  if (!cacheFailed && hs4 && (!storedRow || isStale(payload?.fetchedAt)) && !catalogueAnswered) {
     const storedYears = [storedRow?.year, sibling.rows.get(hs4)?.year].filter((y): y is number => Number.isInteger(y));
-    const heading = await lazyFetchHeading(iso2, hs4, storedYears.length ? Math.max(...storedYears) : undefined);
-    attempt = { state: heading?.state ?? 'busy', attemptedAt: heading?.attemptedAt ?? '' };
-    recovered = heading?.product;
-    recoveredFetchedAt = heading?.fetchedAt;
+    // The heading request follows the catalogue request on the same
+    // rate-limited route, so it waits out the gap after it. With too little of
+    // the budget left it only reads what an earlier attempt cached.
+    const notBefore = refreshed?.upstreamSettledAt != null ? refreshed.upstreamSettledAt + UPSTREAM_GAP_MS : 0;
+    const cacheOnly = lazyDeadline - Math.max(Date.now(), notBefore) < MIN_HEADING_BUDGET_MS;
+    const heading = await lazyFetchHeading(iso2, hs4, storedYears.length ? Math.max(...storedYears) : undefined,
+      { notBefore, deadlineAt: lazyDeadline, cacheOnly });
+    // A cache-only read that found nothing made no attempt; the catalogue's stands.
+    if (heading || !cacheOnly) {
+      headingAttempted = true;
+      attempt = { state: heading?.state ?? 'busy', attemptedAt: heading?.attemptedAt ?? '' };
+      recovered = heading?.product;
+      recoveredFetchedAt = heading?.fetchedAt;
+    }
   }
 
   const { fetchedAt: worldExportsFetchedAt, byHeading } = readWorldExports(worldExportsValue);
@@ -275,14 +313,16 @@ export async function getCountryProducts(
   const missingHs4s = HS4_CODES.filter(code => !products.some((p: CountryProduct) => p.hs4 === code));
   let state = 'observed';
   if (cacheFailed) state = 'cache_unavailable';
-  else if (!payload) state = attempt?.state ?? 'missing';
+  // With nothing stored, a recovered heading is the whole answer: one heading of
+  // the catalogue, from the recovery route, not the attempt state or a legacy cache.
+  else if (!payload) state = recovered ? 'partial' : attempt?.state ?? 'missing';
   else if (isStale(fetchedAt)) state = 'stale_preserved';
   else if (missingHs4s.length) state = 'partial';
   return {
     iso2, products, fetchedAt,
     evidence: defined({
       state,
-      source: payload?.source ?? 'UN Comtrade bilateral HS4 (legacy cache; retrieval method unknown)',
+      source: payload?.source ?? (recovered ? RECOVERY_SOURCE : 'UN Comtrade bilateral HS4 (legacy cache; retrieval method unknown)'),
       // A single-heading attempt that came back empty requested exactly that
       // heading, so it reads as "requested and empty" rather than "coverage
       // unverified". A busy, rate-limited or failed attempt proves nothing

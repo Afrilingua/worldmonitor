@@ -1260,10 +1260,9 @@ paths:
                                     "lastAttemptState": "example"
                                     "missingHs4s":
                                         - "example"
-                                    "recoveredHs4s":
-                                        - "example"
                                     "requestedHs4s":
                                         - "example"
+                                    "source": "example"
                                 "fetchedAt": "2026-01-15T12:00:00Z"
                                 "iso2": "US"
                                 "products":
@@ -1271,11 +1270,11 @@ paths:
                                       "description": "Example WorldMonitor observation."
                                       "hs4": "example"
                                       "topExporters":
-                                          - "netWeightEstimated": true
-                                            "netWeightKg": 1.5
+                                          - "netWeightKg": 1.5
                                             "partnerCode": 1
                                             "partnerIso2": "US"
-                                            "quantity": 1.5
+                                            "share": 1.5
+                                            "value": 1.5
                                       "totalValue": 1
                             schema:
                                 $ref: '#/components/schemas/GetCountryProductsResponse'
@@ -5847,13 +5846,27 @@ components:
                 rank:
                     type: integer
                     format: int32
-                    description: 1-based position among world exporters of this heading, ranked by value.
+                    description: |-
+                        1-based position by value among the reporters that filed this heading for
+                         `year` (see reporter_count), not among every world exporter.
                 year:
                     type: integer
                     format: int32
                     description: |-
                         Trade observation year of the world-export figures, not the fetch year.
                          Always equal to the row's year: a scale from another year is not attached.
+                reporterCount:
+                    type: integer
+                    format: int32
+                    description: 'Reporters ranked for this heading and year: rank is out of this many.'
+                unrankedReporterCount:
+                    type: integer
+                    format: int32
+                    description: |-
+                        Reporters whose newest filing for this heading predates `year` (late filers
+                         or lapsed exporters). They are left out of the ranking, so one that files
+                         later can move every rank below it. Absent on a snapshot written before the
+                         count was recorded.
             description: |-
                 An origin's reported world exports of the same heading, so a shown share can
                  be read against the supplier's total capacity rather than this importer alone.
@@ -5863,13 +5876,16 @@ components:
                 state:
                     type: string
                     description: |-
-                        Reader state: "observed", "partial" (some catalogue headings absent),
+                        Reader state: "observed", "partial" (some catalogue headings absent, which
+                         includes a response holding only a heading recovered on demand),
                          "stale_preserved" (older than 35 days; last-good data kept),
-                         "cache_unavailable", or, when no payload exists, the last attempt state
-                         (see last_attempt_state) or "missing".
+                         "cache_unavailable", or, when no payload exists and nothing was recovered,
+                         the last attempt state (see last_attempt_state) or "missing".
                 source:
                     type: string
-                    description: Retrieval route of the cached payload, or a legacy-cache label when unknown.
+                    description: |-
+                        Retrieval route of the cached payload; with no payload, the single-heading
+                         recovery route when a heading was recovered, else a legacy-cache label.
                 requestedHs4s:
                     type: array
                     items:

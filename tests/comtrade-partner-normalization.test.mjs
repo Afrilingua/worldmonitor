@@ -337,7 +337,7 @@ test('both comtrade adapters expose the same names', () => {
   };
   const mjs = exportNames('../scripts/shared/comtrade.mjs');
   assert.deepEqual(mjs, exportNames('../scripts/shared/comtrade.ts'));
-  for (const name of ['selectPartners', 'leadingExporters', 'quantityUnitAbbr', 'groupWorldExports', 'MIN_PARTNER_SHARE', 'MIN_PARTNERS', 'MAX_PARTNERS']) {
+  for (const name of ['selectPartners', 'leadingExporters', 'toCanonicalProduct', 'toPartnersProduct', 'quantityUnitAbbr', 'groupWorldExports', 'MIN_PARTNER_SHARE', 'MIN_PARTNERS', 'MAX_PARTNERS']) {
     assert.ok(mjs.includes(name), `comtrade adapters must export ${name}`);
   }
 });
@@ -374,6 +374,7 @@ test('world exports rank 118 reporters by value and report an unstated weight as
 
   assert.deepEqual(Object.keys(headings), ['2804']);
   assert.equal(headings['2804'].year, 2024);
+  assert.equal(headings['2804'].unrankedReporterCount, 0);
   const { exporters } = headings['2804'];
   assert.equal(exporters.length, 118);
   assert.equal(exporters[0].valueUsd, 1117, 'rank 1 must be the largest exporter');
@@ -401,19 +402,67 @@ test('world exports resolve the reporter iso2 and ignore bilateral rows', () => 
   ]);
 });
 
-test('world exports collapse to the newest year the heading reports', () => {
+test('world exports rank only the newest year and count the larger late filer they leave out', () => {
   // Same rule as groupByProduct: a reporter whose newest row predates the
-  // heading year would date-stamp an observation it did not make.
+  // heading year would date-stamp an observation it did not make. Leaving it
+  // out moves every rank below it, so the count of reporters left out travels
+  // with the ranking: 842 exported 900 in 2023 and would rank first if it had
+  // filed 2024, which makes CN's rank 1 a rank among 2024 filers only.
   const headings = groupWorldExports([
     { cmdCode: '2804', reporterCode: '156', partnerCode: '0', primaryValue: 100, year: 2023, netWeightKg: null },
     { cmdCode: '2804', reporterCode: '156', partnerCode: '0', primaryValue: 200, year: 2024, netWeightKg: null },
     { cmdCode: '2804', reporterCode: '842', partnerCode: '0', primaryValue: 900, year: 2023, netWeightKg: null },
   ]);
 
-  assert.equal(headings['2804'].year, 2024);
-  assert.deepEqual(headings['2804'].exporters, [
-    { reporterCode: 156, iso2: 'CN', valueUsd: 200, netWeightKg: null },
+  assert.deepEqual(headings['2804'], {
+    year: 2024,
+    exporters: [{ reporterCode: 156, iso2: 'CN', valueUsd: 200, netWeightKg: null }],
+    unrankedReporterCount: 1,
+  });
+});
+
+test('a heading every reporter filed in the same year leaves no reporter unranked', () => {
+  const headings = groupWorldExports([
+    { cmdCode: '2804', reporterCode: '156', partnerCode: '0', primaryValue: 200, year: 2024, netWeightKg: null },
+    { cmdCode: '2804', reporterCode: '842', partnerCode: '0', primaryValue: 900, year: 2024, netWeightKg: null },
   ]);
+  assert.equal(headings['2804'].unrankedReporterCount, 0);
+});
+
+// ─── One row shape per key, shared by both writers ───────────────────────────
+//
+// The scheduled seeder and the lazy fetch both write the canonical key and
+// the sibling partners key, and one reader treats either writer's row as the
+// same type with no runtime validation. The shapes therefore come from one
+// function each, and these tests pin them.
+
+import { toCanonicalProduct, toPartnersProduct } from '../scripts/shared/comtrade.mjs';
+
+const sevenPartners = () => groupByProduct([
+  { cmdCode: '2804', partnerCode: '0', primaryValue: 2000, year: 2024, netWeightKg: 5000, netWeightEstimated: false, quantity: null, quantityUnitCode: null },
+  ...[842, 490, 156, 276, 250, 392, 410].map((code, i) => ({
+    cmdCode: '2804', partnerCode: String(code), primaryValue: 300 - i * 40, year: 2024,
+    netWeightKg: i === 0 ? 1200 : null, netWeightEstimated: false, quantity: null, quantityUnitCode: null,
+  })),
+]);
+
+test('the canonical row keeps the leading five origins and none of the partner detail', () => {
+  const [product] = sevenPartners();
+  const row = toCanonicalProduct(product);
+  assert.deepEqual(Object.keys(row).sort(), ['denominatorBasis', 'description', 'hs4', 'topExporters', 'totalValue', 'year']);
+  assert.equal(row.topExporters.length, 5);
+  assert.deepEqual(Object.keys(row.topExporters[0]).sort(), ['partnerCode', 'partnerIso2', 'share', 'value']);
+});
+
+test('the sibling row carries the threshold origins with weight and the omitted tail', () => {
+  const [product] = sevenPartners();
+  const row = toPartnersProduct(product);
+  assert.deepEqual(Object.keys(row).sort(), ['denominatorBasis', 'hs4', 'omittedCount', 'omittedShare', 'partners', 'totalValue', 'worldNetWeightKg', 'year']);
+  assert.equal(row.worldNetWeightKg, 5000);
+  assert.equal(row.partners[0].netWeightKg, 1200);
+  assert.equal(row.partners.length + row.omittedCount, 7);
+  // A product with no World weight states null, never an absent key.
+  assert.equal(toPartnersProduct({ ...product, worldNetWeightKg: undefined }).worldNetWeightKg, null);
 });
 
 test('world exports keep one entry per heading', () => {

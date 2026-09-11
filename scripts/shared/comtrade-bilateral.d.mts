@@ -8,7 +8,11 @@ export interface ComtradeRecord {
 export interface ComtradeWorldExporter {
  reporterCode: number; iso2: string; valueUsd: number; netWeightKg: number | null;
 }
-export interface ComtradeWorldExportHeading {year: number; exporters: ComtradeWorldExporter[]}
+export interface ComtradeWorldExportHeading {
+ year: number; exporters: ComtradeWorldExporter[];
+ /** Reporters whose newest filing for the heading predates `year`: not ranked. */
+ unrankedReporterCount: number;
+}
 export interface ComtradeExporter { partnerCode: number; partnerIso2: string; value: number; share: number }
 export interface ComtradePartnerRow extends ComtradeExporter {
  netWeightKg: number | null; netWeightEstimated: boolean; quantity: number | null; quantityUnitCode: number | null;
@@ -35,6 +39,17 @@ export function selectPartners(
  options?: {minShare?: number; minPartners?: number; maxPartners?: number},
 ): {partners: ComtradePartnerRow[]; omittedCount: number; omittedShare: number};
 export function leadingExporters(product: Pick<ComtradeProduct, 'topExporters'>, n?: number): ComtradeExporter[];
+/** One row of `comtrade:bilateral-hs4-partners:{iso2}:v1`. */
+export interface ComtradePartnersProduct {
+ hs4: string; year: number; denominatorBasis?: string; totalValue: number; worldNetWeightKg: number | null;
+ partners: ComtradePartnerRow[]; omittedCount: number; omittedShare: number;
+}
+export function toCanonicalProduct<T extends {topExporters: ComtradeExporter[]}>(
+ product: T & {partners?: unknown; worldNetWeightKg?: unknown},
+): Omit<T, 'partners' | 'worldNetWeightKg'>;
+export function toPartnersProduct(
+ product: Pick<ComtradeProduct, 'hs4' | 'year' | 'totalValue'> & {denominatorBasis?: string; worldNetWeightKg?: number | null; partners?: ComtradePartnerRow[]},
+): ComtradePartnersProduct;
 export function createComtradeBilateralCatalogue(
  strategic: {products: {bilateralHs4Code?: string; bilateralLabel?: string; label: string}[]},
  commodities: {commodities: {hs4: string[]; basketLabel: string}[]},
