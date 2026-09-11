@@ -98,6 +98,12 @@ test('keeps the public response envelope and no-op pagination contract', async (
   const result = await request({ countryCode: 'US', pageSize: 1, cursor: 'ignored' });
   expect(result).toEqual({ data: [{ countryCode: 'USA', countryName: 'USA', indicatorCode: indicator, indicatorName: 'GDP', year: 2024, value: 42 }], pagination: undefined });
 });
+for (const countryCode of ['BQ', 'GF', 'GP', 'MQ', 'RE']) {
+  test(`preserves documented alpha-2 filter absent from the alias map: ${countryCode}`, async () => {
+    expect((await request({ countryCode })).data).toHaveLength(1);
+    expect(decodeURIComponent(providerUrls[0]!.pathname.split('/')[3]!)).toBe(countryCode);
+  });
+}
 test('preserves first-party session access through the gateway and existing rate policy', async () => {
   const path = '/api/economic/v1/list-world-bank-indicators';
   const routes = createEconomicServiceRoutes({ listWorldBankIndicators } as EconomicServiceHandler).filter(route => route.path === path);

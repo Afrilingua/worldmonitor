@@ -38,7 +38,12 @@ function normalizeCountries(raw: string): string | null {
   if (value === 'ALL') return 'all';
   const parts = value.split(';');
   if (parts.length > 250) return null;
-  const countries = parts.map(part => COUNTRY_CODES.get(part.trim()));
+  const countries = parts.map(part => {
+    const code = part.trim();
+    // The shared alias map is not an exhaustive ISO table. Preserve the
+    // documented two-letter filter for territories absent from that map.
+    return COUNTRY_CODES.get(code) ?? (/^[A-Z]{2}$/.test(code) ? code : undefined);
+  });
   if (countries.some(country => !country)) return null;
   return [...new Set(countries)].sort().join(';');
 }
