@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createMarketServiceRoutes, ValidationError } from '../src/generated/server/worldmonitor/market/v1/service_server.ts';
+import { issueSessionToken } from '../api/_session.js';
+import marketGateway from '../api/market/v1/[rpc].ts';
 import { marketHandler } from '../server/worldmonitor/market/v1/handler.ts';
 import {
   SUPPORTED_COMMODITY_SYMBOLS,
@@ -228,4 +230,53 @@ describe('ListCommodityQuotes async handler paths (mocked Redis)', () => {
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { quotes: [] });
   });
+});
+
+
+describe('commodity seed cache policy through the market gateway', () => {
+  async function request() {
+    process.env.WM_SESSION_SECRET = "synthetic-commodity-cache-session-secret";
+    const { token } = await issueSessionToken();
+    return new Request('https://worldmonitor.app/api/market/v1/list-commodity-quotes?_debug=1', {
+      headers: { Origin: 'https://worldmonitor.app', 'X-WorldMonitor-Key': token },
+    });
+  }
+
+  it('requires authentication before reading the seed', async () => {
+    installRedisMock({ kind: 'error' });
+    const response = await marketGateway(new Request('https://worldmonitor.app/api/market/v1/list-commodity-quotes', {
+      headers: { Origin: 'https://worldmonitor.app' },
+    }));
+    assert.equal(response.status, 401);
+    assert.equal(response.headers.get('CDN-Cache-Control'), null);
+    assert.equal(response.headers.get('Vercel-CDN-Cache-Control'), null);
+  });
+
+  for (const redis of [
+    { kind: 'null' },
+    { kind: 'seed', payload: { quotes: [] } },
+    { kind: 'error' },
+  ] as RedisMode[]) {
+    it(`does not cache ${redis.kind === 'seed' ? 'empty seed' : redis.kind} fallbacks and permits recovery`, async () => {
+      installRedisMock(redis);
+      const response = await marketGateway(await request());
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { quotes: [] });
+      assert.equal(response.headers.get('Cache-Control'), 'no-store');
+      assert.equal(response.headers.get('X-Cache-Tier'), 'no-store');
+      assert.equal(response.headers.get('CDN-Cache-Control'), null);
+      assert.equal(response.headers.get('Vercel-CDN-Cache-Control'), null);
+      assert.equal(response.headers.get('X-No-Cache'), null);
+
+      mock.restoreAll();
+      installRedisMock({ kind: 'seed', payload: { quotes: DEFAULT_SEED } });
+      const recovered = await marketGateway(await request());
+      assert.equal(recovered.status, 200);
+      assert.deepEqual((await recovered.json()).quotes, DEFAULT_SEED);
+      assert.equal(recovered.headers.get('X-Cache-Tier'), 'slow-browser');
+      assert.match(recovered.headers.get('Cache-Control') ?? '', /private.*max-age=300/);
+      assert.equal(recovered.headers.get('CDN-Cache-Control'), null);
+      assert.equal(recovered.headers.get('Vercel-CDN-Cache-Control'), null);
+    });
+  }
 });
