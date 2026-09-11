@@ -70,7 +70,7 @@ export async function fetchMarketImplications(frameworkId = ''): Promise<MarketI
   if (cached && !cached.data.degraded && now - cached.cachedAt < CACHE_TTL) return cached.data;
 
   try {
-    const url = new URL(toApiUrl('/api/intelligence/v1/list-market-implications'));
+    const url = new URL(toApiUrl('/api/intelligence/v1/list-market-implications'), window.location.origin);
     if (frameworkId) url.searchParams.set('frameworkId', frameworkId);
     // list-market-implications is a PREMIUM_RPC_PATH; a bare fetch still picked
     // up the Clerk bearer from the global patch but skipped reportServerError,
