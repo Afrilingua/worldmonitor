@@ -10,6 +10,7 @@ describe("direct picker calls enforce the minimum cohort", () => {
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
   test.each([
+    { available: 100, requestedCount: 99.5, proceeds: false },
     { available: 99, requestedCount: 100, proceeds: false },
     { available: 100, requestedCount: 99, proceeds: false },
     { available: 100, requestedCount: 100, proceeds: true },
@@ -31,9 +32,16 @@ describe("direct picker calls enforce the minimum cohort", () => {
         });
       }
     });
-    const result = await t.action(internal.broadcast.waveRuns.pickWaveAction, {
+    const picking = t.action(internal.broadcast.waveRuns.pickWaveAction, {
       runId: "test-run", waveLabel: "test-wave-1", requestedCount,
     });
+    if (!Number.isInteger(requestedCount)) {
+      await expect(picking).rejects.toThrow("requestedCount must be a positive integer");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await t.run((ctx) => ctx.db.query("waveRuns").first())).toBeNull();
+      return;
+    }
+    const result = await picking;
     const state = await t.run(async (ctx) => ({
       run: await ctx.db.query("waveRuns").first(),
       config: await ctx.db.query("broadcastRampConfig").first(),

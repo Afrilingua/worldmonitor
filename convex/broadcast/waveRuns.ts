@@ -697,7 +697,7 @@ export const pickWaveAction = internalAction({
     if (!apiKey) {
       throw new Error("[pickWaveAction] RESEND_API_KEY not set");
     }
-    if (!Number.isFinite(args.requestedCount) || args.requestedCount <= 0) {
+    if (!Number.isInteger(args.requestedCount) || args.requestedCount <= 0) {
       throw new Error(
         `[pickWaveAction] requestedCount must be a positive integer; got ${args.requestedCount}`,
       );
