@@ -337,7 +337,92 @@ test('both comtrade adapters expose the same names', () => {
   };
   const mjs = exportNames('../scripts/shared/comtrade.mjs');
   assert.deepEqual(mjs, exportNames('../scripts/shared/comtrade.ts'));
-  for (const name of ['selectPartners', 'leadingExporters', 'quantityUnitAbbr', 'MIN_PARTNER_SHARE', 'MIN_PARTNERS', 'MAX_PARTNERS']) {
+  for (const name of ['selectPartners', 'leadingExporters', 'quantityUnitAbbr', 'groupWorldExports', 'MIN_PARTNER_SHARE', 'MIN_PARTNERS', 'MAX_PARTNERS']) {
     assert.ok(mjs.includes(name), `comtrade adapters must export ${name}`);
   }
+});
+
+// ─── World exports (flowCode=X, partnerCode=0) ───────────────────────────────
+//
+// One request per catalogue batch answers "who exports this heading, and how
+// much" for every reporter at once. The brief reads the result to state a
+// supplier's scale and rank, so the ordering IS the published fact.
+
+import { groupWorldExports } from '../scripts/shared/comtrade.mjs';
+
+test('parseRecords carries the reporter code a world-exports response adds', () => {
+  const [row] = parseRecords({ data: [{ cmdCode: '2804', reporterCode: 156, partnerCode: '0', primaryValue: 10, period: 2024 }] });
+  assert.equal(row.reporterCode, '156');
+  const [importRow] = parseRecords({ data: [{ cmdCode: '2804', partnerCode: '842', primaryValue: 10, period: 2024 }] });
+  assert.equal('reporterCode' in importRow, false, 'an import row must not gain an empty reporter code');
+});
+
+test('world exports rank 118 reporters by value and report an unstated weight as null', () => {
+  // The 2026-09-11 probe returned 118 reporters for HS 2804 in one request.
+  // primaryValue ascends with the index so a list that merely echoes the input
+  // order fails, and the lowest-valued reporter carries the absent weight.
+  const records = Array.from({ length: 118 }, (_, i) => ({
+    cmdCode: '2804',
+    reporterCode: String(100 + i),
+    partnerCode: '0',
+    primaryValue: 1000 + i,
+    year: 2024,
+    netWeightKg: i === 0 ? null : 10 * (i + 1),
+  }));
+
+  const headings = groupWorldExports(records);
+
+  assert.deepEqual(Object.keys(headings), ['2804']);
+  assert.equal(headings['2804'].year, 2024);
+  const { exporters } = headings['2804'];
+  assert.equal(exporters.length, 118);
+  assert.equal(exporters[0].valueUsd, 1117, 'rank 1 must be the largest exporter');
+  assert.equal(exporters[117].valueUsd, 1000);
+  assert.equal(exporters[117].netWeightKg, null, 'a provider 0/absent weight must stay null, never 0');
+  assert.ok(exporters.every((e, i) => i === 0 || exporters[i - 1].valueUsd > e.valueUsd));
+});
+
+test('world exports resolve the reporter iso2 and ignore bilateral rows', () => {
+  const headings = groupWorldExports([
+    { cmdCode: '2804', reporterCode: '156', partnerCode: '0', primaryValue: 2107, year: 2024, netWeightKg: 875_000 },
+    { cmdCode: '2804', reporterCode: '842', partnerCode: '0', primaryValue: 1809, year: 2024, netWeightKg: null },
+    { cmdCode: '2804', reporterCode: '634', partnerCode: '0', primaryValue: 1398, year: 2024, netWeightKg: null },
+    { cmdCode: '2804', reporterCode: '490', partnerCode: '0', primaryValue: 5, year: 2024, netWeightKg: null },
+    // A partner-specific row from the same response: counting it as a world
+    // total would rank the reporter on one corridor.
+    { cmdCode: '2804', reporterCode: '156', partnerCode: '842', primaryValue: 9999, year: 2024, netWeightKg: 1 },
+  ]);
+
+  assert.deepEqual(headings['2804'].exporters, [
+    { reporterCode: 156, iso2: 'CN', valueUsd: 2107, netWeightKg: 875_000 },
+    { reporterCode: 842, iso2: 'US', valueUsd: 1809, netWeightKg: null },
+    { reporterCode: 634, iso2: 'QA', valueUsd: 1398, netWeightKg: null },
+    { reporterCode: 490, iso2: '', valueUsd: 5, netWeightKg: null },
+  ]);
+});
+
+test('world exports collapse to the newest year the heading reports', () => {
+  // Same rule as groupByProduct: a reporter whose newest row predates the
+  // heading year would date-stamp an observation it did not make.
+  const headings = groupWorldExports([
+    { cmdCode: '2804', reporterCode: '156', partnerCode: '0', primaryValue: 100, year: 2023, netWeightKg: null },
+    { cmdCode: '2804', reporterCode: '156', partnerCode: '0', primaryValue: 200, year: 2024, netWeightKg: null },
+    { cmdCode: '2804', reporterCode: '842', partnerCode: '0', primaryValue: 900, year: 2023, netWeightKg: null },
+  ]);
+
+  assert.equal(headings['2804'].year, 2024);
+  assert.deepEqual(headings['2804'].exporters, [
+    { reporterCode: 156, iso2: 'CN', valueUsd: 200, netWeightKg: null },
+  ]);
+});
+
+test('world exports keep one entry per heading', () => {
+  const headings = groupWorldExports([
+    { cmdCode: '2804', reporterCode: '156', partnerCode: '0', primaryValue: 100, year: 2024, netWeightKg: null },
+    { cmdCode: '2709', reporterCode: '842', partnerCode: '0', primaryValue: 900, year: 2024, netWeightKg: null },
+    // No reporter code: nothing to rank, and a '' key would collide.
+    { cmdCode: '2709', partnerCode: '0', primaryValue: 5, year: 2024, netWeightKg: null },
+  ]);
+  assert.deepEqual(Object.keys(headings).sort(), ['2709', '2804']);
+  assert.deepEqual(headings['2709'].exporters.map(e => e.reporterCode), [842]);
 });

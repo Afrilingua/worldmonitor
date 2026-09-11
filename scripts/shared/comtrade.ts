@@ -13,4 +13,4 @@ export {
 } from './comtrade-bilateral.mjs';
 
 export const { normalizeComtradePartner, normalizeComtradeProducts } = createComtradePartnerNormalizer(registry, standardCodes);
-export const { HS4_CODES, HS4_LABELS, MAX_HS4_CODES_PER_BATCH, HS4_BATCHES, parseRecords, groupByProduct, quantityUnitAbbr } = createComtradeBilateralCatalogue(strategic, commodities, normalizeComtradePartner, quantityUnits);
+export const { HS4_CODES, HS4_LABELS, MAX_HS4_CODES_PER_BATCH, HS4_BATCHES, parseRecords, groupByProduct, groupWorldExports, quantityUnitAbbr } = createComtradeBilateralCatalogue(strategic, commodities, normalizeComtradePartner, quantityUnits);

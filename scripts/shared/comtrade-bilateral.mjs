@@ -137,6 +137,12 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
       return {
         cmdCode,
         partnerCode,
+        // Only a world-exports response (reporterCode omitted from the request)
+        // varies the reporter across rows, so the field is carried only when the
+        // provider sent one. An import row keeps the shape it has always had.
+        ...(r.reporterCode != null && String(r.reporterCode) !== ''
+          ? { reporterCode: String(r.reporterCode) }
+          : {}),
         primaryValue: value,
         year,
         netWeightKg: Number.isFinite(netWeightKg) && netWeightKg > 0 ? netWeightKg : null,
@@ -240,6 +246,62 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
   }
 
   /**
+   * World exports per heading, from a `flowCode=X&partnerCode=0` response with
+   * `reporterCode` omitted: one row per reporter, each the reporter's total
+   * exports of that heading to the World. The brief reads it to state a
+   * supplier's absolute scale and its rank among world exporters, so the order
+   * of `exporters` is itself the published fact — rank is its index plus one.
+   *
+   * Rows for a specific partner are ignored: they describe one corridor, and
+   * ranking a reporter on one would understate every large exporter. The year
+   * collapse mirrors groupByProduct — newest year per reporter, then the
+   * heading keeps only the reporters that filed in its newest year — so a
+   * lapsed exporter cannot be ranked into a year it did not trade in.
+   *
+   * @param {Array<{cmdCode: string, partnerCode: string, reporterCode?: string, primaryValue: number, year: number, netWeightKg?: number | null}>} records
+   * @returns {Record<string, {year: number, exporters: Array<{reporterCode: number, iso2: string, valueUsd: number, netWeightKg: number | null}>}>}
+   */
+  function groupWorldExports(records) {
+    /** @type {Map<string, Map<string, {value: number, year: number, netWeightKg: number | null}>>} */
+    const byCode = new Map();
+    for (const r of records) {
+      if (r.partnerCode !== '0' && r.partnerCode !== '000') continue;
+      const reporterCode = String(r.reporterCode ?? '');
+      if (reporterCode === '') continue;
+      if (!byCode.has(r.cmdCode)) byCode.set(r.cmdCode, new Map());
+      const reporters = byCode.get(r.cmdCode);
+      const existing = reporters.get(reporterCode);
+      if (!existing || r.year > existing.year
+        || (r.year === existing.year && r.primaryValue > existing.value)) {
+        reporters.set(reporterCode, {
+          value: r.primaryValue,
+          year: r.year,
+          netWeightKg: r.netWeightKg ?? null,
+        });
+      }
+    }
+
+    /** @type {Record<string, {year: number, exporters: Array<any>}>} */
+    const headings = {};
+    for (const [hs4, reporters] of byCode) {
+      const rows = [...reporters.entries()];
+      const years = rows.map(([, v]) => v.year).filter(y => y > 0);
+      const latestYear = years.length > 0 ? Math.max(...years) : 0;
+      const exporters = (latestYear > 0 ? rows.filter(([, v]) => v.year === latestYear) : rows)
+        .sort((a, b) => b[1].value - a[1].value)
+        .map(([reporterCode, v]) => ({
+          reporterCode: Number(reporterCode),
+          iso2: normalizeComtradePartner(reporterCode).iso2,
+          valueUsd: v.value,
+          netWeightKg: v.netWeightKg,
+        }));
+      if (exporters.length === 0) continue;
+      headings[hs4] = { year: latestYear, exporters };
+    }
+    return headings;
+  }
+
+  /**
    * The registry's abbreviation for a Comtrade quantity unit code, or null when
    * the code is unknown — including -1, which the provider uses for "no
    * quantity" and the pinned registry therefore omits.
@@ -250,6 +312,6 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
     return units[String(code)]?.abbr ?? null;
   }
 
-  return { HS4_CODES, HS4_LABELS, MAX_HS4_CODES_PER_BATCH, HS4_BATCHES, parseRecords, groupByProduct, quantityUnitAbbr };
+  return { HS4_CODES, HS4_LABELS, MAX_HS4_CODES_PER_BATCH, HS4_BATCHES, parseRecords, groupByProduct, groupWorldExports, quantityUnitAbbr };
 
 }

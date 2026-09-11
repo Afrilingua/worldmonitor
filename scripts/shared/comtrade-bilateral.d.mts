@@ -1,8 +1,14 @@
 import type { ComtradePartner } from './comtrade-partners.mjs';
 export interface ComtradeRecord {
  cmdCode: string; partnerCode: string; primaryValue: number; year: number;
+ /** Present only on a world-exports response, whose request omits reporterCode. */
+ reporterCode?: string;
  netWeightKg: number | null; netWeightEstimated: boolean; quantity: number | null; quantityUnitCode: number | null;
 }
+export interface ComtradeWorldExporter {
+ reporterCode: number; iso2: string; valueUsd: number; netWeightKg: number | null;
+}
+export interface ComtradeWorldExportHeading {year: number; exporters: ComtradeWorldExporter[]}
 export interface ComtradeExporter { partnerCode: number; partnerIso2: string; value: number; share: number }
 export interface ComtradePartnerRow extends ComtradeExporter {
  netWeightKg: number | null; netWeightEstimated: boolean; quantity: number | null; quantityUnitCode: number | null;
@@ -38,5 +44,6 @@ export function createComtradeBilateralCatalogue(
  HS4_CODES: string[]; HS4_LABELS: Record<string, string>; MAX_HS4_CODES_PER_BATCH: number; HS4_BATCHES: string[][];
  parseRecords(data: unknown, maxRecords?: number): ComtradeRecord[];
  groupByProduct(records: ComtradeRecord[], fallbackYear?: number): ComtradeProduct[];
+ groupWorldExports(records: ComtradeRecord[]): Record<string, ComtradeWorldExportHeading>;
  quantityUnitAbbr(code: unknown): string | null;
 };

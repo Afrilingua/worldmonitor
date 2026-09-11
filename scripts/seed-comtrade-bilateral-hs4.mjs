@@ -13,7 +13,7 @@ import {
   releaseLock,
   sleep,
 } from './_seed-utils.mjs';
-import { HS4_CODES, HS4_BATCHES, PREVIEW_MAX_RECORDS, parseRecords, groupByProduct, comtradeFailureState } from './shared/comtrade.mjs';
+import { HS4_CODES, HS4_BATCHES, PREVIEW_MAX_RECORDS, parseRecords, groupByProduct, groupWorldExports, selectPartners, leadingExporters, comtradeFailureState } from './shared/comtrade.mjs';
 export { HS4_CODES, MAX_HS4_CODES_PER_BATCH, groupByProduct } from './shared/comtrade.mjs';
 import { candidatePeriods, periodWindow, recentPeriod } from './shared/comtrade-period.mjs';
 
@@ -26,6 +26,15 @@ const require = createRequire(import.meta.url);
 
 const META_KEY = 'seed-meta:comtrade:bilateral-hs4';
 const KEY_PREFIX = 'comtrade:bilateral-hs4:';
+// Sibling of the canonical key, holding the threshold partner list with weight
+// and quantity. It exists because three scorers sum over every canonical
+// `topExporters` row and two bulk readers pull all 197 canonical keys in one
+// pipeline under a 4.5 MB ceiling, so the deeper evidence cannot ride along.
+// Only get-country-products reads it.
+const PARTNERS_KEY_PREFIX = 'comtrade:bilateral-hs4-partners:';
+// One key for the whole run: every reporter's exports of every reviewed heading,
+// so the brief can state a supplier's absolute scale and its world rank.
+const WORLD_EXPORTS_KEY = 'comtrade:world-exports-hs4:v1';
 const TTL_SECONDS = 3456000; // 40d: monthly cadence + 9d deploy/missed-tick slack
 const LOCK_DOMAIN = 'comtrade:bilateral-hs4';
 const LOCK_TTL_MS = 30 * 60 * 1000; // 30 min
@@ -102,6 +111,12 @@ export function coverageStatus(writtenCount) {
 // fallback can re-probe instead of being short-circuited by an immortal
 // payload that no consumer age-checks.
 export const MAX_PRESERVE_RUNS = 2;
+
+// Pipeline flush ceilings, whichever is reached first. The command count alone
+// was enough while a country wrote one ~20 KB payload; the sibling partner key
+// roughly triples that, so 50 commands would post a multi-megabyte body.
+export const MAX_PIPELINE_COMMANDS = 50;
+export const MAX_PIPELINE_BYTES = 1_048_576; // 1 MB of accumulated payload
 
 const COMTRADE_KEYS = (process.env.COMTRADE_API_KEYS || '').split(',').map(k => k.trim()).filter(Boolean);
 let keyIndex = 0;
@@ -279,11 +294,23 @@ async function fetchBilateralOnce(url, timeoutMs = 45_000, reserveRequest) {
   });
 }
 
-function buildFetchUrl(reporterCode, hs4Batch, key, period) {
+/**
+ * @param {string} reporterCode empty for a world-exports request, which asks
+ *   every reporter at once — the one call shape that omits the parameter.
+ * @param {string[]} hs4Batch
+ * @param {string} key
+ * @param {string} period
+ * @param {'M' | 'X'} [flowCode] 'M' is the per-reporter import pull; 'X' with
+ *   partnerCode=0 is each reporter's exports of the heading to the World.
+ */
+function buildFetchUrl(reporterCode, hs4Batch, key, period, flowCode = 'M') {
   const url = new URL(COMTRADE_FETCH_URL);
-  url.searchParams.set('reporterCode', reporterCode);
+  if (reporterCode) url.searchParams.set('reporterCode', reporterCode);
   url.searchParams.set('cmdCode', hs4Batch.join(','));
-  url.searchParams.set('flowCode', 'M');
+  url.searchParams.set('flowCode', flowCode);
+  // Pinning the partner to World is what turns an all-reporter export request
+  // into one row per reporter instead of one row per corridor.
+  if (flowCode === 'X') url.searchParams.set('partnerCode', '0');
   url.searchParams.set('period', period);
   // Aggregate-only rows, mirroring seed-recovery-import-hhi.mjs. Without these
   // Comtrade returns one row per partner x second partner x transport mode x
@@ -311,23 +338,27 @@ function buildFetchUrl(reporterCode, hs4Batch, key, period) {
  * @param {((rawRowCount: number) => void) | undefined} [onRawRowCount] called with the
  *   provider's raw row count before parsing, so a batch that ends `incomplete`
  *   still reports the number of rows it saw.
- * @returns {Promise<Array<{cmdCode: string, partnerCode: string, primaryValue: number, year: number}>>}
+ * @param {'M' | 'X'} [flowCode] 'X' builds the all-reporter world-exports
+ *   request, which reuses this function purely for its retry and 429 handling.
+ * @returns {Promise<Array<{cmdCode: string, partnerCode: string, reporterCode?: string, primaryValue: number, year: number}>>}
  */
-export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeriod(), reserveRequest, onRawRowCount) {
+export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeriod(), reserveRequest, onRawRowCount, flowCode = 'M') {
   let rateLimitedOnce = false;
   let transientRetries = 0;
   const MAX_TRANSIENT_RETRIES = 2;
+  // A world-exports request has no reporter to name in the logs.
+  const label = reporterCode || 'world exports';
 
   let resp;
   while (true) {
     resp = await fetchBilateralOnce(
-      buildFetchUrl(reporterCode, hs4Batch, getNextKey(), period),
+      buildFetchUrl(reporterCode, hs4Batch, getNextKey(), period, flowCode),
       45_000,
       reserveRequest,
     );
 
     if (resp.status === 429 && !rateLimitedOnce) {
-      console.warn(`  429 rate-limited for reporter ${reporterCode}, waiting 60s...`);
+      console.warn(`  429 rate-limited for reporter ${label}, waiting 60s...`);
       await _retrySleep(60_000);
       rateLimitedOnce = true;
       continue;
@@ -335,7 +366,7 @@ export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeri
 
     if (isTransientComtrade(resp.status) && transientRetries < MAX_TRANSIENT_RETRIES) {
       const delay = transientRetries === 0 ? 5_000 : 15_000;
-      console.warn(`    transient HTTP ${resp.status} for reporter ${reporterCode}, retrying in ${delay / 1000}s...`);
+      console.warn(`    transient HTTP ${resp.status} for reporter ${label}, retrying in ${delay / 1000}s...`);
       await _retrySleep(delay);
       transientRetries++;
       continue;
@@ -346,7 +377,7 @@ export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeri
 
   if (!resp.ok) {
     const tag = (rateLimitedOnce || transientRetries > 0) ? ' (after retries)' : '';
-    console.warn(`    HTTP ${resp.status} for reporter ${reporterCode}${tag}`);
+    console.warn(`    HTTP ${resp.status} for reporter ${label}${tag}`);
     if (resp.status === 429) consecutiveRateLimited++;
     throw new Error(`Comtrade upstream HTTP ${resp.status}`);
   }
@@ -360,7 +391,7 @@ export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeri
   if (Array.isArray(data?.data)) onRawRowCount?.(data.data.length);
   const parsed = parseRecords(data, MAX_RECORDS);
   if (parsed.length === 0 && data?.count > 0) {
-    console.warn(`    Reporter ${reporterCode}: API returned count=${data.count} but parseRecords produced 0 — response shape may have changed`);
+    console.warn(`    Reporter ${label}: API returned count=${data.count} but parseRecords produced 0 — response shape may have changed`);
   }
   return parsed;
 }
@@ -397,10 +428,15 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
   const PERIODS = periodCandidates(usePublicApi);
   const countries = Object.entries(COUNTRY_PORT_CLUSTERS)
     .filter(([k]) => k !== '_comment' && k.length === 2);
-  const allKeys = countries.map(([iso2]) => `${KEY_PREFIX}${iso2}:v1`);
+  const canonicalKey = (iso2) => `${KEY_PREFIX}${iso2}:v1`;
+  const partnersKey = (iso2) => `${PARTNERS_KEY_PREFIX}${iso2}:v1`;
+  // Both keys of every country. They describe one observation, so every
+  // lifetime decision below — TTL extension, preservation, expiry — covers the
+  // pair; a sibling left behind would outlive the payload it details.
+  const allKeys = countries.flatMap(([iso2]) => [canonicalKey(iso2), partnersKey(iso2)]);
 
   if (lock.skipped) {
-    await extendExistingTtl([...allKeys, META_KEY], TTL_SECONDS)
+    await extendExistingTtl([...allKeys, WORLD_EXPORTS_KEY, META_KEY], TTL_SECONDS)
       .catch(e => console.warn('[bilateral-hs4] TTL extension (skipped) failed:', e.message));
     return;
   }
@@ -410,8 +446,12 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
   }
 
   const countryCoverage = Object.fromEntries(countries.map(([iso2]) => [iso2, { state: 'not_attempted' }]));
+  // The run's world-exports outcome. Null until the reserved fetch is attempted,
+  // which is also what a snapshot written before this field existed reads as —
+  // api/seed-health.js treats that absence as "no evidence", not as a failure.
+  let worldExports = null;
   const writeMeta = async (count, status = 'ok', preserveStreaks = {}) => {
-    const meta = JSON.stringify({ fetchedAt: Date.now(), recordCount: count, status, preserveStreaks, requestedHs4s: HS4_CODES, countryCoverage });
+    const meta = JSON.stringify({ fetchedAt: Date.now(), recordCount: count, status, preserveStreaks, requestedHs4s: HS4_CODES, countryCoverage, worldExports });
     // TTL ≥ FRESHNESS_GATE_MS so the gate's "fresh" answer cannot be silently
     // invalidated by Redis eviction. See the SEED_META_TTL_SECONDS comment.
     await redisPipeline([['SET', META_KEY, meta, 'EX', String(SEED_META_TTL_SECONDS)]])
@@ -438,6 +478,59 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
       }
       requestCount++;
     };
+
+    // Sibling keys roughly triple the bytes a country contributes, so the
+    // 50-command flush alone would post multi-megabyte bodies. Track the payload
+    // bytes queued and flush on whichever ceiling is reached first.
+    let pendingBytes = 0;
+    const queueWrite = (key, payload) => {
+      commands.push(['SET', key, payload, 'EX', String(TTL_SECONDS)]);
+      pendingBytes += payload.length;
+      writtenKeys.add(key);
+    };
+    const flushIfFull = async () => {
+      if (commands.length < MAX_PIPELINE_COMMANDS && pendingBytes < MAX_PIPELINE_BYTES) return;
+      await redisPipeline(commands.splice(0));
+      pendingBytes = 0;
+    };
+
+    // R10/KTD7: the two world-export requests are reserved BEFORE the country
+    // loop. Reserving them after it would let a budget abort drop them entirely,
+    // and would leave the per-reporter pre-check committing a remainder it does
+    // not have. One request per catalogue batch covers every reporter at once.
+    try {
+      const worldPeriod = PERIODS[0];
+      const worldRecords = [];
+      for (let b = 0; b < HS4_BATCHES.length; b++) {
+        if (requestCount > 0) await _paceSleep(INTER_REQUEST_DELAY_MS);
+        console.log(`[bilateral-hs4] world exports batch ${b + 1}/${HS4_BATCHES.length} (period ${worldPeriod})...`);
+        worldRecords.push(...await fetchBilateral('', HS4_BATCHES[b], worldPeriod, reserveRequest, undefined, 'X'));
+      }
+      const headings = groupWorldExports(worldRecords);
+      const fetchedAt = new Date().toISOString();
+      queueWrite(WORLD_EXPORTS_KEY, JSON.stringify({
+        fetchedAt,
+        period: worldPeriod,
+        source: usePublicApi ? 'UN Comtrade public preview' : 'UN Comtrade data API',
+        headings,
+      }));
+      const reporters = new Set();
+      for (const heading of Object.values(headings)) {
+        for (const exporter of heading.exporters) reporters.add(exporter.reporterCode);
+      }
+      worldExports = {
+        state: 'observed',
+        fetchedAt,
+        headingCount: Object.keys(headings).length,
+        reporterCount: reporters.size,
+      };
+      console.log(`[bilateral-hs4] world exports: ${worldExports.headingCount} headings, ${worldExports.reporterCount} reporters`);
+    } catch (err) {
+      // The reporters do not depend on this key; degrade the brief's supplier
+      // scale rather than the country coverage.
+      console.warn(`[bilateral-hs4] world exports unavailable, continuing with reporters: ${err.message}`);
+      worldExports = { state: comtradeFailureState(err), attemptedAt: new Date().toISOString() };
+    }
 
     for (let i = 0; i < countries.length; i++) {
       const [iso2] = countries[i];
@@ -502,15 +595,43 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
         if (products.length === 0) {
           console.warn(`    ${iso2}: no products after grouping, skipping write`);
         } else {
+          const fetchedAt = new Date().toISOString();
+          const source = usePublicApi ? 'UN Comtrade public preview' : 'UN Comtrade data API';
+          // The canonical payload keeps exactly the shape every derived scorer
+          // and both bulk readers have always seen: the leading five origins,
+          // with none of the new per-partner detail.
           const payload = JSON.stringify({
             iso2,
-            products,
-            fetchedAt: new Date().toISOString(),
-            source: usePublicApi ? 'UN Comtrade public preview' : 'UN Comtrade data API',
+            products: products.map(({ partners, worldNetWeightKg, ...product }) => ({
+              ...product,
+              topExporters: leadingExporters(product),
+            })),
+            fetchedAt,
+            source,
             requestedHs4s: HS4_CODES,
           });
-          commands.push(['SET', `${KEY_PREFIX}${iso2}:v1`, payload, 'EX', String(TTL_SECONDS)]);
-          writtenKeys.add(`${KEY_PREFIX}${iso2}:v1`);
+          queueWrite(canonicalKey(iso2), payload);
+          // The sibling carries the evidence the brief needs and no consumer of
+          // the canonical key reads.
+          queueWrite(partnersKey(iso2), JSON.stringify({
+            iso2,
+            fetchedAt,
+            source,
+            requestedHs4s: HS4_CODES,
+            products: products.map((product) => {
+              const { partners, omittedCount, omittedShare } = selectPartners(product);
+              return {
+                hs4: product.hs4,
+                year: product.year,
+                denominatorBasis: product.denominatorBasis,
+                totalValue: product.totalValue,
+                worldNetWeightKg: product.worldNetWeightKg,
+                partners,
+                omittedCount,
+                omittedShare,
+              };
+            }),
+          }));
           writtenCount++;
           console.log(`    ${iso2}: ${products.length} products, ${batch1.length + batch2.length} records`);
         }
@@ -520,9 +641,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
         failedCount++;
       }
 
-      if (commands.length >= 50) {
-        await redisPipeline(commands.splice(0));
-      }
+      await flushIfFull();
 
       if (consecutiveRateLimited >= MAX_CONSECUTIVE_RATE_LIMITED_FETCHES) {
         console.warn(`[bilateral-hs4] ABORTING after ${consecutiveRateLimited} consecutive rate-limited batch fetches — the monthly quota looks exhausted. Writing the partial result rather than grinding through ~${countries.length - i - 1} more 60s waits and outliving the ${LOCK_TTL_MS / 60_000}min lock.`);
@@ -550,7 +669,14 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
     //      short-circuiting the lazy fallback that would re-probe it.
     /** @type {Record<string, number>} iso2 -> consecutive preserved runs */
     const preserveStreaks = {};
-    const staleKeys = allKeys.filter(k => !writtenKeys.has(k));
+    // Probed per country, two keys at a time: the canonical key decides whether
+    // the country is preserved at all, and the sibling rides that decision so
+    // the pair cannot drift apart. A country seeded before the sibling existed
+    // simply has none to extend.
+    const staleCountries = countries
+      .map(([iso2]) => iso2)
+      .filter(iso2 => !writtenKeys.has(canonicalKey(iso2)));
+    const staleKeys = staleCountries.flatMap(iso2 => [canonicalKey(iso2), partnersKey(iso2)]);
     const existing = staleKeys.length > 0
       ? await redisPipeline(staleKeys.map(k => ['EXISTS', k]))
           .catch(e => {
@@ -560,13 +686,14 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
       : null;
 
     const preservedKeys = [];
-    for (let k = 0; k < staleKeys.length; k++) {
-      if (!existing || Number(existing[k]?.result) !== 1) continue;
-      const iso2 = staleKeys[k].slice(KEY_PREFIX.length, -3);
+    for (let c = 0; c < staleCountries.length; c++) {
+      if (!existing || Number(existing[c * 2]?.result) !== 1) continue;
+      const iso2 = staleCountries[c];
       const streak = (priorStreaks[iso2] ?? 0) + 1;
       if (streak > MAX_PRESERVE_RUNS) continue; // let it age out
       preserveStreaks[iso2] = streak;
-      preservedKeys.push(staleKeys[k]);
+      preservedKeys.push(canonicalKey(iso2));
+      if (Number(existing[c * 2 + 1]?.result) === 1) preservedKeys.push(partnersKey(iso2));
     }
     if (preservedKeys.length > 0) {
       await extendExistingTtl(preservedKeys, TTL_SECONDS)
@@ -591,7 +718,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
     console.log(`[bilateral-hs4] Seeded ${writtenCount} country keys (${failedCount} failed, ${preservedKeys.length} preserved)`);
   } catch (err) {
     console.error('[bilateral-hs4] Seed failed:', err.message || err);
-    await extendExistingTtl([...allKeys, META_KEY], TTL_SECONDS)
+    await extendExistingTtl([...allKeys, WORLD_EXPORTS_KEY, META_KEY], TTL_SECONDS)
       .catch(e => console.warn('[bilateral-hs4] TTL extension failed:', e.message));
     await writeMeta(0, 'error');
     throw err;

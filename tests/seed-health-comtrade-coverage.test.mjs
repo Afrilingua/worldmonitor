@@ -19,6 +19,9 @@ async function bilateralEntry(details) {
 const failures = [
   ['a preserved country', {preserveStreaks:{DE:1}}],
   ...['unavailable','malformed','incomplete','not_attempted'].map(state => [`a ${state} country`, {countryCoverage:{DE:{state}}}]),
+  // R10/AE5: the two world-export requests are reserved before any reporter, so
+  // their failure is a run-level gap even when every country seeded cleanly.
+  ...['unavailable','malformed','incomplete'].map(state => [`${state} world exports`, {worldExports:{state,attemptedAt:'2026-09-11T06:00:00.000Z'}}]),
 ];
 for (const [label, details] of failures) {
   test(`aggregate ok does not hide ${label}`, async () => {
@@ -54,4 +57,31 @@ test('per-batch row counts reach the health payload without changing status', as
   assert.equal(entry.bilateralCoverage.countryCoverage.JP.rowCounts,undefined,
     'a country recorded before rowCounts existed stays readable');
   assert.equal(entry.status,'ok');
+});
+
+// R10: the world-exports outcome reaches the operator verbatim. An observed
+// fetch must not flip the domain; a run recorded before the field existed must
+// not either, or every legacy snapshot reads partial for the whole staleness window.
+const WORLD_EXPORTS = {state:'observed',fetchedAt:'2026-09-11T06:00:00.000Z',headingCount:36,reporterCount:140};
+
+test('observed world exports reach the health payload without changing status', async () => {
+  const entry = await bilateralEntry({...healthy, worldExports: WORLD_EXPORTS});
+  assert.deepEqual(entry.bilateralCoverage.worldExports, WORLD_EXPORTS);
+  assert.equal(entry.status,'ok');
+  assert.equal(entry.coveragePartial,undefined);
+});
+
+test('a run recorded before world exports existed stays ok and reports null', async () => {
+  const entry = await bilateralEntry(healthy);
+  assert.equal(entry.bilateralCoverage.worldExports,null,
+    'absent evidence must read as null, not as a failure');
+  assert.equal(entry.status,'ok');
+});
+
+test('a failed world-exports fetch is visible alongside the countries that still seeded', async () => {
+  const entry = await bilateralEntry({...healthy, worldExports:{state:'unavailable',attemptedAt:'2026-09-11T06:00:00.000Z'}});
+  assert.equal(entry.status,'coverage_partial');
+  assert.equal(entry.coveragePartial,true);
+  assert.equal(entry.bilateralCoverage.worldExports.state,'unavailable');
+  assert.deepEqual(Object.keys(entry.bilateralCoverage.countryCoverage).sort(),['DE','JP','TV']);
 });
