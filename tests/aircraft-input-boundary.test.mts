@@ -82,7 +82,11 @@ test('identifier store outage fails closed while anonymous bbox remains availabl
   delete process.env.UPSTASH_REDIS_REST_URL;
   delete process.env.UPSTASH_REDIS_REST_TOKEN;
   __resetRateLimitForTest();
-  assert.equal((await gateway(request({ icao24: 'abc123' }))).status, 503);
+  const unavailable = await gateway(request({ icao24: 'abc123' }));
+  assert.equal(unavailable.status, 503);
+  assert.equal(unavailable.headers.get('X-RateLimit-Mode'), 'degraded');
+  assert.equal(unavailable.headers.get('Retry-After'), '5');
+  assert.equal((await unavailable.json()).message, 'Rate-limit service temporarily unavailable');
   assert.equal(providers().length, 0);
   const bbox = await gateway(request({ sw_lat: '24', sw_lon: '54', ne_lat: '26', ne_lon: '56' }));
   assert.equal(bbox.status, 200);
@@ -101,8 +105,17 @@ test('identifier quota is 30/min across distinct cache keys', async () => {
     }
     return transport(input, init);
   }) as typeof fetch;
-  for (let i = 0; i < 30; i++) assert.equal((await gateway(request({ callsign: `UAE${i}` }))).status, 200);
-  assert.equal((await gateway(request({ callsign: 'UAE30' }))).status, 429);
+  for (let i = 0; i < 30; i++) {
+    const allowed = await gateway(request({ callsign: `UAE${i}` }));
+    assert.equal(allowed.status, 200);
+    assert.equal(allowed.headers.get('RateLimit-Limit'), '30');
+  }
+  const denied = await gateway(request({ callsign: 'UAE30' }));
+  assert.equal(denied.status, 429);
+  assert.equal(denied.headers.get('RateLimit-Policy'), '"default";q=30;w=60');
+  assert.equal(denied.headers.get('RateLimit-Remaining'), '0');
+  assert.ok(Number(denied.headers.get('Retry-After')) > 0);
+  assert.deepEqual(await denied.json(), { error: 'Too many requests' });
   assert.equal(admissions, 31);
   const sent = readLimiterRequest(wire);
   assert.equal(sent?.tokens, 30);
@@ -177,7 +190,10 @@ test('verified MCP identifier calls cannot bypass the handler budget', async () 
     return new Request(url, { headers: buildInternalMcpHeaders(signature) });
   };
   for (let i = 0; i < 30; i++) assert.equal((await gateway(await signed())).status, 200);
-  assert.equal((await gateway(await signed())).status, 429);
+  const denied = await gateway(await signed());
+  assert.equal(denied.status, 429);
+  assert.equal(denied.headers.get('RateLimit-Limit'), '30');
+  assert.ok(Number(denied.headers.get('Retry-After')) > 0);
   assert.equal(admissions, 31);
   assert.equal(providers().length, 1);
   assert.equal(providers()[0]!.pathname, '/wingbits/track');
@@ -215,7 +231,10 @@ test('native HTTP identifier admission preserves real auth, data, cache and wind
       assert.equal(body.source, 'opensky');
       assert.deepEqual(body.positions.map((p: { icao24: string }) => p.icao24), ['abc123']);
     }
-    assert.equal((await originalFetch(url, { headers })).status, 429);
+    const denied = await originalFetch(url, { headers });
+    assert.equal(denied.status, 429);
+    assert.equal(denied.headers.get('Retry-After'), '60');
+    assert.equal(denied.headers.get('RateLimit-Limit'), '30');
     now += 59_999;
     assert.equal((await originalFetch(url, { headers })).status, 429);
     now += 1;

@@ -620,7 +620,7 @@ describe('scoped rate-limit degraded call-site policy (#3531)', () => {
   const SCOPED_RATE_LIMIT_CALLERS = [
     {
       path: 'server/worldmonitor/aviation/v1/track-aircraft.ts',
-      expected: /if\s*\(limit\.degraded\)\s*throw new ApiError\(503,/,
+      expected: /if\s*\(limit\.degraded\)\s*\{[\s\S]*?throw Object\.assign\(new ApiError\(503,/,
       reason: 'aircraft identifier lookups must fail closed before cache or provider work when the shared limiter is unavailable',
     },
     {

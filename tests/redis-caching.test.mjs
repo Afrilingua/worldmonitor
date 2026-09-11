@@ -2467,7 +2467,8 @@ describe('aviation aircraft provider priority', { concurrency: 1 }, () => {
     const stubDir = createTempDir('wm-aircraft-rate-');
     const rateStub = join(stubDir, 'rate.mjs');
     writeFileSync(rateStub, `export const getClientIp = () => 'test';
-export const checkScopedRateLimit = async () => ({ allowed: true, degraded: false });`);
+export const checkScopedRateLimit = async () => ({ allowed: true, degraded: false });
+export const RATE_LIMIT_DEGRADED_HEADERS = { 'X-RateLimit-Mode': 'degraded', 'Retry-After': '5' };`);
     const imported = await importPatchedTsModule('server/worldmonitor/aviation/v1/track-aircraft.ts', {
       './_shared': resolve(root, 'server/_shared/relay.ts'),
       '../../../_shared/constants': resolve(root, 'server/_shared/constants.ts'),
@@ -2508,7 +2509,7 @@ export const checkScopedRateLimit = async () => ({ allowed: true, degraded: fals
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         swLat: 10,
         swLon: 10,
         neLat: 11,
@@ -2556,13 +2557,13 @@ export const checkScopedRateLimit = async () => ({ allowed: true, degraded: fals
     };
 
     try {
-      const quiet = await module.trackAircraft({}, {
+      const quiet = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         swLat: 10,
         swLon: 10,
         neLat: 11,
         neLon: 11,
       });
-      const recovered = await module.trackAircraft({}, {
+      const recovered = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         swLat: 20,
         swLon: 20,
         neLat: 21,
@@ -2616,7 +2617,7 @@ export const checkScopedRateLimit = async () => ({ allowed: true, degraded: fals
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         icao24: '4b1805',
         swLat: 0,
         swLon: 0,
@@ -2660,7 +2661,7 @@ export const checkScopedRateLimit = async () => ({ allowed: true, degraded: fals
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         icao24: '4b1805',
         swLat: 0,
         swLon: 0,
@@ -2706,7 +2707,7 @@ export const checkScopedRateLimit = async () => ({ allowed: true, degraded: fals
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         icao24: '4b1805',
         swLat: 0,
         swLon: 0,
@@ -2795,7 +2796,7 @@ export const checkScopedRateLimit = async () => ({ allowed: true, degraded: fals
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         icao24: '',
         callsign: '',
         swLat: 10,
@@ -2834,7 +2835,7 @@ export const checkScopedRateLimit = async () => ({ allowed: true, degraded: fals
     };
 
     try {
-      const result = await module.trackAircraft({}, {
+      const result = await module.trackAircraft({ request: new Request('https://api.worldmonitor.app/api/aviation/v1/track-aircraft') }, {
         swLat: 10,
         swLon: 10,
         neLat: 11,

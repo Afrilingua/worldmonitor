@@ -5,7 +5,9 @@ import type {
     PositionSample,
 } from '../../../../src/generated/server/worldmonitor/aviation/v1/service_server';
 import { ApiError } from '../../../../src/generated/server/worldmonitor/aviation/v1/service_server';
-import { checkScopedRateLimit, getClientIp } from '../../../_shared/rate-limit';
+import { checkScopedRateLimit, getClientIp, RATE_LIMIT_DEGRADED_HEADERS } from '../../../_shared/rate-limit';
+import { setResponseHeader } from '../../../_shared/response-headers';
+import { attachApiErrorHttpResponseMetadata } from '../../../error-mapper';
 import { getRelayBaseUrl, getRelayHeaders } from './_shared';
 import { cachedFetchJson } from '../../../_shared/redis';
 import { isOpenSkyProvider, requiresRedistributableProviders } from '../../../_shared/provider-redistribution';
@@ -25,19 +27,33 @@ const IDENTIFIER_RATE_LIMIT = 30;
 const IDENTIFIER_RATE_WINDOW_MS = 60_000;
 let nativeIdentifierAdmissions: number[] = [];
 
+function rejectIdentifierQuota(resetMs: number): never {
+    throw attachApiErrorHttpResponseMetadata(
+        Object.assign(new ApiError(429, 'Too many requests', ''), {
+            retryAfter: Math.max(1, Math.ceil((resetMs - Date.now()) / 1000)),
+        }),
+        { envelope: 'error', rateLimit: { limit: IDENTIFIER_RATE_LIMIT, remaining: 0, resetMs, windowSec: 60 } },
+    );
+}
+
 async function admitIdentifierLookup(request: Request): Promise<void> {
+    setResponseHeader(request, 'RateLimit-Policy', '"default";q=30;w=60');
+    setResponseHeader(request, 'RateLimit-Limit', String(IDENTIFIER_RATE_LIMIT));
     // Native transport authentication precedes the handler; its cache and budget
     // remain local, while cloud and Docker require a healthy shared limiter.
     if (process.env.LOCAL_API_MODE === 'tauri-sidecar') {
         const now = Date.now();
         nativeIdentifierAdmissions = nativeIdentifierAdmissions.filter(time => time > now - IDENTIFIER_RATE_WINDOW_MS);
-        if (nativeIdentifierAdmissions.length >= IDENTIFIER_RATE_LIMIT) throw new ApiError(429, 'Too many requests', '');
+        if (nativeIdentifierAdmissions.length >= IDENTIFIER_RATE_LIMIT) rejectIdentifierQuota(nativeIdentifierAdmissions[0]! + IDENTIFIER_RATE_WINDOW_MS);
         nativeIdentifierAdmissions.push(now);
         return;
     }
     const limit = await checkScopedRateLimit(IDENTIFIER_RATE_SCOPE, IDENTIFIER_RATE_LIMIT, '60 s', getClientIp(request));
-    if (limit.degraded) throw new ApiError(503, 'Rate-limit service temporarily unavailable', '');
-    if (!limit.allowed) throw new ApiError(429, 'Too many requests', '');
+    if (limit.degraded) {
+        for (const [key, value] of Object.entries(RATE_LIMIT_DEGRADED_HEADERS)) setResponseHeader(request, key, value);
+        throw Object.assign(new ApiError(503, 'Rate-limit service temporarily unavailable', ''), { retryAfter: 5, exposeMessage: true });
+    }
+    if (!limit.allowed) rejectIdentifierQuota(limit.reset);
 }
 
 function isDegenerateBbox(req: TrackAircraftRequest): boolean {
