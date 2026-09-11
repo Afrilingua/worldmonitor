@@ -946,7 +946,7 @@ for (const relay of [false, true]) {
       assert.equal(response.headers.get('X-Relay-Stale'), relay ? '1' : null);
       assert.equal(response.headers.get('X-Cache'), relay ? 'STALE' : null);
       assert.equal(calls.length, 1);
-      assert.equal(calls[0].url.includes('relay.example.com'), relay);
+      assert.equal(new URL(calls[0].url).hostname, relay ? 'relay.example.com' : 'techcrunch.com');
     });
   }
 }
