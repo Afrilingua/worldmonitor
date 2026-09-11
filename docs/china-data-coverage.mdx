@@ -137,8 +137,12 @@ The rest of the contract:
 
 ## Bilateral HS4 import baskets
 
-The bilateral store covers the 20 reviewed `bilateralHs4Code` entries in
-`scripts/shared/comtrade-strategic-products.json`. Each country shard contains
+The bilateral store covers one shared HS4 catalogue: the reviewed
+`bilateralHs4Code` entries in `scripts/shared/comtrade-strategic-products.json`
+plus the HS4 headings of every commodity in
+`scripts/shared/supply-vulnerability-commodities.json`. The scheduled seeder
+and the on-demand public fallback request the same catalogue, in two requests
+of at most 20 headings each. Each country shard contains
 annual imports by HS4 product and the leading exporter partners. It supports
 country exposure, route impact, multi-sector shock, and the PRO
 `get-country-products` route. Detailed bilateral rows are not part of the

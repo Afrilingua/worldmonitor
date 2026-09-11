@@ -118,8 +118,10 @@ SZSE [适用规则与公告](https://www.szse.cn/application/laws/)，robots.txt
 
 ## 双边 HS4 进口篮
 
-双边存储覆盖 `scripts/shared/comtrade-strategic-products.json` 中 20 个经过审核的
-`bilateralHs4Code`。每个国家分片包含按 HS4 产品划分的年度进口额和主要出口伙伴，
+双边存储覆盖一份共享 HS4 目录：`scripts/shared/comtrade-strategic-products.json`
+中经过审核的 `bilateralHs4Code`，加上 `scripts/shared/supply-vulnerability-commodities.json`
+中每种商品的 HS4 品目。定时 seeder 与按需公共回退请求同一目录，分两次请求，每次最多
+20 个品目。每个国家分片包含按 HS4 产品划分的年度进口额和主要出口伙伴，
 用于国家暴露、航线影响、多部门冲击以及 PRO `get-country-products` 路由。
 详细双边数据行不进入匿名中国摘要。
 

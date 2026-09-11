@@ -17,6 +17,9 @@ message CountryProduct {
   double total_value = 3;
   repeated ProductExporter top_exporters = 4;
   int32 year = 5;
+  // Share denominator: "reported_world" (the provider's World import total for
+  // this heading and year) or "observed_partners" (the sum of observed partner
+  // values). Absent on legacy rows, whose denominator is unverified.
   optional string denominator_basis = 6;
 }
 
@@ -41,11 +44,25 @@ message GetCountryProductsResponse {
   optional CountryProductEvidence evidence = 4;
 }
 
+// Cache evidence for the returned products. Missing data is not zero trade.
 message CountryProductEvidence {
+  // Reader state: "observed", "partial" (some catalogue headings absent),
+  // "stale_preserved" (older than 35 days; last-good data kept),
+  // "cache_unavailable", or, when no payload exists, the last attempt state
+  // (see last_attempt_state) or "missing".
   string state = 1;
+  // Retrieval route of the cached payload, or a legacy-cache label when unknown.
   string source = 2;
+  // HS4 headings the producing request asked for; empty when unknown (legacy cache).
   repeated string requested_hs4s = 3;
+  // Catalogue headings with no usable product row.
   repeated string missing_hs4s = 4;
+  // ISO timestamp of the last refresh attempt; empty when unknown.
   string last_attempt_at = 5;
+  // Result of the last refresh attempt: "observed", "no_records",
+  // "legacy_no_records", "unsupported_reporter", "rate_limited", "unavailable",
+  // "malformed", "incomplete", "regression_rejected", "cache_unavailable",
+  // "cache_write_failed", "busy", "not_attempted", "preserved_reason_unknown"
+  // or "unknown".
   string last_attempt_state = 6;
 }

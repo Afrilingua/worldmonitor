@@ -5766,6 +5766,10 @@ components:
                     format: int32
                 denominatorBasis:
                     type: string
+                    description: |-
+                        Share denominator: "reported_world" (the provider's World import total for
+                         this heading and year) or "observed_partners" (the sum of observed partner
+                         values). Absent on legacy rows, whose denominator is unverified.
         ProductExporter:
             type: object
             properties:
@@ -5785,20 +5789,36 @@ components:
             properties:
                 state:
                     type: string
+                    description: |-
+                        Reader state: "observed", "partial" (some catalogue headings absent),
+                         "stale_preserved" (older than 35 days; last-good data kept),
+                         "cache_unavailable", or, when no payload exists, the last attempt state
+                         (see last_attempt_state) or "missing".
                 source:
                     type: string
+                    description: Retrieval route of the cached payload, or a legacy-cache label when unknown.
                 requestedHs4s:
                     type: array
                     items:
                         type: string
+                        description: HS4 headings the producing request asked for; empty when unknown (legacy cache).
                 missingHs4s:
                     type: array
                     items:
                         type: string
+                        description: Catalogue headings with no usable product row.
                 lastAttemptAt:
                     type: string
+                    description: ISO timestamp of the last refresh attempt; empty when unknown.
                 lastAttemptState:
                     type: string
+                    description: |-
+                        Result of the last refresh attempt: "observed", "no_records",
+                         "legacy_no_records", "unsupported_reporter", "rate_limited", "unavailable",
+                         "malformed", "incomplete", "regression_rejected", "cache_unavailable",
+                         "cache_write_failed", "busy", "not_attempted", "preserved_reason_unknown"
+                         or "unknown".
+            description: Cache evidence for the returned products. Missing data is not zero trade.
         GetMultiSectorCostShockRequest:
             type: object
             properties:
