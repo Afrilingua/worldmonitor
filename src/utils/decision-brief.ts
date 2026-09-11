@@ -1,4 +1,4 @@
-import { normalizeComtradePartner } from '../../scripts/shared/comtrade-partners.cjs';
+import { normalizeComtradePartner } from '../../scripts/shared/comtrade';
 import commodityRegistry from '../../scripts/shared/supply-vulnerability-commodities.json';
 import { computeSupplierRouteRisk } from './supplier-route-risk';
 import type { CommodityBriefCapture, CommodityBriefSelection, CommodityBriefSnapshot } from '../types/decision-brief';

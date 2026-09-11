@@ -1,4 +1,4 @@
-import { HS4_CODES, HS4_BATCHES, parseRecords, groupByProduct } from '../../../../scripts/shared/comtrade-bilateral.cjs';
+import { HS4_CODES, HS4_BATCHES, parseRecords, groupByProduct } from '../../../../scripts/shared/comtrade';
 /**
  * Lazy-fetch fallback for the bilateral-hs4 store.
  *

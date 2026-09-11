@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { HS4_CODES, HS4_LABELS } from '../scripts/shared/comtrade-bilateral.cjs';
+import { HS4_CODES, HS4_LABELS } from '../scripts/shared/comtrade';
 import { recentPeriod } from '../scripts/shared/comtrade-period.mjs';
 import { lazyFetchBilateralHs4 } from '../server/worldmonitor/supply-chain/v1/_bilateral-hs4-lazy.js';
 

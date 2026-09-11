@@ -13,8 +13,8 @@ import {
   releaseLock,
   sleep,
 } from './_seed-utils.mjs';
-import { HS4_CODES, HS4_BATCHES, parseRecords, groupByProduct } from './shared/comtrade-bilateral.cjs';
-export { HS4_CODES, MAX_HS4_CODES_PER_BATCH, groupByProduct } from './shared/comtrade-bilateral.cjs';
+import { HS4_CODES, HS4_BATCHES, parseRecords, groupByProduct } from './shared/comtrade.mjs';
+export { HS4_CODES, MAX_HS4_CODES_PER_BATCH, groupByProduct } from './shared/comtrade.mjs';
 import { candidatePeriods, periodWindow, recentPeriod } from './shared/comtrade-period.mjs';
 
 // Re-exported so existing importers (tests, sibling seeders) keep one source.

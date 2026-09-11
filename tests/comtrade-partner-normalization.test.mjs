@@ -14,7 +14,7 @@ test('world total is not a country candidate', () => {
   assert.deepEqual(groupByProduct([{cmdCode:'2804',partnerCode:'0',primaryValue:100,year:2024}]), []);
 });
 
-import { parseRecords } from '../scripts/shared/comtrade-bilateral.cjs';
+import { parseRecords } from '../scripts/shared/comtrade.mjs';
 for (const body of [{}, {data:{}}, {data:[{cmdCode:'2804',partnerCode:842,primaryValue:'not-a-number',period:2024}]}]) {
   test('malformed upstream data cannot be recorded as valid empty', () => assert.throws(() => parseRecords(body), /Malformed/));
 }
