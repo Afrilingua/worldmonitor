@@ -6,6 +6,7 @@ import { conflictHandler } from '../server/worldmonitor/conflict/v1/handler.ts';
 import { ACLED_DEFAULT_WINDOW_MS } from '../server/worldmonitor/conflict/v1/list-acled-events.ts';
 import { __resetKeyPrefixCacheForTests } from '../server/_shared/redis.ts';
 import { installRedis } from './helpers/fake-upstash-redis.mts';
+import { mapGdeltExportToConflictEvents } from '../scripts/_conflict-gdelt-bulk.mjs';
 
 const seedKey = 'conflict:acled:v1:all:0:0';
 const route = createConflictServiceRoutes(conflictHandler).find(route => route.path.endsWith('/list-acled-events'))!;
@@ -69,6 +70,19 @@ test('an empty seed is authoritative and does not trigger live fallback', async 
   install({ [seedKey]: { events: [] } });
   assert.deepEqual(await request(), { events: [] });
   assert.deepEqual(keys, [seedKey]);
+});
+
+test('real GDELT fallback rows without coordinates do not become geographic RPC events', async () => {
+  const fields = Array<string>(61).fill('');
+  Object.assign(fields, { 0: 'synthetic-44', 25: '1', 26: '180', 28: '18', 29: '4', 53: 'UP', 59: '20260911120000', 60: 'https://example.com/report' });
+  const fallback = mapGdeltExportToConflictEvents(fields.join('\t'));
+  assert.equal(fallback.length, 1);
+  assert.equal(fallback[0].location, undefined);
+  const redis = install({ [seedKey]: { events: [...snapshot.events, ...fallback] } });
+  assert.deepEqual(await request(), snapshot);
+  redis.redis.set(seedKey, JSON.stringify({ events: fallback }));
+  assert.deepEqual(await request(), { events: [] });
+  assert.deepEqual(keys, [seedKey, seedKey]);
 });
 
 test('country and explicit or partial date filters retain their existing per-query cache identities', async () => {
