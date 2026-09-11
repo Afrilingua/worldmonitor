@@ -25,6 +25,28 @@ function snapshot(missing = false) {
 const click = (root: HTMLElement, text: string) => (Array.from(root.querySelectorAll('button')).find(b => b.textContent === text)!).click();
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
 
+it('keeps energy identity while invalid worksheet edits clear preview and exported operational results', async () => {
+  const data = snapshot();
+  const blobs: Blob[] = [];
+  vi.spyOn(URL, 'createObjectURL').mockImplementation(blob => { blobs.push(blob as Blob); return 'blob:test'; });
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  const root = createDecisionBriefOutput({ code: 'DE', name: 'Germany' }, new AbortController().signal, async () => data, () => {});
+  click(root, 'Capture / refresh both');
+  await vi.waitFor(() => expect(root.querySelector('.cdp-decision-paper .operational-summary')!.textContent).toContain('Baseline first gap: Day 8'));
+  const stock = root.querySelector<HTMLInputElement>('[aria-label="Starting usable stock"]')!;
+  stock.value = ''; stock.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(root.querySelector('.cdp-decision-paper .operational-result')).toBeNull();
+  expect(root.querySelector('.cdp-decision-paper')!.textContent).toContain('Operational worksheet incomplete or invalid');
+  click(root, 'Download decision JSON');
+  const exported = JSON.parse(await blobs[0]!.text());
+  expect(exported.operationalWorksheet).toBeNull();
+  const { operationalWorksheet, ...energy } = exported;
+  expect(energy).toEqual(data);
+  stock.value = '100'; stock.dispatchEvent(new Event('input', { bubbles: true }));
+  expect(root.querySelector('.cdp-decision-paper .operational-summary')!.textContent).toContain('Baseline first gap: Day 8');
+});
+
+
 describe('decision brief preview and exports', () => {
   for (const missing of [false, true]) it(`renders exact snapshot and distinct action for missing=${missing}`, async () => {
     const data = snapshot(missing);
@@ -41,7 +63,9 @@ describe('decision brief preview and exports', () => {
     click(root, 'Download decision HTML'); click(root, 'Download decision JSON');
     const html = await blobs[0]!.text();
     const json = JSON.parse(await blobs[1]!.text());
-    expect(json).toEqual(data);
+    expect(json.operationalWorksheet.baseline.firstGapDay).toBe(8);
+    const { operationalWorksheet: worksheet, ...energy } = json;
+    expect(energy).toEqual(data);
     const doc = new DOMParser().parseFromString(html, 'text/html');
     expect(JSON.parse(doc.querySelector('#decision-brief-snapshot')!.textContent!)).toEqual(json);
     expect(doc.querySelector('.cdp-decision-action')!.textContent).toBe(data.action.text);
@@ -76,7 +100,9 @@ describe('decision brief preview and exports', () => {
     expect(root.textContent).toContain('fixed proxy');
     click(root, 'Download decision HTML'); click(root, 'Download decision JSON');
     const exported = JSON.parse(await blobs[1]!.text());
-    expect(exported).toEqual(data);
+    expect(exported.operationalWorksheet.baseline.firstGapDay).toBe(8);
+    const { operationalWorksheet: worksheet, ...energy } = exported;
+    expect(energy).toEqual(data);
     const doc = new DOMParser().parseFromString(await blobs[0]!.text(), 'text/html');
     expect(JSON.parse(doc.querySelector('#decision-brief-snapshot')!.textContent!)).toEqual(exported);
     expect(doc.querySelector('.cdp-decision-paper')!.textContent).toBe(root.querySelector('.cdp-decision-paper')!.textContent);
@@ -142,6 +168,29 @@ describe('decision brief preview and exports', () => {
 });
 
 describe('commodity snapshot lifecycle', () => {
+  it('keeps preview details collapsible and the exported report complete with the same snapshot', async () => {
+    const { renderCommodityBrief } = await import('@/components/CountryBriefOutput');
+    const { buildCommodityBrief } = await import('@/utils/decision-brief');
+    const data = buildCommodityBrief({ countryCode: 'JP', countryName: 'Japan', commodityId: 'helium', chokepointId: 'hormuz_strait' }, {
+      retrievedAt: '2026-09-10', products: { iso2: 'JP', fetchedAt: '', products: [{ hs4: '2804', description: '', totalValue: 100, year: 2024,
+        topExporters: [{ partnerCode: 634, partnerIso2: 'QA', share: 0.5, value: 50 }] }] },
+      vulnerabilities: { iso2: 'JP', country: '', vulnerabilities: [], generatedAt: '', methodologyVersion: '', upstreamUnavailable: true },
+    });
+    const preview = renderCommodityBrief(data, true);
+    const report = renderCommodityBrief(data);
+    expect(preview.classList.contains('cdp-output-paper')).toBe(false);
+    expect(preview.querySelectorAll('details[open]')).toHaveLength(0);
+    expect(report.querySelectorAll('details:not([open])')).toHaveLength(0);
+    expect(preview.querySelector('h3')!.textContent).toBe('Qatar');
+    expect(preview.textContent).toContain('Strait of Hormuz');
+    expect(preview.querySelector('.cdp-commodity-heading')!.textContent).toContain(data.caveats[0]);
+    for (const view of [preview, report]) {
+      expect(JSON.parse(view.querySelector('#commodity-brief-snapshot')!.textContent!)).toEqual(data);
+      expect(view.textContent).toContain(data.action.constraint);
+      expect(view.textContent).toContain(data.action.trigger);
+    }
+  });
+
   it('invalidates exports and ignores an old commodity capture after changing selection', async () => {
     const { createCommodityBriefOutput } = await import('@/components/CountryBriefOutput');
     const { buildCommodityBrief, COMMODITY_BRIEF_OPTIONS } = await import('@/utils/decision-brief');
@@ -157,7 +206,7 @@ describe('commodity snapshot lifecycle', () => {
     }));
     await new Promise(r => setTimeout(r, 0));
     expect(root.querySelector('.cdp-commodity-paper')).toBeNull();
-    expect(Array.from(root.querySelectorAll('button')).find(b => b.textContent === 'Download decision JSON')!.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>('[aria-label="Download decision JSON"]')!.disabled).toBe(true);
     expect(Array.from(root.querySelectorAll('button')).find(b => b.textContent === 'Capture commodity comparison')!.disabled).toBe(false);
     controller.abort();
   });
@@ -175,7 +224,7 @@ it('commodity denied/failed captures withhold exports and recover with the real 
     click(root, 'Capture commodity comparison');
     await vi.waitFor(() => expect(root.textContent).toContain('Check your access and retry'));
     expect(root.querySelector('.cdp-commodity-paper')).toBeNull();
-    expect(Array.from(root.querySelectorAll('button')).find(b => b.textContent === 'Download decision JSON')!.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>('[aria-label="Download decision JSON"]')!.disabled).toBe(true);
   }
   click(root, 'Capture commodity comparison');
   await vi.waitFor(() => expect(root.textContent).toContain('No recorded HS 2804 bilateral product evidence'));
