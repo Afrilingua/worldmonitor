@@ -722,7 +722,7 @@ function signalConvergenceReference(capturedAt) {
 // dated older measurement is more useful than a blank page as long as the page
 // ages it on its own clock. The weekly workflow prunes superseded snapshots
 // AFTER this runs, so the previous week's file is still on disk here.
-async function retainedForecastScorecard(rootDir, excludeBasename) {
+async function retainedForecastScorecard(rootDir) {
   let entries = [];
   try {
     entries = await fs.readdir(path.join(rootDir, 'docs', 'snapshots'));
@@ -730,7 +730,7 @@ async function retainedForecastScorecard(rootDir, excludeBasename) {
     return null;
   }
   const candidates = entries
-    .filter((filename) => LIVE_PULSE_SNAPSHOT_RE.test(filename) && filename !== excludeBasename)
+    .filter((filename) => LIVE_PULSE_SNAPSHOT_RE.test(filename))
     .sort()
     .reverse();
   for (const filename of candidates) {
@@ -786,7 +786,7 @@ async function captureForecastScorecard({
     const message = error instanceof Error ? error.message : String(error);
     const failureCode = scorecardFailureCode(error);
     errors.push({ id: '*', code: failureCode, message });
-    const retained = await retainedForecastScorecard(rootDir, `crawlable-live-pulse-${capturedAt}.json`);
+    const retained = await retainedForecastScorecard(rootDir);
     return {
       attemptedAt: capturedAt,
       attemptedAtMs,

@@ -764,6 +764,34 @@ describe('freeze crawlable live pulse coverage gates', () => {
     }
   });
 
+  it('retains the same-day measurement when the capture fails, with its own dates', async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), 'crawlable-pulse-'));
+    try {
+      await mkdir(join(rootDir, 'docs', 'snapshots'), { recursive: true });
+      stubFetch();
+      const good = await freezeCrawlableLivePulse({
+        apiBase: STAGING_BASE, requestGapMs: 0, rootDir,
+      });
+      stubFetch({ scorecardStatus: 'fail' });
+      const { snapshot } = await freezeCrawlableLivePulse({
+        apiBase: STAGING_BASE, requestGapMs: 0, rootDir,
+      });
+      const section = snapshot.forecastScorecard;
+      assert.equal(section.failureCode, 'http-error');
+      assert.ok(section.scorecard, 'the last good measurement must be retained');
+      assert.equal(section.generatedAt, SCORECARD_GENERATED_AT);
+      assert.equal(section.capturedAt, good.snapshot.capturedAt, 'the retained capture keeps its own date');
+      assert.equal(section.attemptedAt, snapshot.capturedAt, 'the failed attempt keeps this run’s date');
+      assert.equal(snapshot.coverage.forecastScorecardRetained, true);
+      assert.equal(snapshot.coverage.forecastScorecardCaptured, false);
+      const state = classifyAccuracyState(section);
+      assert.equal(state.availability, 'capture-failed');
+      assert.ok(state.scorecard, 'retained numbers stay renderable');
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
   it('codes a scorecard the page could not date rather than publishing it', async () => {
     stubFetch({ scorecardStatus: 'undated' });
     const { snapshot } = await runFreeze();
