@@ -1709,8 +1709,8 @@ export const markFinalizeRecovered = internalMutation({
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
- * Discard a terminal pre-broadcast failure and schedule chunked cleanup.
- * Active and finalize-phase runs must use their recovery path: a send may
+ * Abort picking or discard a terminal pre-broadcast failure, then clean up.
+ * Push and finalize-phase runs must use their recovery path: a send may
  * already be in flight even when its completion has not been recorded.
  */
 export const discardWaveRun = internalMutation({
@@ -1724,10 +1724,13 @@ export const discardWaveRun = internalMutation({
       .withIndex("by_runId", (q) => q.eq("runId", runId))
       .unique();
     if (!run) throw new Error(`[discardWaveRun] no run ${runId}`);
-    if (!canUnstampAbandonedWave(run)) {
+    // Picking can be aborted safely: _markPickComplete requires picking, so
+    // a late picker cannot advance after this transaction marks it failed.
+    const canAbortPicking = run.status === "picking" && run.broadcastId === undefined;
+    if (!canAbortPicking && !canUnstampAbandonedWave(run)) {
       throw new Error(
         `[discardWaveRun] cannot discard run ${runId} in status=${run.status} ` +
-        `substatus=${run.failureSubstatus ?? "<none>"}; only terminal pre-broadcast failures can be discarded. ` +
+        `substatus=${run.failureSubstatus ?? "<none>"}; only picking runs or terminal pre-broadcast failures can be discarded. ` +
         `Use resumeStalledWaveRun or resumeFinalizeWaveRun; use markFinalizeRecovered when the provider confirms the broadcast was sent.`,
       );
     }

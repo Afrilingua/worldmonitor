@@ -7,7 +7,7 @@ const modules = import.meta.glob("../**/*.ts");
 const waveLabel = "test-wave-1";
 const runId = "test-run";
 
-async function setup() {
+async function setup(picking = false) {
   const t = convexTest(schema, modules);
   await t.run(async (ctx) => {
     await ctx.db.insert("broadcastRampConfig", {
@@ -26,6 +26,7 @@ async function setup() {
   await t.mutation(internal.broadcast.waveRuns._persistPickedBatch, {
     runId, contacts: ["recipient@example.com"],
   });
+  if (picking) return t;
   await t.mutation(internal.broadcast.waveRuns._markPickComplete, {
     runId, segmentId: "test-segment", totalCount: 1, underfilled: false,
   });
@@ -49,6 +50,18 @@ async function state(t: ReturnType<typeof convexTest>) {
 describe("discard never makes emailed recipients eligible again", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+
+  test("an interrupted picker can be discarded without permitting late completion", async () => {
+    const t = await setup(true);
+    await expect(t.mutation(internal.broadcast.waveRuns.discardWaveRun, { runId, reason: "picker stopped" })).resolves.toMatchObject({ ok: true });
+    await expect(t.mutation(internal.broadcast.waveRuns._markPickComplete, {
+      runId, segmentId: "late-segment", totalCount: 1, underfilled: false,
+    })).rejects.toThrow(/expected picking/);
+    expect(await t.mutation(internal.broadcast.waveRuns._cleanupDiscardedWavePickedContacts, { runId })).toMatchObject({ deleted: 1, hasMore: false });
+    expect(await t.mutation(internal.broadcast.waveRuns._claimWaveRunLease, {
+      runId: "next-run", waveLabel: "test-wave-2", requestedCount: 1, batchSize: 1,
+    })).toMatchObject({ ok: true });
+  });
 
   test("a successfully sent broadcast retains its stamp through discard and direct cleanup", async () => {
     const t = await setup();
