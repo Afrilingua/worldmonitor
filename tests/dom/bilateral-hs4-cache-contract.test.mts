@@ -15,6 +15,9 @@ vi.mock('../../server/_shared/redis', () => ({
     redis.store.set(key, value); redis.ttl.set(key, ttl); return true;
   },
   setCachedJson: async (key: string, value: unknown, ttl: number) => { redis.store.set(key, value); redis.ttl.set(key, ttl); return true; },
+  // The world-exports snapshot is read through the large-value path.
+  getLargeRawJson: async (key: string) => redis.store.get(key) ?? null,
+  logCacheReadError: () => {},
 }));
 vi.mock('../../server/_shared/premium-check', () => ({ isCallerPremium: async () => true }));
 
@@ -365,6 +368,109 @@ it('a legacy country with no sibling and no world exports reports leading_5 with
   expect(product.topExporters[0]).not.toHaveProperty('netWeightKg');
   expect(product.topExporters[0]).not.toHaveProperty('scale');
   expect(result.evidence).not.toHaveProperty('worldExportsFetchedAt');
+});
+
+// --- Recovery dispatch through the reader (cold and stale caches, sibling currency) ---
+
+/** A large importer: any multi-heading request fills the preview cap; a single heading answers normally. */
+const largeImporter = (heading: Array<Record<string, unknown>>) => (url: URL) => {
+  const codes = url.searchParams.get('cmdCode')!.split(',');
+  if (codes.length > 1) {
+    return Response.json({ data: Array.from({ length: Number(url.searchParams.get('maxRecords')) }, (_, i) => (
+      { cmdCode: codes[0], partnerCode: 1 + (i % 890), primaryValue: 1, period: 2024 })) });
+  }
+  return rows(url, heading);
+};
+
+it('a cold cache still recovers the requested heading after the catalogue attempt fills the cap', async () => {
+  const requested: string[] = [];
+  upstream(url => { requested.push(url.searchParams.get('cmdCode')!); return largeImporter(helium())(url); });
+
+  const result = await read({ iso2: 'DE', hs4: '2804' });
+
+  // The first catalogue batch is capped and ends the catalogue attempt; then
+  // the one heading is requested on its own.
+  expect(requested).toHaveLength(2);
+  expect(requested[0]!.includes(',')).toBe(true);
+  expect(requested[1]).toBe('2804');
+  expect(result.products.map(p => p.hs4)).toEqual(['2804']);
+  expect(result.products[0]!.partnerBasis).toBe('share_threshold');
+  expect(result.evidence?.recoveredHs4s).toEqual(['2804']);
+  expect(result.evidence?.lastAttemptState).toBe('observed');
+  expect(redis.store.has(CANONICAL('DE'))).toBe(false);
+  expect((redis.store.get(SENTINEL('DE')) as { state: string }).state).toBe('incomplete');
+});
+
+const staleHelium = (iso2: string, year = 2024) => ({
+  ...canonicalHelium(iso2),
+  fetchedAt: new Date(Date.now() - 40 * 86_400_000).toISOString(),
+  products: [{ ...canonicalHelium(iso2).products[0]!, year }],
+});
+
+it('a stale stored heading is refreshed on its own when the catalogue refresh fails', async () => {
+  const stale = staleHelium('DE');
+  redis.store.set(CANONICAL('DE'), stale);
+  const requested: string[] = [];
+  upstream(url => {
+    requested.push(url.searchParams.get('cmdCode')!);
+    return url.searchParams.get('cmdCode')!.includes(',') ? new Response('down', { status: 503 }) : rows(url, helium(2025));
+  });
+
+  const result = await read({ iso2: 'DE', hs4: '2804' });
+
+  expect(requested[requested.length - 1]).toBe('2804');
+  const product = result.products.find(p => p.hs4 === '2804')!;
+  expect(result.products.filter(p => p.hs4 === '2804')).toHaveLength(1);
+  expect(product.year).toBe(2025);
+  expect(product.partnerBasis).toBe('share_threshold');
+  expect(product.fetchedAt).toBeTruthy();
+  expect(result.fetchedAt).toBe(stale.fetchedAt);
+  expect(result.evidence?.recoveredHs4s).toEqual(['2804']);
+  expect(redis.store.get(CANONICAL('DE'))).toBe(stale);
+});
+
+it('a stale stored heading arms the year-regression guard through the reader', async () => {
+  const stale = staleHelium('DE', 2024);
+  redis.store.set(CANONICAL('DE'), stale);
+  upstream(url => url.searchParams.get('cmdCode')!.includes(',') ? new Response('down', { status: 503 }) : rows(url, helium(2022)));
+
+  const result = await read({ iso2: 'DE', hs4: '2804' });
+
+  const product = result.products.find(p => p.hs4 === '2804')!;
+  expect(product.year).toBe(2024);
+  expect(product.partnerBasis).toBe('leading_5');
+  expect(result.evidence?.lastAttemptState).toBe('regression_rejected');
+  expect(result.evidence?.recoveredHs4s).toEqual([]);
+  expect((redis.store.get(HEADING('DE', '2804')) as { state: string }).state).toBe('regression_rejected');
+});
+
+it('a sibling written before a successful warm refresh does not override the refreshed rows', async () => {
+  redis.store.set(CANONICAL('DE'), staleHelium('DE'));
+  // Written by last month's run: current for the stale payload, not for a refresh.
+  redis.store.set(PARTNERS('DE'), { ...siblingHelium('DE', 2024), fetchedAt: new Date(Date.now() - 40 * 86_400_000).toISOString() });
+  upstream(url => rows(url, [
+    { cmdCode: '2804', partnerCode: 0, primaryValue: 1000, period: 2024 },
+    { cmdCode: '2804', partnerCode: 842, primaryValue: 800, period: 2024 },
+  ]));
+
+  const result = await read({ iso2: 'DE', hs4: '2804' });
+
+  const product = result.products.find(p => p.hs4 === '2804')!;
+  expect(product.topExporters[0]).toMatchObject({ partnerCode: 842, share: 0.8 });
+  expect(product.partnerBasis).toBe('leading_5');
+});
+
+it('a caller without hs4 keeps the leading 5 even when a current sibling exists', async () => {
+  redis.store.set(CANONICAL('JP'), canonicalHelium('JP'));
+  redis.store.set(PARTNERS('JP'), siblingHelium('JP', 2024));
+  upstream(url => rows(url, []));
+
+  const result = await read({ iso2: 'JP' });
+
+  const product = result.products.find(p => p.hs4 === '2804')!;
+  expect(upstreamCalls).toBe(0);
+  expect(product.partnerBasis).toBe('leading_5');
+  expect(product.topExporters).toHaveLength(2);
 });
 
 it('world exports attach rank and value to the origins they cover and nothing to the rest', async () => {

@@ -3,6 +3,7 @@ import commodityRegistry from '../../scripts/shared/supply-vulnerability-commodi
 import transitHubRegistry from '../../scripts/shared/comtrade-transit-hubs.json';
 import { computeSupplierRouteRisk } from './supplier-route-risk';
 import type { CommodityBriefCapture, CommodityBriefSelection, CommodityBriefSnapshot } from '../types/decision-brief';
+import type { MineralStageSnapshot } from '@/generated/client/worldmonitor/supply_chain/v1/service_client';
 import type { DecisionBriefCapture, DecisionBriefSelection, DecisionBriefSnapshot } from '../types/decision-brief';
 
 const nonnegative = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -163,8 +164,10 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
       } : null,
       production: producer && productionStage ? {
         // Percent of named producers as published (0-100), deliberately not
-        // rescaled to the 0-1 Comtrade import share beside it.
-        sharePct: nonnegative(producer.share) ? producer.share : null,
+        // rescaled to the 0-1 Comtrade import share beside it. A restricted
+        // source keeps its attribution and loses its number here, because the
+        // snapshot is what the HTML and JSON exports carry.
+        sharePct: !productionRestricted && nonnegative(producer.share) ? producer.share : null,
         stage: productionStage, source: productionSource, restricted: productionRestricted,
       } : null });
   }
@@ -183,7 +186,7 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
     const worldExportsFetchedAt = capture.products.evidence?.worldExportsFetchedAt;
     coverage.push(worldExportsFetchedAt
       ? `Supplier scale: world exports of HS ${hs4} fetched ${worldExportsFetchedAt}; ${candidates.filter(c => c.scale).length} of ${candidates.length} shown origins matched.`
-      : 'Supplier scale unavailable: no world-export snapshot is joined to these origins. Recorded import share alone does not describe an origin\'s size as an exporter.');
+      : 'Supplier scale unavailable: no world-export snapshot could be joined to these origins (not yet seeded, or unreadable at capture time). Recorded import share alone does not describe an origin\'s size as an exporter.');
     if (mineralId) {
       coverage.push(productionSnapshot && productionStage
         ? `World production: ${productionStage}-stage shares from ${productionSource}, observation year ${productionSnapshot.year || productionRecord?.year || 'unknown'}. Percent of named producers, a different denominator from the import shares above.${productionRestricted ? ' Source terms restrict redistribution, so shares are named but not reprinted.' : ''}`
@@ -192,23 +195,31 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
   }
   coverage.push(...excluded);
   coverage.push(`Modeled routes: ${candidates.filter(c => c.routeState !== 'unknown').length}/${candidates.length} displayed origins. Unknown paths remain unresolved; modeled chokepoints are an unordered set, not a shipment sequence.`);
+  // What the origin list can and cannot hold, worded for the basis actually served.
+  const originsAvailable = product?.partnerBasis === 'share_threshold'
+    ? 'Origins at or above 1% of the denominator are available (at least 5, at most 25); smaller partners are summarised, not listed'
+    : 'Only the stored leading origins are available';
   caveats.push(product?.denominatorBasis === 'reported_world'
-    ? 'Shares use the reported World import total for this heading and observation year. Only the stored leading origins are available; unreported trade can affect coverage.'
+    ? `Shares use the reported World import total for this heading and observation year. ${originsAvailable}; unreported trade can affect coverage.`
     : product?.denominatorBasis === 'observed_partners'
-      ? 'Shares use the sum of observed partner values, without a reported World total. Only the stored leading origins are available; preview limits and unreported trade can affect coverage.'
-      : 'Only the stored leading origins are available. The stored denominator is not independently verified against a complete World total; preview limits and unreported trade can affect coverage.');
+      ? `Shares use the sum of observed partner values, without a reported World total. ${originsAvailable}; preview limits and unreported trade can affect coverage.`
+      : `${originsAvailable}. The stored denominator is not independently verified against a complete World total; preview limits and unreported trade can affect coverage.`);
   // R5: a hub's recorded exports may be someone else's production, so the next
-  // action prefers a non-hub origin. Falling back to `eligible[0]` keeps a hub
-  // nameable when every eligible origin is flagged -- withholding the action
-  // there would read as "no origin available", which is a different claim.
+  // action prefers a non-hub origin from the same route-state tier as the leader.
+  // The preference never crosses tiers: an origin whose modeled route avoids the
+  // blocked chokepoint outranks one with an unknown route for reasons the hub
+  // flag does not touch. Falling back to `eligible[0]` keeps a hub nameable when
+  // every origin in its tier is flagged -- withholding the action there would
+  // read as "no origin available", which is a different claim.
   const eligible = candidates.filter(c => c.routeState !== 'exposed' && c.sharePct !== null && c.sharePct > 0);
-  const candidate = eligible.find(c => !c.transitHub) ?? eligible[0];
-  const skippedHubs = candidate ? eligible.slice(0, eligible.indexOf(candidate)).filter(c => c.transitHub) : [];
+  const leadingTier = eligible.filter(c => c.routeState === eligible[0]?.routeState);
+  const candidate = leadingTier.find(c => !c.transitHub) ?? eligible[0];
+  const skippedHubs = candidate ? leadingTier.slice(0, leadingTier.indexOf(candidate)).filter(c => c.transitHub) : [];
   const hubNote = !candidate ? ''
     : candidate.transitHub
-      ? ` Every eligible origin is flagged a possible transit hub, so ${candidate.origin} is named anyway; its recorded exports may be re-exports rather than origin production.`
+      ? ` Every eligible origin with this route state is flagged a possible transit hub, so ${candidate.origin} is named anyway; its recorded exports may be re-exports rather than origin production.`
       : skippedHubs.length
-        ? ` ${skippedHubs.map(c => hubName(c.origin)).join(', ')} rank${skippedHubs.length > 1 ? '' : 's'} ahead on recorded share but is flagged a possible transit hub, so it was skipped.`
+        ? ` ${skippedHubs.map(c => hubName(c.origin)).join(', ')} ${skippedHubs.length > 1 ? 'hold' : 'holds'} a larger recorded share with the same route state but ${skippedHubs.length > 1 ? 'are' : 'is'} flagged a possible transit hub, so ${skippedHubs.length > 1 ? 'they were' : 'it was'} skipped.`
         : '';
   const vulnerability = !capture.vulnerabilities.upstreamUnavailable
     ? capture.vulnerabilities.vulnerabilities.find(v => v.countryIso2 === selection.countryCode && v.commodityId === commodity.id) : undefined;
@@ -228,7 +239,25 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
     references: evidence.map(e => e.id), constraint: `${missing} ${constraints}`,
     trigger: 'Reassess when positive bilateral supplier evidence and a usable origin route are available, or the selected chokepoint reopens.',
   };
-  return { kind: 'commodity', selection: { ...selection }, capturedAt: capture.retrievedAt, commodity: commodity.label, basket: commodity.basketLabel, coverage, hs4, capture,
+  // The snapshot is what the HTML and JSON exports carry. A restricted
+  // production source (BGS) keeps its attribution, year, unit and the derived
+  // concentration index, but its per-country rows and world total do not
+  // travel into a downloadable file.
+  const withoutRows = (stage: MineralStageSnapshot): MineralStageSnapshot => {
+    const stripped: MineralStageSnapshot = { ...stage, countries: [] };
+    delete stripped.worldTotal;
+    return stripped;
+  };
+  const exportableProduction = capture.production && productionRestricted ? {
+    ...capture.production,
+    commodities: capture.production.commodities.map(record => record.commodityId !== mineralId ? record : {
+      ...record,
+      mine: record.mine ? withoutRows(record.mine) : record.mine,
+      refinery: record.refinery ? withoutRows(record.refinery) : record.refinery,
+    }),
+  } : capture.production;
+  return { kind: 'commodity', selection: { ...selection }, capturedAt: capture.retrievedAt, commodity: commodity.label, basket: commodity.basketLabel, coverage, hs4,
+    capture: { ...capture, production: exportableProduction },
     evidence, candidates, context, caveats,
     ordering: 'Investigation order: selected chokepoint absent from modeled path, unknown route, then exposed route; within each group, descending recorded import-value share. This is not a supplier recommendation score.', action };
 }

@@ -216,8 +216,12 @@ test('commodity evidence depth maps volume, scale, hub flag and world production
   assert.match(s.coverage.join(' '), /Possible transit hubs among shown origins: Netherlands \(NL\)/);
   assert.match(s.coverage.join(' '), /world exports of HS 8105 fetched 2026-09-08T00:00:00Z/);
   assert.match(s.coverage.join(' '), /World production: mine-stage shares from USGS MCS/);
-  // R5: NL leads on recorded share but is a hub, so the action names CD instead.
-  assert.match(s.action.text, /Validate CD's/);
-  assert.match(s.action.text, /Netherlands \(NL\) ranks ahead.*skipped/);
+  // R5: NL is the only origin whose modeled route avoids the blocked chokepoint,
+  // so the hub preference (which never crosses route-state tiers) cannot skip
+  // it; the action names NL and says the flag could not be avoided.
+  assert.equal(s.candidates[0]?.origin, 'NL');
+  assert.notEqual(s.candidates[1]?.routeState, s.candidates[0]?.routeState);
+  assert.match(s.action.text, /Validate NL's/);
+  assert.match(s.action.text, /Every eligible origin with this route state is flagged a possible transit hub/);
   assert.deepEqual(JSON.parse(JSON.stringify(s.candidates)), s.candidates);
 });

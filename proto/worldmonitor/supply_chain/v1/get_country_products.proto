@@ -53,8 +53,9 @@ message CountryProduct {
   // recovered on demand, whose fetch time differs from the payload's.
   optional string fetched_at = 7;
   // How top_exporters was selected: "share_threshold" (every origin at or above
-  // 1% of the denominator, padded to 5 and capped at 25) or "leading_5" (the
-  // canonical leading five). Absent when no origins are shown.
+  // 1% of the denominator, padded to 5 and capped at 25; served only for the
+  // requested hs4) or "leading_5" (the canonical leading five). Always present
+  // on a served row.
   optional string partner_basis = 8;
   // Origins ranked below the ones shown. Absent under "leading_5", where the
   // omitted set is not measured.

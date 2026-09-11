@@ -271,15 +271,42 @@ function requestBodyIsTyped(operation) {
  * paid 62 times over for `jmespath` alone, so it buys back roughly 62x whatever
  * it trims. Pinned by tests/openapi-json-dedup.test.mjs.
  */
-export const INLINE_DESCRIPTION_MAX_BYTES = 160;
+export const INLINE_DESCRIPTION_MAX_BYTES = 300;
+
+/**
+ * Curated inline summaries for components whose lead sentence alone would drop
+ * a limit the API contract states on every operation (the jmespath byte and
+ * output caps, which tests/openapi-jmespath-contract.test.mjs requires on each
+ * GET). A summary must restate every numeric limit its component names;
+ * tests/openapi-json-dedup.test.mjs checks that against the live component so
+ * the two cannot drift apart.
+ */
+export const INLINE_SUMMARY_OVERRIDES = Object.freeze({
+  JmespathParam: 'Optional JMESPath expression applied server-side to project or reduce the JSON '
+    + 'response before it is returned. Expressions over 1024 UTF-8 bytes or projections '
+    + 'over the 256 KB output cap return HTTP 400.',
+});
 
 /** UTF-8 bytes, not UTF-16 code units: the budget this serves is a byte cap. */
 const utf8Bytes = (text) => Buffer.byteLength(text, 'utf8');
 
 /**
- * The lead sentence of a long description plus a pointer to the component that
- * holds the rest. Derived from the component rather than hand-written, so the
- * inline prose cannot drift away from the authoritative text.
+ * The first sentence of a description with its parentheticals removed.
+ * Parentheticals go first, before the sentence split, so an abbreviation inside
+ * one ("e.g.") cannot end the sentence early and leave a bracket unbalanced. The
+ * split also requires a capital letter after the terminator, so "e.g. \"mena\""
+ * outside a bracket does not end the sentence either.
+ */
+export function leadSentence(text) {
+  const flat = String(text).replaceAll(/\s*\([^()]*\)/g, '').replaceAll(/\s+/g, ' ').trim();
+  return flat.split(/(?<=[.!?])\s+(?=[A-Z])/)[0].trim();
+}
+
+/**
+ * The lead sentence of a long description (or its curated summary) plus a
+ * pointer to the component that holds the rest. Derived from the component
+ * rather than hand-written wherever possible, so the inline prose cannot drift
+ * away from the authoritative text.
  *
  * Parentheticals are dropped: they qualify the sentence rather than state it,
  * and they are the part a reader who wants detail should follow the pointer
@@ -292,7 +319,7 @@ function shortInlineDescription(name, description) {
   }
   const pointer = `Full text: #/components/parameters/${name}.`;
   const budget = INLINE_DESCRIPTION_MAX_BYTES - utf8Bytes(` ${pointer}`);
-  let lead = description.split(/(?<=[.!?])\s+/)[0].replaceAll(/\s*\([^)]*\)/g, '').trim();
+  let lead = INLINE_SUMMARY_OVERRIDES[name] ?? leadSentence(description);
   if (utf8Bytes(lead) > budget) {
     while (lead.length > 0 && utf8Bytes(`${lead}…`) > budget) {
       const space = lead.lastIndexOf(' ');

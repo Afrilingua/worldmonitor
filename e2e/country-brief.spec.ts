@@ -598,7 +598,11 @@ for (const { mobile, light } of [{ mobile: false, light: false }, { mobile: true
       await expect(paper.locator('[data-origin="NL"]')).toContainText('Possible transit hub');
       await expect(paper.locator('[data-origin="US"]')).not.toContainText('Possible transit hub');
       expect(snapshot.candidates.find((c: { origin: string }) => c.origin === 'NL').transitHub).toBe(true);
-      expect(snapshot.action.text).toContain('Netherlands (NL)');
+      // NL is the only origin whose modeled route avoids the blocked chokepoint,
+      // so the hub preference (which never crosses route-state tiers) cannot
+      // skip it: the action names NL and says the flag was unavoidable there.
+      expect(snapshot.action.text).toContain("Validate NL's");
+      expect(snapshot.action.text).toContain('Every eligible origin with this route state is flagged a possible transit hub');
       const details = paper.locator('[data-origin="QA"] details');
       await details.locator('summary').focus();
       await details.locator('summary').press('Enter');

@@ -187,9 +187,20 @@ function isCuratedOmission(key, context = {}) {
   // unavailableReason at the UNSPECIFIED zero value. The generic enum picker
   // skips the zero value and so paired rows with INVALID_REQUEST — a response
   // the handler cannot produce. See #6309 / #6316.
-  return key === 'unavailableReason'
+  if (key === 'unavailableReason'
     && (where.includes('gettradeflows') || where.includes('get-trade-flows')
-      || where.includes('gettarifftrends') || where.includes('get-tariff-trends'));
+      || where.includes('gettarifftrends') || where.includes('get-tariff-trends'))) {
+    return true;
+  }
+  // GetCountryProducts: every CountryProduct field is optional in the generated
+  // schema, so the optional-slot cap picks the alphabetically first ones and the
+  // example lost topExporters and totalValue — the two fields the row exists
+  // for. The recovery/threshold bookkeeping is dropped so those slots go to
+  // the trade evidence.
+  // The array's item object carries the array's own key as its `name`.
+  return (context.name === 'products')
+    && (where.includes('getcountryproducts') || where.includes('get-country-products'))
+    && ['fetchedAt', 'omittedPartnerCount', 'omittedPartnerShare', 'partnerBasis'].includes(key);
 }
 
 function overrideStringExample(key, context = {}) {

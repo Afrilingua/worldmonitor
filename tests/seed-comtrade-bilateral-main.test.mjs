@@ -63,6 +63,8 @@ let comtradeUrls = [];
 let batchRawRowCounts = null;
 /** HTTP status the world-exports requests answer with; 200 when null. */
 let worldStatus = null;
+/** When true, the world-exports requests answer 200 with an empty data array. */
+let worldEmpty = false;
 /** Rows every reporter batch returns, when set. Overrides countriesWithData. */
 let countryRows = null;
 /** When true, acquiring the run lock fails the way an unreachable Redis does. */
@@ -130,6 +132,7 @@ beforeEach(() => {
   comtradeUrls = [];
   batchRawRowCounts = null;
   worldStatus = null;
+  worldEmpty = false;
   countryRows = null;
   lockUnavailable = false;
 
@@ -171,6 +174,7 @@ beforeEach(() => {
       const isWorldExports = new URL(href).searchParams.get('flowCode') === 'X';
       if (!isWorldExports) countryCallCount++;
       if (isWorldExports && worldStatus) return new Response('{}', { status: worldStatus });
+      if (isWorldExports && worldEmpty) return respond({ count: 0, data: [] });
       if (rateLimitEverything) return new Response('{}', { status: 429 });
       if (failSecondBatch && countryCallCount > 1) return new Response('{}', { status: 403 });
       if (transientEverything) return new Response('{}', { status: 503 });
@@ -512,11 +516,44 @@ test('a failed world-exports fetch is recorded and the reporters still seed', as
 
   const meta = writtenMeta();
   assert.equal(meta.worldExports.state, 'unavailable');
+  assert.ok(meta.worldExports.attemptedAt, 'a failed attempt is dated');
   assert.ok(
     !redisCommands.some(c => c[0] === 'SET' && c[1] === WORLD_EXPORTS_KEY),
     'a failed fetch must not overwrite the last good world-exports key',
   );
   assert.equal(meta.recordCount, 2, 'the countries must still be written');
+  // The previous snapshot is kept alive like a preserved country shard, or it
+  // would expire mid-cycle and the brief would lose supplier scale entirely.
+  assert.ok(
+    redisCommands.some(c => c[0] === 'EXPIRE' && c[1] === WORLD_EXPORTS_KEY),
+    'a failed fetch must extend the last good snapshot\'s TTL',
+  );
+});
+
+test('a world-exports answer with no usable rows is no_records and keeps the previous snapshot', async () => {
+  worldEmpty = true;
+  countriesWithData = 1;
+
+  await main({ requestBudget: 4 });
+
+  const meta = writtenMeta();
+  assert.equal(meta.worldExports.state, 'no_records');
+  assert.ok(meta.worldExports.attemptedAt);
+  assert.ok(
+    !redisCommands.some(c => c[0] === 'SET' && c[1] === WORLD_EXPORTS_KEY),
+    'a valid empty answer must not overwrite the last good snapshot',
+  );
+  assert.ok(redisCommands.some(c => c[0] === 'EXPIRE' && c[1] === WORLD_EXPORTS_KEY));
+  assert.equal(meta.recordCount, 1);
+});
+
+test('an observed world-exports fetch does not extend the snapshot it just rewrote', async () => {
+  countriesWithData = 1;
+
+  await main({ requestBudget: 4 });
+
+  assert.ok(redisCommands.some(c => c[0] === 'SET' && c[1] === WORLD_EXPORTS_KEY));
+  assert.ok(!redisCommands.some(c => c[0] === 'EXPIRE' && c[1] === WORLD_EXPORTS_KEY));
 });
 
 // ─── Sibling partners key (R1 / KTD1) ────────────────────────────────────────

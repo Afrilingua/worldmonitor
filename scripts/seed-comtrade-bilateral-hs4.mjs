@@ -498,6 +498,9 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
     // loop. Reserving them after it would let a budget abort drop them entirely,
     // and would leave the per-reporter pre-check committing a remainder it does
     // not have. One request per catalogue batch covers every reporter at once.
+    // On the keyless preview route the all-reporter answer (~2,300 rows per
+    // batch) exceeds the 500-row cap, so this ends `incomplete` there and the
+    // previous snapshot is kept; production runs keyed.
     try {
       const worldPeriod = PERIODS[0];
       const worldRecords = [];
@@ -508,23 +511,30 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
       }
       const headings = groupWorldExports(worldRecords);
       const fetchedAt = new Date().toISOString();
-      queueWrite(WORLD_EXPORTS_KEY, JSON.stringify({
-        fetchedAt,
-        period: worldPeriod,
-        source: usePublicApi ? 'UN Comtrade public preview' : 'UN Comtrade data API',
-        headings,
-      }));
-      const reporters = new Set();
-      for (const heading of Object.values(headings)) {
-        for (const exporter of heading.exporters) reporters.add(exporter.reporterCode);
+      if (Object.keys(headings).length === 0) {
+        // A valid empty answer, like a reporter with no products: recorded,
+        // never written over the last good snapshot.
+        console.warn('[bilateral-hs4] world exports: no usable rows, keeping the previous snapshot');
+        worldExports = { state: 'no_records', attemptedAt: fetchedAt };
+      } else {
+        queueWrite(WORLD_EXPORTS_KEY, JSON.stringify({
+          fetchedAt,
+          period: worldPeriod,
+          source: usePublicApi ? 'UN Comtrade public preview' : 'UN Comtrade data API',
+          headings,
+        }));
+        const reporters = new Set();
+        for (const heading of Object.values(headings)) {
+          for (const exporter of heading.exporters) reporters.add(exporter.reporterCode);
+        }
+        worldExports = {
+          state: 'observed',
+          fetchedAt,
+          headingCount: Object.keys(headings).length,
+          reporterCount: reporters.size,
+        };
+        console.log(`[bilateral-hs4] world exports: ${worldExports.headingCount} headings, ${worldExports.reporterCount} reporters`);
       }
-      worldExports = {
-        state: 'observed',
-        fetchedAt,
-        headingCount: Object.keys(headings).length,
-        reporterCount: reporters.size,
-      };
-      console.log(`[bilateral-hs4] world exports: ${worldExports.headingCount} headings, ${worldExports.reporterCount} reporters`);
     } catch (err) {
       // The reporters do not depend on this key; degrade the brief's supplier
       // scale rather than the country coverage.
@@ -695,6 +705,9 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
       preservedKeys.push(canonicalKey(iso2));
       if (Number(existing[c * 2 + 1]?.result) === 1) preservedKeys.push(partnersKey(iso2));
     }
+    // A run that could not rewrite the world-exports snapshot keeps the previous
+    // one alive, exactly as a failed reporter keeps its previous shard.
+    if (worldExports?.state !== 'observed') preservedKeys.push(WORLD_EXPORTS_KEY);
     if (preservedKeys.length > 0) {
       await extendExistingTtl(preservedKeys, TTL_SECONDS)
         .catch(e => console.warn('[bilateral-hs4] TTL extension (preserved) failed:', e.message));

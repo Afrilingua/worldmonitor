@@ -5,7 +5,7 @@ import type {
 import { ValidationError } from '../../../../src/generated/server/worldmonitor/supply_chain/v1/service_server';
 import { normalizeComtradeProducts, HS4_CODES, HS4_LABELS } from '../../../../scripts/shared/comtrade';
 import { isCallerPremium } from '../../../_shared/premium-check';
-import { getCachedJson, readCachedJson } from '../../../_shared/redis';
+import { getCachedJson, getLargeRawJson, logCacheReadError, readCachedJson } from '../../../_shared/redis';
 import { lazyFetchBilateralHs4, lazyFetchHeading } from './_bilateral-hs4-lazy';
 import type { PartnerRow, PartnersProduct } from './_bilateral-hs4-lazy';
 
@@ -80,22 +80,37 @@ const fromPartnersProduct = (product: PartnersProduct): CountryProduct => define
 }) as CountryProduct;
 
 /**
- * Threshold partner rows by heading. An unreadable or malformed sibling key is
- * treated as absent, never as a cache failure: it is supplementary evidence, so
- * losing it degrades the row to the canonical leading 5 rather than blanking
- * the response the canonical key can still answer.
+ * Threshold partner rows by heading, with the run time they were written at. An
+ * unreadable or malformed sibling key is treated as absent, never as a cache
+ * failure: it is supplementary evidence, so losing it degrades the row to the
+ * canonical leading 5 rather than blanking the response the canonical key can
+ * still answer.
  */
-function readSiblingProducts(read: { status: string; value?: unknown }, iso2: string): Map<string, PartnersProduct> {
+function readSiblingProducts(read: { status: string; value?: unknown }, iso2: string): { rows: Map<string, PartnersProduct>; fetchedAt?: string } {
   const rows = new Map<string, PartnersProduct>();
   const payload = (read.status === 'hit' ? read.value : null) as BilateralHs4PartnersPayload | null;
-  if (!payload || payload.iso2 !== iso2 || !Array.isArray(payload.products)) return rows;
+  if (!payload || payload.iso2 !== iso2 || !Array.isArray(payload.products)) return { rows };
   for (const product of payload.products) {
     if (product && typeof product.hs4 === 'string' && Array.isArray(product.partners)
       && product.partners.every(p => p && typeof p.partnerCode === 'number')) {
       rows.set(product.hs4, product);
     }
   }
-  return rows;
+  return { rows, fetchedAt: typeof payload.fetchedAt === 'string' ? payload.fetchedAt : undefined };
+}
+
+/**
+ * Whether a sibling written at `siblingFetchedAt` may describe a payload fetched
+ * at `payloadFetchedAt`. The sibling is written by the scheduled run beside the
+ * canonical key, so it is current only for that run or an older one: a warm
+ * refresh that just replaced the served rows must not be overridden by detail
+ * from a previous month, however similar the observation year.
+ */
+function siblingIsCurrent(siblingFetchedAt: string | undefined, payloadFetchedAt: string | undefined): boolean {
+  const sibling = Date.parse(siblingFetchedAt ?? '');
+  const payload = Date.parse(payloadFetchedAt ?? '');
+  if (!Number.isFinite(sibling)) return false;
+  return !Number.isFinite(payload) || sibling >= payload;
 }
 
 /**
@@ -176,15 +191,21 @@ export async function getCountryProducts(
   // Status-aware reads for the two country keys so a read error stays
   // distinguishable from a miss; the canonical one decides cache_unavailable,
   // the sibling one only decides how deep the origins go.
+  // The world-exports snapshot is a few hundred kilobytes (36 headings x ~140
+  // reporters), which is past what the 1.5 s single-GET deadline is sized for;
+  // the large-value reader uses the pipeline deadline instead.
   const [cached, siblingRead, worldExportsValue, meta] = await Promise.all([
     readCachedJson(key, true),
     readCachedJson(PARTNERS_KEY(iso2), true),
-    getCachedJson(WORLD_EXPORTS_KEY, true).catch(() => null),
+    getLargeRawJson(WORLD_EXPORTS_KEY).catch(() => null),
     getCachedJson('seed-meta:comtrade:bilateral-hs4', true).catch(() => null) as Promise<{
       countryCoverage?: Record<string, { state?: string; attemptedAt?: string }>;
       preserveStreaks?: Record<string, number>;
     } | null>,
   ]);
+  // A sibling read error degrades to the leading 5 silently for the caller, so
+  // it is at least logged for the operator.
+  if (siblingRead.status === 'error') logCacheReadError(PARTNERS_KEY(iso2), siblingRead.error);
   let cacheFailed = cached.status === 'error';
   let payload = (cached.status === 'hit' ? cached.value : null) as BilateralHs4Payload | null;
   let attempt = meta?.countryCoverage?.[iso2];
@@ -193,9 +214,7 @@ export async function getCountryProducts(
     cacheFailed = true;
     payload = null;
   }
-  // "No product row for this heading" — the producing request's requestedHs4s
-  // says the heading was asked for, not that an answer came back.
-  const missingRequested = Boolean(hs4) && !payload?.products.some(p => p.hs4 === hs4);
+  const sibling = readSiblingProducts(siblingRead, iso2);
   let recovered: PartnersProduct | undefined;
   let recoveredFetchedAt: string | undefined;
   let headingAttempted = false;
@@ -207,26 +226,37 @@ export async function getCountryProducts(
     const refreshed = await lazyFetchBilateralHs4(iso2, payload ?? undefined);
     attempt = { state: refreshed?.state ?? 'busy', attemptedAt: refreshed?.attemptedAt ?? '' };
     if (refreshed?.payload) payload = refreshed.payload;
-  } else if (!cacheFailed && missingRequested) {
-    // A fresh payload that simply lacks this one heading. Refetching the
-    // catalogue would republish 35 headings we already hold and would fill the
-    // preview route's row cap for a large importer, so only the requested
-    // heading is fetched, against its own sentinel (KTD5). One recovery attempt
-    // per request keeps the upstream cost bounded at one heading.
+  }
+  // The requested heading gets its own bounded attempt whenever the stored
+  // evidence does not answer for it: the row is absent, or the payload is still
+  // past its freshness window after the catalogue attempt above. A large
+  // importer's whole-catalogue fetch fills the preview route's row cap and ends
+  // incomplete, so without this the heading users ask for would never recover.
+  // The stored row's year, when there is one, arms the regression guard.
+  const storedRow = hs4 ? payload?.products.find(p => p.hs4 === hs4) : undefined;
+  if (!cacheFailed && hs4 && (!storedRow || isStale(payload?.fetchedAt))) {
     headingAttempted = true;
-    const heading = await lazyFetchHeading(iso2, hs4!);
+    const storedYears = [storedRow?.year, sibling.rows.get(hs4)?.year].filter((y): y is number => Number.isInteger(y));
+    const heading = await lazyFetchHeading(iso2, hs4, storedYears.length ? Math.max(...storedYears) : undefined);
     attempt = { state: heading?.state ?? 'busy', attemptedAt: heading?.attemptedAt ?? '' };
     recovered = heading?.product;
     recoveredFetchedAt = heading?.fetchedAt;
   }
 
-  const sibling = readSiblingProducts(siblingRead, iso2);
   const { fetchedAt: worldExportsFetchedAt, byHeading } = readWorldExports(worldExportsValue);
-  const merged = (payload?.products ?? []).map(product => mergeProduct(product, sibling.get(product.hs4)));
+  // The sibling's threshold detail is served only for the heading the caller
+  // asked for. Every other caller (the deep-dive panel, route workflows) keeps
+  // the leading 5 it has always rendered. A sibling older than the payload now
+  // served — a warm refresh just replaced the rows — is not current for it.
+  const siblingFor = (product: CountryProduct): PartnersProduct | undefined =>
+    hs4 === product.hs4 && siblingIsCurrent(sibling.fetchedAt, payload?.fetchedAt) ? sibling.rows.get(product.hs4) : undefined;
+  const merged = (payload?.products ?? [])
+    .filter(product => !(recovered && product.hs4 === recovered.hs4))
+    .map(product => mergeProduct(product, siblingFor(product)));
   if (recovered) {
     // Appended rather than re-ranked: the stored order is the producing run's
-    // ranking, and this heading was never part of it. Its own fetch time rides
-    // along, because it is not the payload's.
+    // ranking. A recovered heading replaces its stale stored row and carries its
+    // own fetch time, because it is not the payload's.
     merged.push(defined({ ...fromPartnersProduct(recovered), fetchedAt: recoveredFetchedAt }));
   }
   const products = normalizeComtradeProducts(merged).map((p: CountryProduct) => attachScale(
@@ -246,10 +276,12 @@ export async function getCountryProducts(
     evidence: defined({
       state,
       source: payload?.source ?? 'UN Comtrade bilateral HS4 (legacy cache; retrieval method unknown)',
-      // A single-heading attempt requested exactly that heading, so an empty
-      // result reads as "requested and empty" rather than "coverage unverified".
+      // A single-heading attempt that came back empty requested exactly that
+      // heading, so it reads as "requested and empty" rather than "coverage
+      // unverified". A busy, rate-limited or failed attempt proves nothing
+      // about the heading and must not claim it was asked and answered.
       requestedHs4s: headingAttempted
-        ? [...new Set([...(payload?.requestedHs4s ?? []), hs4!])]
+        ? (attempt?.state === 'no_records' ? [...new Set([...(payload?.requestedHs4s ?? []), hs4!])] : payload?.requestedHs4s ?? [])
         : attempt?.state === 'no_records' ? HS4_CODES : payload?.requestedHs4s ?? [],
       missingHs4s,
       lastAttemptAt: attempt?.attemptedAt ?? '',

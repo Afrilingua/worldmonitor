@@ -71,6 +71,14 @@ test('observed world exports reach the health payload without changing status', 
   assert.equal(entry.coveragePartial,undefined);
 });
 
+for (const state of ['no_records', 'unavailable', 'malformed', 'incomplete']) {
+  test(`a ${state} world-exports outcome is a coverage gap`, async () => {
+    const entry = await bilateralEntry({...healthy, worldExports: {state, attemptedAt: '2026-09-11T06:00:00.000Z'}});
+    assert.equal(entry.status,'coverage_partial');
+    assert.equal(entry.bilateralCoverage.worldExports.state, state);
+  });
+}
+
 test('a run recorded before world exports existed stays ok and reports null', async () => {
   const entry = await bilateralEntry(healthy);
   assert.equal(entry.bilateralCoverage.worldExports,null,

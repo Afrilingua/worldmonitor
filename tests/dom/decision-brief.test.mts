@@ -12,6 +12,8 @@ vi.mock('../../server/_shared/redis', () => ({
   readCachedJson: async (key: string) => redis.has(key) ? {status:'hit',value:redis.get(key)} : {status:'miss'},
   setCachedJsonIfAbsent: async (key: string, value: unknown) => { if (redis.has(key)) return false; redis.set(key, value); return true; },
   setCachedJson: async (key: string, value: unknown) => { redis.set(key, value); return true; },
+  getLargeRawJson: async (key: string) => redis.get(key) ?? null,
+  logCacheReadError: () => {},
 }));
 
 beforeAll(initTestI18n);
@@ -263,9 +265,12 @@ it('legacy JP842 survives real reader to builder to preview and embedded export 
 
 // Refresh outcome -> the attempt state the reader must report. Capped and
 // regressed refreshes are different failures and keep different names.
+// Refresh outcome -> the attempt state the reader must report. When the whole
+// catalogue refresh is rejected (a held heading missing or regressed), the
+// requested heading still gets its own bounded attempt, which succeeds here.
 const germanyOutcomes = {
   unavailable: 'unavailable', no_records: 'no_records', malformed: 'malformed', incomplete: 'incomplete',
-  missing_heading: 'regression_rejected', year_regression: 'regression_rejected', recovered: 'observed',
+  missing_heading: 'observed', year_regression: 'observed', recovered: 'observed',
 } as const;
 for (const [outcome, attemptState] of Object.entries(germanyOutcomes)) it(`preserves or recovers Germany with refresh outcome ${outcome}`, async () => {
   redis.clear();
@@ -291,6 +296,15 @@ for (const [outcome, attemptState] of Object.entries(germanyOutcomes)) it(`prese
     expect(result.fetchedAt).not.toBe(previous.fetchedAt);
     expect(result.evidence?.requestedHs4s).toContain('2804');
     expect((redis.get('comtrade:bilateral-hs4-lazy-sentinel:DE:v1') as {state?: string}).state).toBe('observed');
+  } else if(outcome==='missing_heading' || outcome==='year_regression') {
+    // The catalogue refresh was rejected, so the stale wheat row is preserved,
+    // while the requested heading was recovered on its own.
+    expect(result.fetchedAt).toBe(previous.fetchedAt);
+    expect(result.products.find(p=>p.hs4==='1001')?.year).toBe(2023);
+    expect(result.products.find(p=>p.hs4==='2804')?.topExporters[0]?.partnerIso2).toBe('US');
+    expect(result.evidence?.state).toBe('stale_preserved');
+    expect(result.evidence?.recoveredHs4s).toEqual(['2804']);
+    expect((redis.get('comtrade:bilateral-hs4-lazy-sentinel:DE:v1') as {state?: string}).state).toBe('regression_rejected');
   } else {
     expect(result.fetchedAt).toBe(previous.fetchedAt);
     expect(result.products[0]?.year).toBe(2023);
@@ -424,17 +438,33 @@ describe('commodity brief evidence depth', () => {
   it('AE4: flags a transit hub, prefers a non-hub next action and names the hub it skipped', () => {
     const data = build({ hs4: '2804', description: '', totalValue: 1000, year: 2024, partnerBasis: 'share_threshold',
       omittedPartnerCount: 0, omittedPartnerShare: 0,
-      topExporters: [partner('NL', 528, 0.5), partner('CA', 124, 0.3)] });
+      // NL and FR share the Suez lane to Japan, so they sit in the same route tier.
+      topExporters: [partner('NL', 528, 0.5), partner('FR', 251, 0.3)] });
     expect(data.candidates[0]!.origin).toBe('NL');
     expect(data.candidates[0]!.transitHub).toBe(true);
-    expect(data.candidates.find(c => c.origin === 'CA')!.transitHub).toBe(false);
-    expect(data.action.text).toContain('CA');
-    expect(data.action.text).toContain('Netherlands');
-    expect(data.action.text).toContain('skipped');
+    expect(data.candidates[1]!.routeState).toBe(data.candidates[0]!.routeState);
+    expect(data.candidates.find(c => c.origin === 'FR')!.transitHub).toBe(false);
+    expect(data.action.text).toContain("Validate FR's");
+    expect(data.action.text).toMatch(/Netherlands \(NL\) holds a larger recorded share with the same route state .* skipped/);
     expect(data.coverage.join(' ')).toContain('Possible transit hubs among shown origins: Netherlands (NL)');
     const report = renderCommodityBrief(data);
     expect(report.querySelector('[data-origin="NL"]')!.textContent).toContain('Possible transit hub');
-    expect(report.querySelector('[data-origin="CA"]')!.textContent).not.toContain('Possible transit hub');
+    expect(report.querySelector('[data-origin="FR"]')!.textContent).not.toContain('Possible transit hub');
+  });
+
+  it('the hub preference never crosses route-state tiers', () => {
+    // NL avoids the blocked chokepoint on its modeled route; US has no modeled
+    // route at all. That ordering is about the route, not the hub flag, so the
+    // action still names NL and says the flag could not be avoided in its tier.
+    const data = build({ hs4: '2804', description: '', totalValue: 1000, year: 2024, partnerBasis: 'share_threshold',
+      omittedPartnerCount: 0, omittedPartnerShare: 0,
+      topExporters: [partner('US', 842, 0.392), partner('NL', 528, 0.1)] });
+    expect(data.candidates.map(c => c.origin)).toEqual(['NL', 'US']);
+    expect(data.candidates[0]!.routeState).toBe('not_on_modeled_route');
+    expect(data.candidates[1]!.routeState).toBe('unknown');
+    expect(data.action.text).toContain("Validate NL's");
+    expect(data.action.text).toContain('Every eligible origin with this route state is flagged');
+    expect(data.action.text).not.toContain('skipped');
   });
 
   it('names the first hub when every eligible origin is a hub and says the flag was not avoidable', () => {
@@ -462,10 +492,22 @@ describe('commodity brief evidence depth', () => {
     const restricted = build(product, { commodityId: 'cobalt', production: { commodities: [{ commodityId: 'cobalt', commodity: 'Cobalt', year: 2024, unit: 't', sources: ['bgs'],
       refinery: stage([{ iso2: 'CD', country: 'DR Congo', share: 12.5, withheld: false, estimated: false, residual: false }]) }],
       countries: [], fetchedAt: '2026-09-01T00:00:00Z', upstreamUnavailable: false, dataYear: 2024 } });
-    expect(restricted.candidates.find(c => c.origin === 'CD')!.production).toEqual({ sharePct: 12.5, stage: 'refinery', source: 'BGS', restricted: true });
+    // The restriction covers the exportable snapshot, not just the rendered
+    // row: the JSON download and the embedded HTML snapshot carry the whole
+    // object, so the number must be gone from the candidate and from the
+    // captured production response, while attribution, year and unit stay.
+    expect(restricted.candidates.find(c => c.origin === 'CD')!.production).toEqual({ sharePct: null, stage: 'refinery', source: 'BGS', restricted: true });
+    const serialized = JSON.stringify(restricted);
+    expect(serialized).not.toContain('12.5');
+    expect(serialized).not.toContain('220000');
+    expect(restricted.capture.production!.commodities[0]!.refinery!.countries).toEqual([]);
+    expect(restricted.capture.production!.commodities[0]!.refinery!.year).toBe(2024);
+    expect(restricted.capture.production!.commodities[0]!.sources).toEqual(['bgs']);
     const restrictedText = renderCommodityBrief(restricted).querySelector('[data-origin="CD"]')!.textContent!;
     expect(restrictedText).toContain('share from BGS, redistribution restricted');
     expect(restrictedText).not.toContain('12.5%');
+    // An open source keeps its numbers in the export.
+    expect(JSON.stringify(open)).toContain('220000');
   });
 
   it('reports an unavailable mineral leg without losing the trade evidence', () => {
