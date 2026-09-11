@@ -181,7 +181,9 @@ SZSE [适用规则与公告](https://www.szse.cn/application/laws/)，robots.txt
 即可覆盖全部 reporter。先预留可以让逐 reporter 的预算预检保持正确，并避免预算中止
 把该快照整个丢掉。它共享 40 天 TTL。其结果写入 seed metadata 并通过
 `/api/seed-health` 公布；`observed` 以外的任何状态都是覆盖缺口，因为供应方的绝对
-规模及其世界排名只来自这一个键。
+规模及其世界排名只来自这一个键。只有 `get-country-products` 读取它，且仅在请求了
+具体品目时。只有当快照中该品目的观测年份与所服务行的年份相同时，才会给来源附加
+规模：延迟申报方的旧行不会带上规模，而不是带上一个并非其年份的排名。
 
 ### 单品目恢复
 

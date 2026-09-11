@@ -167,6 +167,26 @@ test('commodity ordering uses known routes and exact zero remains different from
   assert.deepEqual(hormuz.capture, blocked.capture);
 });
 
+test('a heading recovered on demand reports its own fetch time as the source fetch time', async () => {
+  const { buildCommodityBrief } = await import('../src/utils/decision-brief.ts');
+  const selected = { countryCode: 'DE', countryName: 'Germany', commodityId: 'helium', chokepointId: 'hormuz_strait' };
+  const exporters = [{ partnerCode: 842, partnerIso2: 'US', share: 0.4, value: 400 }];
+  const recovered = { hs4: '2804', description: '', totalValue: 1000, year: 2024, partnerBasis: 'share_threshold', fetchedAt: '2026-09-11T12:00:00.000Z', topExporters: exporters };
+  const base = { retrievedAt: '2026-09-11T12:00:05.000Z', vulnerabilities: { iso2: 'DE', country: '', vulnerabilities: [], generatedAt: '', methodologyVersion: '', upstreamUnavailable: true }, production: null };
+  // The catalogue fetch failed and nothing is stored: the response carries no
+  // fetch time, but the recovered heading does, and that is the evidence shown.
+  const cold = buildCommodityBrief(selected, { ...base, products: { iso2: 'DE', fetchedAt: '', products: [recovered] } });
+  assert.match(cold.coverage.join('\n'), /Source fetched: 2026-09-11T12:00:00\.000Z \(HS 2804 recovered on demand; stored catalogue: none\)/);
+  assert.doesNotMatch(cold.coverage.join('\n'), /Source fetched: unknown/);
+  // A stale catalogue behind a recovered heading: both times are stated, the
+  // heading's first, so the brief is not dated by rows it does not show.
+  const stale = buildCommodityBrief(selected, { ...base, products: { iso2: 'DE', fetchedAt: '2026-07-27T16:47:53.750Z', products: [recovered] } });
+  assert.match(stale.coverage.join('\n'), /Source fetched: 2026-09-11T12:00:00\.000Z \(HS 2804 recovered on demand; stored catalogue: 2026-07-27T16:47:53\.750Z\)/);
+  // A stored row has no fetch time of its own and keeps the payload's.
+  const stored = buildCommodityBrief(selected, { ...base, products: { iso2: 'DE', fetchedAt: '2026-09-09T00:00:00.000Z', products: [{ ...recovered, fetchedAt: undefined }] } });
+  assert.match(stored.coverage.join('\n'), /Source fetched: 2026-09-09T00:00:00\.000Z\. Capture retrieved/);
+});
+
 // U5. The threshold partner list, volume, supplier scale, the hub flag and the
 // mineral leg all reach the snapshot from the same builder pass, so one case
 // pins the whole mapping without a DOM.

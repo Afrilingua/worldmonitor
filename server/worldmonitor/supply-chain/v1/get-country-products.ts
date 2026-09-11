@@ -159,14 +159,19 @@ function mergeProduct(canonical: CountryProduct, sibling?: PartnersProduct): Cou
   return { ...fromPartnersProduct(sibling), description: canonical.description };
 }
 
-/** Supplier scale for each shown origin; an origin the snapshot omits gets none. */
+/**
+ * Supplier scale for each shown origin; an origin the snapshot omits gets none.
+ * The snapshot holds the newest year any reporter filed, so a late filer's row
+ * can be a year behind it: a share and a rank from different years are not
+ * attached to each other.
+ */
 function attachScale(product: CountryProduct, byCode?: Map<number, ExporterScale>): CountryProduct {
   if (!byCode?.size) return product;
   return {
     ...product,
     topExporters: product.topExporters.map(exporter => {
       const scale = byCode.get(exporter.partnerCode);
-      return scale ? { ...exporter, scale } : exporter;
+      return scale && scale.year === product.year ? { ...exporter, scale } : exporter;
     }),
   };
 }
@@ -191,13 +196,15 @@ export async function getCountryProducts(
   // Status-aware reads for the two country keys so a read error stays
   // distinguishable from a miss; the canonical one decides cache_unavailable,
   // the sibling one only decides how deep the origins go.
-  // The world-exports snapshot is a few hundred kilobytes (36 headings x ~140
-  // reporters), which is past what the 1.5 s single-GET deadline is sized for;
-  // the large-value reader uses the pipeline deadline instead.
+  // The sibling detail and the world-exports snapshot are served only for a
+  // requested heading, so a whole-catalogue caller (the deep-dive panel) does
+  // not read them: the snapshot is a few hundred kilobytes (36 headings x ~140
+  // reporters), past what the 1.5 s single-GET deadline is sized for, and the
+  // large-value reader waits on the pipeline deadline instead.
   const [cached, siblingRead, worldExportsValue, meta] = await Promise.all([
     readCachedJson(key, true),
-    readCachedJson(PARTNERS_KEY(iso2), true),
-    getLargeRawJson(WORLD_EXPORTS_KEY).catch(() => null),
+    hs4 ? readCachedJson(PARTNERS_KEY(iso2), true) : { status: 'miss' as const },
+    hs4 ? getLargeRawJson(WORLD_EXPORTS_KEY).catch(() => null) : null,
     getCachedJson('seed-meta:comtrade:bilateral-hs4', true).catch(() => null) as Promise<{
       countryCoverage?: Record<string, { state?: string; attemptedAt?: string }>;
       preserveStreaks?: Record<string, number>;

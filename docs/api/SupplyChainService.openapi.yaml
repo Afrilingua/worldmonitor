@@ -5851,7 +5851,9 @@ components:
                 year:
                     type: integer
                     format: int32
-                    description: Trade observation year of the world-export figures, not the fetch year.
+                    description: |-
+                        Trade observation year of the world-export figures, not the fetch year.
+                         Always equal to the row's year: a scale from another year is not attached.
             description: |-
                 An origin's reported world exports of the same heading, so a shown share can
                  be read against the supplier's total capacity rather than this importer alone.
@@ -5900,7 +5902,8 @@ components:
                     type: string
                     description: |-
                         ISO timestamp of the world-export snapshot the scale figures came from.
-                         Absent when no snapshot is cached, in which case no row carries a scale.
+                         Absent when no snapshot is cached or no hs4 was requested, in which case no
+                         row carries a scale.
             description: Cache evidence for the returned products. Missing data is not zero trade.
         GetMultiSectorCostShockRequest:
             type: object

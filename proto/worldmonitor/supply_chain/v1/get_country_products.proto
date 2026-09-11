@@ -15,6 +15,7 @@ message ExporterScale {
   // 1-based position among world exporters of this heading, ranked by value.
   int32 rank = 3;
   // Trade observation year of the world-export figures, not the fetch year.
+  // Always equal to the row's year: a scale from another year is not attached.
   int32 year = 4;
 }
 
@@ -110,6 +111,7 @@ message CountryProductEvidence {
   // stored payload. Empty when every row came from the stored payload.
   repeated string recovered_hs4s = 7;
   // ISO timestamp of the world-export snapshot the scale figures came from.
-  // Absent when no snapshot is cached, in which case no row carries a scale.
+  // Absent when no snapshot is cached or no hs4 was requested, in which case no
+  // row carries a scale.
   optional string world_exports_fetched_at = 8;
 }

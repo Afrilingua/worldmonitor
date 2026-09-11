@@ -225,7 +225,10 @@ pre-check honest and stops a budget abort from dropping the snapshot
 altogether. It shares the 40-day TTL. Its outcome is recorded in seed metadata
 and published through `/api/seed-health`; any state other than `observed` is a
 coverage gap, because a supplier's absolute scale and its world rank come from
-this key alone.
+this key alone. Only `get-country-products` reads it, and only for a requested
+heading. A scale is attached to an origin only when the snapshot's observation
+year for that heading equals the served row's year, so a late filer's older row
+carries no scale rather than a rank from a year it does not describe.
 
 ### Single-heading recovery
 

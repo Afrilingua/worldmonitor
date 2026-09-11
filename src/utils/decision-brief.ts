@@ -103,9 +103,15 @@ export function buildCommodityBrief(selection: CommodityBriefSelection, input: C
     'Routes are geographic models, not observed shipments. Only the selected chokepoint is assumed blocked; other disruptions and transport modes are unknown.',
     'A downstream Suez or Cape option cannot bypass an origin blocked at the Strait of Hormuz.'];
   if (hs4 === '2804') caveats.push('Helium uses the HS 2804 commodity-basket proxy, which includes other gases. It cannot establish a hospital helium supplier share.');
+  // A heading recovered on demand carries its own fetch time, and it is the
+  // evidence actually shown: the response-level time is the stored catalogue's,
+  // which can be absent or a month older than the rows below.
+  const sourceFetched = product?.fetchedAt
+    ? `${product.fetchedAt} (HS ${hs4} recovered on demand; stored catalogue: ${capture.products.fetchedAt || 'none'})`
+    : capture.products.fetchedAt || 'unknown';
   const coverage = [
     `Cache state: ${capture.products.evidence?.state ?? 'legacy_unknown'}. Source: ${capture.products.evidence?.source ?? 'UN Comtrade bilateral HS4; retrieval method unknown'}.`,
-    `Source fetched: ${capture.products.fetchedAt || 'unknown'}. Capture retrieved: ${capture.retrievedAt}. Trade observation year: ${observedAt ?? 'unknown'}. Publication lag and fetch age are separate.`,
+    `Source fetched: ${sourceFetched}. Capture retrieved: ${capture.retrievedAt}. Trade observation year: ${observedAt ?? 'unknown'}. Publication lag and fetch age are separate.`,
     `Last refresh attempt: ${capture.products.evidence?.lastAttemptAt || 'unknown'}; result: ${capture.products.evidence?.lastAttemptState || 'unknown'}.`,
   ];
   if (!product) coverage.push(`HS ${hs4}: ${capture.products.evidence?.requestedHs4s.includes(hs4) ? 'requested, but no usable positive rows were returned' : 'requested-heading coverage is missing or unverified'}. Missing data is not zero trade.`);

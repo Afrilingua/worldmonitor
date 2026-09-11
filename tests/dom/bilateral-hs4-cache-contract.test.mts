@@ -5,18 +5,21 @@
 
 import { beforeEach, expect, it, vi } from 'vitest';
 
-const redis = vi.hoisted(() => ({ store: new Map<string, unknown>(), ttl: new Map<string, number>(), errors: new Set<string>() }));
+const redis = vi.hoisted(() => ({ store: new Map<string, unknown>(), ttl: new Map<string, number>(), errors: new Set<string>(), reads: [] as string[] }));
 vi.mock('../../server/_shared/redis', () => ({
-  getCachedJson: async (key: string) => redis.store.get(key) ?? null,
-  readCachedJson: async (key: string) => redis.errors.has(key) ? { status: 'error' }
-    : redis.store.has(key) ? { status: 'hit', value: redis.store.get(key) } : { status: 'miss' },
+  getCachedJson: async (key: string) => { redis.reads.push(key); return redis.store.get(key) ?? null; },
+  readCachedJson: async (key: string) => {
+    redis.reads.push(key);
+    return redis.errors.has(key) ? { status: 'error' }
+      : redis.store.has(key) ? { status: 'hit', value: redis.store.get(key) } : { status: 'miss' };
+  },
   setCachedJsonIfAbsent: async (key: string, value: unknown, ttl: number) => {
     if (redis.store.has(key)) return false;
     redis.store.set(key, value); redis.ttl.set(key, ttl); return true;
   },
   setCachedJson: async (key: string, value: unknown, ttl: number) => { redis.store.set(key, value); redis.ttl.set(key, ttl); return true; },
   // The world-exports snapshot is read through the large-value path.
-  getLargeRawJson: async (key: string) => redis.store.get(key) ?? null,
+  getLargeRawJson: async (key: string) => { redis.reads.push(key); return redis.store.get(key) ?? null; },
   logCacheReadError: () => {},
 }));
 vi.mock('../../server/_shared/premium-check', () => ({ isCallerPremium: async () => true }));
@@ -45,7 +48,7 @@ const rows = (url: URL, data: Array<Record<string, unknown>>) =>
 const read = (ctx: { iso2: string; hs4?: string }) => getCountryProducts({ request: new Request('https://example.test') } as never, ctx);
 
 beforeEach(() => {
-  redis.store.clear(); redis.ttl.clear(); redis.errors.clear();
+  redis.store.clear(); redis.ttl.clear(); redis.errors.clear(); redis.reads.length = 0;
   upstreamCalls = 0;
 });
 
@@ -473,20 +476,22 @@ it('a caller without hs4 keeps the leading 5 even when a current sibling exists'
   expect(product.topExporters).toHaveLength(2);
 });
 
+const worldExportsHelium = (year = 2024) => ({
+  fetchedAt: '2026-09-01T00:00:00.000Z', period: String(year), source: 'UN Comtrade',
+  headings: {
+    '2804': {
+      year,
+      exporters: [
+        { reporterCode: 156, iso2: 'CN', valueUsd: 2_107_000_000, netWeightKg: 875_000_000 },
+        { reporterCode: 842, iso2: 'US', valueUsd: 1_809_000_000, netWeightKg: null },
+      ],
+    },
+  },
+});
+
 it('world exports attach rank and value to the origins they cover and nothing to the rest', async () => {
   redis.store.set(CANONICAL('JP'), canonicalHelium('JP'));
-  redis.store.set(WORLD_EXPORTS, {
-    fetchedAt: '2026-09-01T00:00:00.000Z', period: '2024', source: 'UN Comtrade',
-    headings: {
-      '2804': {
-        year: 2024,
-        exporters: [
-          { reporterCode: 156, iso2: 'CN', valueUsd: 2_107_000_000, netWeightKg: 875_000_000 },
-          { reporterCode: 842, iso2: 'US', valueUsd: 1_809_000_000, netWeightKg: null },
-        ],
-      },
-    },
-  });
+  redis.store.set(WORLD_EXPORTS, worldExportsHelium());
   upstream(url => rows(url, []));
 
   const result = await read({ iso2: 'JP', hs4: '2804' });
@@ -495,4 +500,40 @@ it('world exports attach rank and value to the origins they cover and nothing to
   expect(product.topExporters[0]!.scale).toEqual({ worldExportsUsd: 1_809_000_000, rank: 2, year: 2024 });
   expect(product.topExporters[1]).not.toHaveProperty('scale');
   expect(result.evidence?.worldExportsFetchedAt).toBe('2026-09-01T00:00:00.000Z');
+});
+
+it('world exports from a different observation year than the served row attach no scale', async () => {
+  // A late filer: its newest row is 2023 while the world snapshot for the
+  // heading is 2024. A 2024 rank beside a 2023 share is the comparison the
+  // scale's stated same-year requirement exists to prevent.
+  redis.store.set(CANONICAL('JP'), { ...canonicalHelium('JP'), products: [{ ...canonicalHelium('JP').products[0]!, year: 2023 }] });
+  redis.store.set(WORLD_EXPORTS, worldExportsHelium(2024));
+  upstream(url => rows(url, []));
+
+  const result = await read({ iso2: 'JP', hs4: '2804' });
+
+  const product = result.products.find(p => p.hs4 === '2804')!;
+  expect(product.year).toBe(2023);
+  expect(product.topExporters.every(exporter => !('scale' in exporter))).toBe(true);
+  // The snapshot was read and is reported; it simply matched nothing.
+  expect(result.evidence?.worldExportsFetchedAt).toBe('2026-09-01T00:00:00.000Z');
+});
+
+it('a caller without hs4 reads neither the world-exports snapshot nor the sibling key', async () => {
+  // The deep-dive panel asks for the whole catalogue and renders the leading 5
+  // only; the several-hundred-kilobyte snapshot and the sibling detail are for
+  // the single-heading brief, so a panel load must not pay for them.
+  redis.store.set(CANONICAL('JP'), canonicalHelium('JP'));
+  redis.store.set(PARTNERS('JP'), siblingHelium('JP', 2024));
+  redis.store.set(WORLD_EXPORTS, worldExportsHelium());
+  upstream(url => rows(url, []));
+
+  const result = await read({ iso2: 'JP' });
+
+  expect(redis.reads).not.toContain(WORLD_EXPORTS);
+  expect(redis.reads).not.toContain(PARTNERS('JP'));
+  const product = result.products.find(p => p.hs4 === '2804')!;
+  expect(product.partnerBasis).toBe('leading_5');
+  expect(product.topExporters[0]).not.toHaveProperty('scale');
+  expect(result.evidence).not.toHaveProperty('worldExportsFetchedAt');
 });
