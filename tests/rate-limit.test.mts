@@ -447,7 +447,7 @@ describe('rate-limit fail-open / fail-closed posture (#3531 M9)', () => {
     let providerCalls = 0;
     let admissions = 0;
     globalThis.fetch = (async (input, init) => {
-      if (String(input).includes('coingecko.com')) {
+      if (new URL(String(input)).hostname === 'api.coingecko.com') {
         providerCalls += 1;
         return Response.json([{ id: 'budget-coin', name: 'Budget coin', symbol: 'bud', current_price: 1 }]);
       }
