@@ -1,17 +1,27 @@
-import { HS4_CODES, HS4_BATCHES, parseRecords, groupByProduct } from '../../../../scripts/shared/comtrade';
+import {
+  HS4_CODES, HS4_BATCHES, PREVIEW_MAX_RECORDS, parseRecords, groupByProduct, comtradeFailureState,
+} from '../../../../scripts/shared/comtrade';
 /**
  * Lazy-fetch fallback for the bilateral-hs4 store.
  *
- * When `comtrade:bilateral-hs4:{iso2}:v1` is missing in Redis, this module
- * fetches the same Comtrade endpoint that `seed-comtrade-bilateral-hs4.mjs`
- * uses, writes the result to Redis with a 40-day TTL, and returns the
- * products for immediate use by `get-route-impact`.
+ * Callers: get-route-impact when `comtrade:bilateral-hs4:{iso2}:v1` is missing,
+ * and get-country-products when the payload is missing, older than its
+ * freshness window, or lacks a requested heading. Both request the same shared
+ * catalogue as `seed-comtrade-bilateral-hs4.mjs`, from the public preview route.
+ *
+ * Writes:
+ *   - Cold success (no previous payload): the canonical key via SET NX with a
+ *     40-day TTL, so a scheduled write that lands mid-fetch is never replaced.
+ *   - Warm success (a previous payload exists): the sentinel key only, as
+ *     {state:'observed', payload} for 24h. The canonical key stays untouched.
+ *   - Valid empty, unsupported reporter, 429, capped or regressed refresh: a
+ *     24h sentinel.
+ *   - Unavailable (HTTP error, timeout) or malformed: a short sentinel, so a
+ *     failing provider is not re-requested on every read.
  *
  * Constraints:
- *   - Concurrency cap: 1 fetch at a time (Comtrade public rate ~1 req/sec)
- *   - Timeout: 5s shared across both provider batches
- *   - Cache both success (40d) and known-empty (24h)
- *   - On 429: return the rate-limited state and cache it for 24h
+ *   - Concurrency cap: 1 fetch at a time per instance (Comtrade public rate ~1 req/sec)
+ *   - Timeout: 5s shared across both provider batches and the pause between them
  */
 
 import type { BilateralHs4Payload } from './get-country-products';
@@ -27,16 +37,16 @@ const KEY_PREFIX = 'comtrade:bilateral-hs4:';
 const LAZY_SENTINEL_PREFIX = 'comtrade:bilateral-hs4-lazy-sentinel:';
 const SUCCESS_TTL = 3456000; // 40 days
 const EMPTY_TTL = 86400; // 24h
+const FAILURE_TTL = 600; // 10 min: bounds retries against a failing provider
 const FETCH_TIMEOUT_MS = 5000;
 
 
 // Unlike scripts/seed-comtrade-bilateral-hs4.mjs, this path does NOT fall back
-// to (y-3) when (y-2) is empty: this runs synchronously inside a live request
-// (get-route-impact) under the FETCH_TIMEOUT_MS budget above, and a second
-// sequential round trip would risk doubling response latency for every miss.
-// The 24h EMPTY_TTL sentinel below already bounds the staleness from a
-// reporter that has not yet filed (y-2) — far tighter than the bulk seeder's
-// 40-day cache, which is why that path carries the fallback instead.
+// to (y-3) when (y-2) is empty: it runs inside a live request, and the two
+// catalogue batches already share the whole FETCH_TIMEOUT_MS budget. The 24h
+// no_records sentinel bounds the staleness from a reporter that has not yet
+// filed (y-2) — far tighter than the bulk seeder's 40-day cache, which is why
+// that path carries the fallback instead.
 
 // UN M49 mostly matches UN Comtrade reporterCodes, except the shared override
 // list. Using M49 codes for those reporters silently yields count:0.
@@ -67,8 +77,16 @@ interface CountryProduct {
 interface ComtradeResult {
   products: CountryProduct[];
   rateLimited: boolean;
-  serverError: boolean;
+  failed: boolean;
 }
+
+export type LazyAttemptState =
+  | 'observed' | 'no_records' | 'unsupported_reporter' | 'legacy_no_records' | 'rate_limited'
+  | 'unavailable' | 'malformed' | 'incomplete' | 'regression_rejected'
+  | 'cache_unavailable' | 'cache_write_failed';
+
+// Read back as the same permanent `empty` source the first response returned.
+const PERMANENT_EMPTY_STATES = new Set<string>(['no_records', 'unsupported_reporter']);
 
 export async function fetchComtradeBilateral(reporterCode: string): Promise<ComtradeResult> {
   const records = [];
@@ -81,31 +99,35 @@ export async function fetchComtradeBilateral(reporterCode: string): Promise<Comt
     url.searchParams.set('cmdCode', codes.join(','));
     url.searchParams.set('flowCode', 'M');
     url.searchParams.set('period', recentPeriod());
-    url.searchParams.set('maxRecords', '500');
+    url.searchParams.set('maxRecords', String(PREVIEW_MAX_RECORDS));
     const resp = await fetch(url.toString(), {
       headers: { 'User-Agent': CHROME_UA, Accept: 'application/json' }, signal,
     });
-    if (resp.status === 429) return { products: [], rateLimited: true, serverError: false };
-    if (!resp.ok) return { products: [], rateLimited: false, serverError: true };
-    records.push(...parseRecords(await resp.json(), 500));
+    if (resp.status === 429) return { products: [], rateLimited: true, failed: false };
+    // Any other non-OK status is a provider failure, never a valid empty result.
+    if (!resp.ok) return { products: [], rateLimited: false, failed: true };
+    records.push(...parseRecords(await resp.json(), PREVIEW_MAX_RECORDS));
   }
-  return { products: groupByProduct(records), rateLimited: false, serverError: false };
+  return { products: groupByProduct(records), rateLimited: false, failed: false };
 }
 
 export interface LazyFetchResult {
   products: CountryProduct[];
   comtradeSource: 'bilateral-hs4' | 'lazy' | 'empty';
   rateLimited?: boolean;
-  state?: string;
+  state?: LazyAttemptState;
   attemptedAt?: string;
   payload?: BilateralHs4Payload;
 }
 
 /**
  * Attempt a lazy fetch for a destination country's bilateral HS4 data.
- * Returns null only for truly transient states (concurrent fetch in-flight).
- * When a sentinel exists, returns the sentinel's encoded reason so callers
- * can distinguish permanent empties from transient rate-limits.
+ * Returns null only while another fetch is in flight on this instance.
+ * A sentinel short-circuits the fetch: an `observed` sentinel returns its
+ * recovered payload unless it is older than `previous` or drops a heading or
+ * year that `previous` holds; any other sentinel returns its recorded state,
+ * with no_records and unsupported_reporter reported as the permanent `empty`
+ * source so callers can tell them from transient failures.
  */
 export async function lazyFetchBilateralHs4(iso2: string, previous?: BilateralHs4Payload): Promise<LazyFetchResult | null> {
   const sentinelKey = `${LAZY_SENTINEL_PREFIX}${iso2}:v1`;
@@ -120,7 +142,14 @@ export async function lazyFetchBilateralHs4(iso2: string, previous?: BilateralHs
       return { products: recovered.products, comtradeSource: 'bilateral-hs4', state: 'observed', attemptedAt: sentinel.attemptedAt, payload: recovered };
     }
   } else if (sentinel) {
-    if (sentinel.state) return { products: [], comtradeSource: 'lazy', state: sentinel.state, attemptedAt: sentinel.attemptedAt };
+    if (sentinel.state) {
+      return {
+        products: [],
+        comtradeSource: PERMANENT_EMPTY_STATES.has(sentinel.state) ? 'empty' : 'lazy',
+        state: sentinel.state as LazyAttemptState,
+        attemptedAt: sentinel.attemptedAt,
+      };
+    }
     if (sentinel.rateLimited) {
       return { products: [], comtradeSource: 'lazy', rateLimited: true, state: 'rate_limited', attemptedAt: sentinel.attemptedAt };
     }
@@ -146,9 +175,10 @@ export async function lazyFetchBilateralHs4(iso2: string, previous?: BilateralHs
       return { products: [], comtradeSource: 'empty', rateLimited: true, state: 'rate_limited', attemptedAt };
     }
 
-    // Transient server error (500/503): don't write a 24h sentinel, just return
-    // empty so the next request retries instead of being suppressed for a day
-    if (result.serverError) {
+    // Provider failure: a short sentinel stops every read from re-requesting a
+    // failing provider, without suppressing recovery for a day.
+    if (result.failed) {
+      await setCachedJson(sentinelKey, { state: 'unavailable', attemptedAt }, FAILURE_TTL, true);
       return { products: [], comtradeSource: 'lazy', state: 'unavailable', attemptedAt };
     }
 
@@ -158,9 +188,11 @@ export async function lazyFetchBilateralHs4(iso2: string, previous?: BilateralHs
     }
 
     const cacheKey = `${KEY_PREFIX}${iso2}:v1`;
+    // A refresh that drops a held heading or regresses its year is rejected;
+    // the previous payload stays authoritative.
     if (previous?.products.some(old => !result.products.some(p => p.hs4 === old.hs4 && p.year >= old.year))) {
-      await setCachedJson(sentinelKey, { state: 'incomplete_refresh', attemptedAt }, EMPTY_TTL, true);
-      return { products: [], comtradeSource: 'lazy', state: 'incomplete_refresh', attemptedAt };
+      await setCachedJson(sentinelKey, { state: 'regression_rejected', attemptedAt }, EMPTY_TTL, true);
+      return { products: [], comtradeSource: 'lazy', state: 'regression_rejected', attemptedAt };
     }
     const payload = { iso2, products: result.products, fetchedAt: attemptedAt, source: 'UN Comtrade public preview', requestedHs4s: HS4_CODES };
     // A scheduled write may have advanced the canonical key during this fetch.
@@ -171,11 +203,10 @@ export async function lazyFetchBilateralHs4(iso2: string, previous?: BilateralHs
     if (!written) return { products: result.products, comtradeSource: 'lazy', state: 'cache_write_failed', attemptedAt };
     return { products: result.products, comtradeSource: 'bilateral-hs4', state: 'observed', attemptedAt, payload };
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith('Incomplete')) {
-      await setCachedJson(sentinelKey, { state: 'incomplete_refresh', attemptedAt }, EMPTY_TTL, true);
-      return { products: [], comtradeSource: 'lazy', state: 'incomplete_refresh', attemptedAt };
-    }
-    const state = error instanceof Error && error.message.startsWith('Malformed') ? 'malformed' : 'unavailable';
+    const state = comtradeFailureState(error);
+    // Capped or World-inconsistent data will not change within the day; a
+    // malformed body, timeout or network failure may, so it is only briefly suppressed.
+    await setCachedJson(sentinelKey, { state, attemptedAt }, state === 'incomplete' ? EMPTY_TTL : FAILURE_TTL, true);
     return { products: [], comtradeSource: 'lazy', state, attemptedAt };
   } finally {
     fetchInFlight = false;

@@ -13,7 +13,7 @@ import {
   releaseLock,
   sleep,
 } from './_seed-utils.mjs';
-import { HS4_CODES, HS4_BATCHES, parseRecords, groupByProduct } from './shared/comtrade.mjs';
+import { HS4_CODES, HS4_BATCHES, PREVIEW_MAX_RECORDS, parseRecords, groupByProduct, comtradeFailureState } from './shared/comtrade.mjs';
 export { HS4_CODES, MAX_HS4_CODES_PER_BATCH, groupByProduct } from './shared/comtrade.mjs';
 import { candidatePeriods, periodWindow, recentPeriod } from './shared/comtrade-period.mjs';
 
@@ -118,6 +118,9 @@ const COMTRADE_FETCH_URL = usePublicApi
   ? `https://comtradeapi.un.org/public/v1/preview/C/A/${COMTRADE_API_CLASSIFIER}`
   : `https://comtradeapi.un.org/data/v1/get/C/A/${COMTRADE_API_CLASSIFIER}`;
 const INTER_REQUEST_DELAY_MS = usePublicApi ? 3500 : 1500;
+// One cap for the request and the truncation check: a response that fills it
+// may be truncated, so it is recorded as incomplete instead of published.
+const MAX_RECORDS = usePublicApi ? PREVIEW_MAX_RECORDS : 100_000;
 
 // A full country pass at 2 requests/country is ~396 authenticated calls against
 // UN Comtrade's 500/mo Free APIs quota. The (y-3) fallback below doubles that
@@ -143,7 +146,8 @@ export function periodCandidates(isPublicRoute, now = new Date()) {
   return isPublicRoute ? candidatePeriods(now) : [periodWindow(now)];
 }
 
-const [BATCH_1, BATCH_2] = HS4_BATCHES;
+// A catalogue of at most one batch has no second request.
+const [BATCH_1, BATCH_2 = []] = HS4_BATCHES;
 
 
 /** @type {Record<string, {nearestRouteIds: string[], coastSide: string}>} */
@@ -281,7 +285,7 @@ function buildFetchUrl(reporterCode, hs4Batch, key, period) {
   url.searchParams.set('cmdCode', hs4Batch.join(','));
   url.searchParams.set('flowCode', 'M');
   url.searchParams.set('period', period);
-  url.searchParams.set('maxRecords', usePublicApi ? '500' : '100000');
+  url.searchParams.set('maxRecords', String(MAX_RECORDS));
   if (key) url.searchParams.set('subscription-key', key);
   return url.toString();
 }
@@ -338,7 +342,7 @@ export async function fetchBilateral(reporterCode, hs4Batch, period = recentPeri
   consecutiveRateLimited = 0;
 
   const data = await resp.json();
-  const parsed = parseRecords(data, usePublicApi ? 500 : 100000);
+  const parsed = parseRecords(data, MAX_RECORDS);
   if (parsed.length === 0 && data?.count > 0) {
     console.warn(`    Reporter ${reporterCode}: API returned count=${data.count} but parseRecords produced 0 — response shape may have changed`);
   }
@@ -454,11 +458,13 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
           batch1 = await fetchBilateral(unCode, BATCH_1, usedPeriod, reserveRequest);
           if (consecutiveRateLimited >= MAX_CONSECUTIVE_RATE_LIMITED_FETCHES) break;
 
-          await _paceSleep(INTER_REQUEST_DELAY_MS);
+          if (BATCH_2.length > 0) {
+            await _paceSleep(INTER_REQUEST_DELAY_MS);
 
-          console.log(`  [${i + 1}/${countries.length}] ${iso2} batch 2/2 (period ${usedPeriod})...`);
-          batch2 = await fetchBilateral(unCode, BATCH_2, usedPeriod, reserveRequest);
-          if (consecutiveRateLimited >= MAX_CONSECUTIVE_RATE_LIMITED_FETCHES) break;
+            console.log(`  [${i + 1}/${countries.length}] ${iso2} batch 2/2 (period ${usedPeriod})...`);
+            batch2 = await fetchBilateral(unCode, BATCH_2, usedPeriod, reserveRequest);
+            if (consecutiveRateLimited >= MAX_CONSECUTIVE_RATE_LIMITED_FETCHES) break;
+          }
 
           if (batch1.length > 0 || batch2.length > 0) break;
           if (p < PERIODS.length - 1) {
@@ -486,7 +492,7 @@ export async function main({ requestBudget = REQUEST_BUDGET } = {}) {
         }
       } catch (err) {
         console.warn(`  [bilateral-hs4] ${iso2}: fetch failed, preserving existing data: ${err.message}`);
-        countryCoverage[iso2] = { state: err.message?.startsWith('Malformed') ? 'malformed' : err.message?.startsWith('Incomplete') ? 'incomplete' : 'unavailable', attemptedAt: new Date().toISOString() };
+        countryCoverage[iso2] = { state: comtradeFailureState(err), attemptedAt: new Date().toISOString() };
         failedCount++;
       }
 

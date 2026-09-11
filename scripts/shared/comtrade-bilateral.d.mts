@@ -1,5 +1,12 @@
 import type { ComtradePartner } from './comtrade-partners.mjs';
 export interface ComtradeRecord { cmdCode: string; partnerCode: string; primaryValue: number; year: number }
+export type ComtradeFailureState = 'malformed' | 'incomplete' | 'unavailable';
+export const PREVIEW_MAX_RECORDS: number;
+export class ComtradeResponseError extends Error {
+ readonly kind: 'malformed' | 'incomplete';
+ constructor(kind: 'malformed' | 'incomplete', message: string);
+}
+export function comtradeFailureState(error: unknown): ComtradeFailureState;
 export function createComtradeBilateralCatalogue(
  strategic: {products: {bilateralHs4Code?: string; bilateralLabel?: string; label: string}[]},
  commodities: {commodities: {hs4: string[]; basketLabel: string}[]},

@@ -43,6 +43,8 @@ let rateLimitEverything = false;
 /** When true, every Comtrade call answers 503 and consumes all retry slots. */
 let transientEverything = false;
 let failSecondBatch = false;
+/** 'malformed' answers a body without a data array; 'capped' fills the requested maxRecords. */
+let providerDefect = null;
 
 function respond(body) {
   return new Response(JSON.stringify(body), { status: 200 });
@@ -77,6 +79,7 @@ beforeEach(() => {
   rateLimitEverything = false;
   transientEverything = false;
   failSecondBatch = false;
+  providerDefect = null;
 
   process.env.UPSTASH_REDIS_REST_URL = REDIS_URL;
   process.env.UPSTASH_REDIS_REST_TOKEN = 'fake-token';
@@ -104,6 +107,18 @@ beforeEach(() => {
       if (rateLimitEverything) return new Response('{}', { status: 429 });
       if (failSecondBatch && comtradeCallCount > 1) return new Response('{}', { status: 403 });
       if (transientEverything) return new Response('{}', { status: 503 });
+      if (providerDefect === 'malformed') return respond({ count: 1, unexpected: true });
+      if (providerDefect === 'capped') {
+        // Fill exactly the cap the request asked for, so the truncation check
+        // is tied to the same number the URL sent.
+        const url = new URL(href);
+        const cap = Number(url.searchParams.get('maxRecords'));
+        const cmdCode = url.searchParams.get('cmdCode').split(',')[0];
+        return respond({
+          count: cap,
+          data: Array.from({ length: cap }, (_, i) => ({ cmdCode, partnerCode: String(1 + (i % 890)), primaryValue: 1, period: 2024 })),
+        });
+      }
       // Two batches per country; give the first N countries real rows.
       const countryIndex = Math.floor((comtradeCallCount - 1) / 2);
       if (countryIndex < countriesWithData) {
@@ -260,3 +275,14 @@ test('the request budget counts retry attempts, not only logical batch fetches',
   assert.equal(writtenMeta().countryCoverage.US.state, 'unavailable');
   assert.equal(writtenMeta().preserveStreaks.US, 1);
 });
+
+for (const [defect, state] of [['malformed', 'malformed'], ['capped', 'incomplete']]) {
+  test(`a ${defect} provider response is recorded as ${state} and preserves the country`, async () => {
+    providerDefect = defect;
+    existingKeys.add(`${KEY_PREFIX}US:v1`);
+    await main({ requestBudget: 2 });
+    assert(!redisCommands.some(c => c[0] === 'SET' && c[1] === `${KEY_PREFIX}US:v1`));
+    assert.equal(writtenMeta().countryCoverage.US.state, state);
+    assert.equal(writtenMeta().preserveStreaks.US, 1);
+  });
+}

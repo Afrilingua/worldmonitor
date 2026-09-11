@@ -15,6 +15,13 @@ export interface BilateralHs4Payload {
   requestedHs4s?: string[];
 }
 
+// Matches the bulk seeder's 35-day health staleness window.
+const MAX_PAYLOAD_AGE_MS = 35 * 86_400_000;
+const isStale = (fetchedAt?: string): boolean => {
+  const age = Date.now() - Date.parse(fetchedAt ?? '');
+  return !Number.isFinite(age) || age < 0 || age > MAX_PAYLOAD_AGE_MS;
+};
+
 export async function getCountryProducts(
   ctx: ServerContext,
   req: GetCountryProductsRequest,
@@ -47,24 +54,20 @@ export async function getCountryProducts(
     cacheFailed = true;
     payload = null;
   }
-  const age = Date.now() - Date.parse(payload?.fetchedAt ?? '');
-  const stale = !Number.isFinite(age) || age < 0 || age > 35 * 86400_000;
   const missingRequested = hs4 && !payload?.products.some(p => p.hs4 === hs4) && !payload?.requestedHs4s?.includes(hs4);
   // Cache read failure is not a cache miss. Do not overwrite unseen last-good data.
-  if (!cacheFailed && (!payload || stale || missingRequested)) {
+  if (!cacheFailed && (!payload || isStale(payload.fetchedAt) || missingRequested)) {
     const recovered = await lazyFetchBilateralHs4(iso2, payload ?? undefined);
     attempt = { state: recovered?.state ?? 'busy', attemptedAt: recovered?.attemptedAt ?? '' };
     if (recovered?.payload) payload = recovered.payload;
   }
   const products = normalizeComtradeProducts(payload?.products ?? []).map((p: CountryProduct) => ({ ...p, description: HS4_LABELS[p.hs4] ?? p.description }));
   const fetchedAt = payload?.fetchedAt ?? '';
-  const finalAge = Date.now() - Date.parse(fetchedAt);
   const missingHs4s = HS4_CODES.filter(code => !products.some((p: CountryProduct) => p.hs4 === code));
-  const old = !Number.isFinite(finalAge) || finalAge < 0 || finalAge > 35 * 86400_000;
   let state = 'observed';
   if (cacheFailed) state = 'cache_unavailable';
   else if (!payload) state = attempt?.state ?? 'missing';
-  else if (old) state = 'stale_preserved';
+  else if (isStale(fetchedAt)) state = 'stale_preserved';
   else if (missingHs4s.length) state = 'partial';
   return {
     iso2, products, fetchedAt,

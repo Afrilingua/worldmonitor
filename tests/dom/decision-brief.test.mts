@@ -260,28 +260,40 @@ it('legacy JP842 survives real reader to builder to preview and embedded export 
   expect(products.products[0]!.topExporters[0]!.partnerCode).toBe(842);
 });
 
-for (const outcome of ['unavailable','no_records','malformed','incomplete_refresh','recovered']) it(`preserves or recovers Germany with refresh outcome ${outcome}`, async () => {
+// Refresh outcome -> the attempt state the reader must report. Capped and
+// regressed refreshes are different failures and keep different names.
+const germanyOutcomes = {
+  unavailable: 'unavailable', no_records: 'no_records', malformed: 'malformed', incomplete: 'incomplete',
+  missing_heading: 'regression_rejected', year_regression: 'regression_rejected', recovered: 'observed',
+} as const;
+for (const [outcome, attemptState] of Object.entries(germanyOutcomes)) it(`preserves or recovers Germany with refresh outcome ${outcome}`, async () => {
   redis.clear();
   const previous = {iso2:'DE', fetchedAt:'2026-07-27T16:47:53.750Z',products:[{hs4:'1001',description:'Wheat',year:2023,totalValue:100,topExporters:[{partnerCode:251,partnerIso2:'',value:100,share:1}]}]};
   redis.set('comtrade:bilateral-hs4:DE:v1',previous);
   vi.spyOn(globalThis,'fetch').mockImplementation(async (input) => {
     if(outcome==='unavailable') return new Response('upstream failure',{status:503});
     if(outcome==='malformed') return Response.json({unexpected:true});
-    const codes = new URL(String(input)).searchParams.get('cmdCode')!.split(',');
-    const rows = outcome==='no_records'?[]:[{cmdCode:'2804',partnerCode:842,primaryValue:392,period:2024},...(outcome==='recovered'?[{cmdCode:'1001',partnerCode:251,primaryValue:100,period:2024}]:[])];
+    const url = new URL(String(input));
+    const codes = url.searchParams.get('cmdCode')!.split(',');
+    if(outcome==='incomplete') return Response.json({data:Array.from({length:Number(url.searchParams.get('maxRecords'))},(_,i)=>({cmdCode:codes[0],partnerCode:1+(i%890),primaryValue:1,period:2024}))});
+    const wheat = outcome==='recovered' ? [{cmdCode:'1001',partnerCode:251,primaryValue:100,period:2024}]
+      : outcome==='year_regression' ? [{cmdCode:'1001',partnerCode:251,primaryValue:100,period:2022}] : [];
+    const rows = outcome==='no_records'?[]:[{cmdCode:'2804',partnerCode:842,primaryValue:392,period:2024},...wheat];
     return Response.json({data:rows.filter(row=>codes.includes(row.cmdCode))});
   });
   const result = await getCountryProducts({request:new Request('https://example.test')} as never,{iso2:'DE',hs4:'2804'});
+  expect(result.evidence?.lastAttemptState).toBe(attemptState);
+  // Warm recovery never replaces the canonical key; only the sentinel carries it.
+  expect(redis.get('comtrade:bilateral-hs4:DE:v1')).toEqual(previous);
   if(outcome==='recovered') {
     expect(result.products.find(p=>p.hs4==='2804')?.topExporters[0]?.partnerIso2).toBe('US');
     expect(result.fetchedAt).not.toBe(previous.fetchedAt);
     expect(result.evidence?.requestedHs4s).toContain('2804');
+    expect((redis.get('comtrade:bilateral-hs4-lazy-sentinel:DE:v1') as {state?: string}).state).toBe('observed');
   } else {
     expect(result.fetchedAt).toBe(previous.fetchedAt);
     expect(result.products[0]?.year).toBe(2023);
     expect(result.evidence?.state).toBe('stale_preserved');
-    expect(result.evidence?.lastAttemptState).toBe(outcome);
-    expect(redis.get('comtrade:bilateral-hs4:DE:v1')).toEqual(previous);
   }
 });
 

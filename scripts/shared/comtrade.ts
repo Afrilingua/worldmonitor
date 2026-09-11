@@ -6,5 +6,7 @@ import commodities from './supply-vulnerability-commodities.json';
 import { createComtradePartnerNormalizer } from './comtrade-partners.mjs';
 import { createComtradeBilateralCatalogue } from './comtrade-bilateral.mjs';
 
+export { PREVIEW_MAX_RECORDS, ComtradeResponseError, comtradeFailureState } from './comtrade-bilateral.mjs';
+
 export const { normalizeComtradePartner, normalizeComtradeProducts } = createComtradePartnerNormalizer(registry, standardCodes);
 export const { HS4_CODES, HS4_LABELS, MAX_HS4_CODES_PER_BATCH, HS4_BATCHES, parseRecords, groupByProduct } = createComtradeBilateralCatalogue(strategic, commodities, normalizeComtradePartner);

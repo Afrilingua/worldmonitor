@@ -1,5 +1,44 @@
 import { recentPeriod } from './comtrade-period.mjs';
 
+/** Row cap of the public preview route. A response this large may be truncated. */
+export const PREVIEW_MAX_RECORDS = 500;
+
+/**
+ * A provider response that must not be published: `malformed` (unexpected
+ * shape) or `incomplete` (capped, or partner rows exceed the reported World
+ * total). Callers classify it with comtradeFailureState, never by message.
+ */
+export class ComtradeResponseError extends Error {
+  /**
+   * @param {'malformed' | 'incomplete'} kind
+   * @param {string} message
+   */
+  constructor(kind, message) {
+    super(message);
+    this.name = 'ComtradeResponseError';
+    this.kind = kind;
+  }
+}
+
+/**
+ * Attempt state for a failed fetch. Only typed provider-response errors are
+ * data defects; anything else (HTTP status, timeout, network, request budget)
+ * is `unavailable`.
+ * @param {unknown} error
+ * @returns {'malformed' | 'incomplete' | 'unavailable'}
+ */
+export function comtradeFailureState(error) {
+  const kind = error instanceof Error && error.name === 'ComtradeResponseError'
+    ? /** @type {any} */ (error).kind
+    : undefined;
+  return kind === 'malformed' || kind === 'incomplete' ? kind : 'unavailable';
+}
+
+/**
+ * The bilateral HS4 catalogue and its parsers, shared so the scheduled seeder
+ * and the lazy fetch request the same headings and publish the same shape.
+ * Parsers throw ComtradeResponseError rather than return a partial subset.
+ */
 export function createComtradeBilateralCatalogue(strategic, commodities, normalizeComtradePartner) {
   const labels = new Map();
   for (const p of strategic.products) {
@@ -11,8 +50,9 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
   const HS4_CODES = [...labels.keys()];
   const HS4_LABELS = Object.fromEntries(labels);
   const MAX_HS4_CODES_PER_BATCH = 20;
-  const HS4_BATCHES = [HS4_CODES.slice(0, 20), HS4_CODES.slice(20)];
   if (HS4_CODES.length > MAX_HS4_CODES_PER_BATCH * 2) throw new Error('Bilateral catalogue exceeds the two-request budget');
+  const HS4_BATCHES = [HS4_CODES.slice(0, MAX_HS4_CODES_PER_BATCH), HS4_CODES.slice(MAX_HS4_CODES_PER_BATCH)]
+    .filter(batch => batch.length > 0);
 
   /**
    * @param {unknown} data
@@ -20,8 +60,8 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
    */
   function parseRecords(data, maxRecords = Infinity) {
     const records = /** @type {any} */ (data)?.data;
-    if (!Array.isArray(records)) throw new Error('Malformed Comtrade data array');
-    if (records.length >= maxRecords) throw new Error('Incomplete Comtrade response: record limit reached');
+    if (!Array.isArray(records)) throw new ComtradeResponseError('malformed', 'Malformed Comtrade data array');
+    if (records.length >= maxRecords) throw new ComtradeResponseError('incomplete', 'Incomplete Comtrade response: record limit reached');
     return records.map(r => {
       const value = Number(r?.primaryValue);
       const year = Number(r?.period ?? r?.refYear);
@@ -30,7 +70,7 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
       if (!r || r.primaryValue == null || !Number.isFinite(value) || value < 0
         || !/^\d{4}$/.test(cmdCode) || !/^\d{1,3}$/.test(partnerCode)
         || !Number.isInteger(year) || year < 1900 || year > 2100) {
-        throw new Error('Malformed Comtrade trade row');
+        throw new ComtradeResponseError('malformed', 'Malformed Comtrade trade row');
       }
       return { cmdCode, partnerCode, primaryValue: value, year };
     }).filter(r => r.primaryValue > 0);
@@ -81,7 +121,7 @@ export function createComtradeBilateralCatalogue(strategic, commodities, normali
       const world = partners.get('0') ?? partners.get('000');
       const hasWorld = world?.year === latestYear && world.value > 0;
       if (hasWorld && observedValue > world.value * 1.001) {
-        throw new Error('Incomplete Comtrade response: partner values exceed World total');
+        throw new ComtradeResponseError('incomplete', 'Incomplete Comtrade response: partner values exceed World total');
       }
       const totalValue = hasWorld ? world.value : observedValue;
       if (totalValue <= 0) continue;
