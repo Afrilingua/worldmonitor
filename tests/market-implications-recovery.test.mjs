@@ -54,6 +54,9 @@ test('unparseable synthesis recovers in one bounded attempt and publishes actual
   assert.equal(requests.length, 2);
   assert.equal(requests[0].max_tokens, 2500);
   assert.equal(requests[1].max_tokens, 1000, 'remaining completion allowance only');
+  assert.match(requests[0].messages[0].content, /Generate 3 to 5 trade-implication cards/);
+  assert.match(requests[1].messages[0].content, /Generate 1 or 2 concise trade-implication cards/);
+  assert.doesNotMatch(requests[1].messages[0].content, /Generate 3 to 5/);
   assert.equal(store[key].model, 'fixture-model');
   assert.notEqual(store[key].generatedAt, oldTime);
   assert.equal(store[metaKey].consecutiveFailures, 0);

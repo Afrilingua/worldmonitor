@@ -17146,10 +17146,11 @@ const ALL_ALLOWED_TICKERS = new Set([
   ...ALLOWED_INSTRUMENTS.rates,
 ]);
 
-const MARKET_IMPLICATIONS_SYSTEM_PROMPT = `You are a senior macro strategist generating structured trade-implication cards from live world intelligence.
+function buildMarketImplicationsSystemPrompt(cardCount) {
+  return `You are a senior macro strategist generating structured trade-implication cards from live world intelligence.
 
 RULES:
-- Generate 3 to 5 trade-implication cards based ONLY on the provided world-state context.
+- Generate ${cardCount} trade-implication cards based ONLY on the provided world-state context.
 - Each card must reference a specific ticker from the ALLOWED TICKERS list.
 - direction must be exactly one of: LONG, SHORT, HEDGE
 - timeframe must be one of: 1W, 2W, 1M, 3M
@@ -17172,6 +17173,7 @@ RULES:
 
 Respond with ONLY a JSON array:
 [{"ticker":"","name":"","direction":"","timeframe":"","confidence":"","title":"","narrative":"","risk_caveat":"","driver":"","transmission_chain":[{"node":"","impact_type":"","logic":""}]},...]`;
+}
 
 function buildMarketImplicationsContext(inputs) {
   const parts = [];
@@ -17681,7 +17683,7 @@ async function buildAndSeedMarketImplications(inputs) {
     // straight through to the fallback instead of retrying it (#5003 review).
     maxRetries: 0,
   };
-  let result = await callForecastLLM(MARKET_IMPLICATIONS_SYSTEM_PROMPT, userPrompt, callOptions);
+  let result = await callForecastLLM(buildMarketImplicationsSystemPrompt('3 to 5'), userPrompt, callOptions);
 
   if (!result?.text) {
     // A budget-exhausted result is the same benign starve as the pre-call guard.
@@ -17713,7 +17715,7 @@ async function buildAndSeedMarketImplications(inputs) {
     console.log(JSON.stringify({ event: 'llm_market_implications', parseFailure: true,
       recoveryAdmitted, remainingTokens, parseStage: parsed.diagnostics.stage }));
     if (recoveryAdmitted) {
-      const recovered = await callForecastLLM(MARKET_IMPLICATIONS_SYSTEM_PROMPT,
+      const recovered = await callForecastLLM(buildMarketImplicationsSystemPrompt('1 or 2 concise'),
         `${userPrompt}\n\nThe previous response could not be parsed. Return ONLY a valid JSON array with one or two concise cards. Keep every required field.`,
         recoveryOptions);
       if (recovered?.text) {
