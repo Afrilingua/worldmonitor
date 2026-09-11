@@ -593,6 +593,16 @@ for (const { mobile, light } of [{ mobile: false, light: false }, { mobile: true
       expect(snapshot.candidates.find((c: { origin: string }) => c.origin === 'US').routeState).toBe('unknown');
       await expect(paper.locator('[data-origin="US"]')).toContainText('39.2%');
       await expect(paper).toContainText('999 (Unknown partner');
+      // U5: the hub badge sits outside the collapsed details, so it is visible
+      // in the preview; the depth rows are asserted on the open export below.
+      await expect(paper.locator('[data-origin="NL"]')).toContainText('Possible transit hub');
+      await expect(paper.locator('[data-origin="US"]')).not.toContainText('Possible transit hub');
+      expect(snapshot.candidates.find((c: { origin: string }) => c.origin === 'NL').transitHub).toBe(true);
+      // NL is the only origin whose modeled route avoids the blocked chokepoint,
+      // so the hub preference (which never crosses route-state tiers) cannot
+      // skip it: the action names NL and says the flag was unavoidable there.
+      expect(snapshot.action.text).toContain("Validate NL's");
+      expect(snapshot.action.text).toContain('Every eligible origin with this route state is flagged a possible transit hub');
       const details = paper.locator('[data-origin="QA"] details');
       await details.locator('summary').focus();
       await details.locator('summary').press('Enter');
@@ -624,6 +634,16 @@ for (const { mobile, light } of [{ mobile: false, light: false }, { mobile: true
     await expect(exported.locator('.cdp-decision-action')).toHaveText(snapshot.action.text);
     await expect(exported.locator('body')).toContainText(snapshot.action.constraint);
     await expect(exported.locator('body')).toContainText(snapshot.action.trigger);
+    if (commodity === 'helium') {
+      // Export details are open, so the per-origin evidence rows are readable.
+      await expect(exported.locator('[data-origin="US"]')).toContainText('839 kg (estimated)');
+      await expect(exported.locator('[data-origin="US"]')).toContainText('$1.5B world exports of HS 2804, rank 2 of 118 reporters filing 2024');
+      await expect(exported.locator('body')).toContainText('22 reporters whose newest HS 2804 filing is older are not ranked');
+      await expect(exported.locator('[data-origin="US"]')).toContainText('46.2% of world mine output (USGS MCS)');
+      await expect(exported.locator('[data-origin="NL"]')).toContainText('Volume not reported');
+      await expect(exported.locator('[data-origin="NL"]')).toContainText('Supplier scale unavailable');
+      await expect(exported.locator('body')).toContainText('39 omitted holding 3.1% combined');
+    }
     await exported.screenshot({ path: testInfo.outputPath(`${commodity}-export.png`), fullPage: true });
     await exported.close();
     await panel.locator('.panel-content').evaluate(el => { el.scrollTop = 0; });

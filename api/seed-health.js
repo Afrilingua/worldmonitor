@@ -691,13 +691,21 @@ export async function handleSeedHealth(req, options = {}) {
       preservedCountries: Object.keys(meta.preserveStreaks ?? {}).filter(iso => /^[A-Z]{2}$/.test(iso)),
       countryCoverage: Object.fromEntries(Object.entries(meta.countryCoverage ?? {}).filter(([iso]) => /^[A-Z]{2}$/.test(iso))),
       productCoverageKnown: Boolean(meta.countryCoverage),
+      // The run's two reserved world-export requests (R10). Null on a snapshot
+      // written before the field existed, which is absence of evidence, not a
+      // failure — reporting it as one would flag every legacy run.
+      worldExports: meta.worldExports ?? null,
     } : null;
     // Only failures are a coverage gap. A reporter with no positive rows
     // (no_records) and an observed importer that does not trade every reviewed
     // heading are valid observations; flagging them would keep the domain
     // partial on every healthy run. Both stay visible in bilateralCoverage.
+    //
+    // World exports are one run-level fetch, so anything but 'observed' — an
+    // unrecognised state included — is a gap the brief's supplier scale inherits.
     const bilateralPartial = bilateralGaps && (bilateralGaps.preservedCountries.length > 0
-      || Object.values(bilateralGaps.countryCoverage).some(c => BILATERAL_FAILURE_STATES.has(c?.state)));
+      || Object.values(bilateralGaps.countryCoverage).some(c => BILATERAL_FAILURE_STATES.has(c?.state))
+      || (bilateralGaps.worldExports != null && bilateralGaps.worldExports.state !== 'observed'));
     const coveragePartial = Boolean(bilateralPartial) || recordCoveragePartial
       || rankableCoveragePartial
       || poolCoveragePartial
