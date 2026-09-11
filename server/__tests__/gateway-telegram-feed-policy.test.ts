@@ -15,7 +15,7 @@ vi.mock('../_shared/api-key-rate-limit', async (original) => ({
   reserveDailyMeter: async () => ({count:1,overLimit:false,metered:true,retryAfterSec:60,rollback:async()=>{}}),
 }));
 import { createDomainGateway } from '../gateway';
-import { __resetRateLimitForTest, ENDPOINT_RATE_POLICIES } from '../_shared/rate-limit';
+import { __resetRateLimitForTest, ENDPOINT_RATE_POLICIES, FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED } from '../_shared/rate-limit';
 import { listTelegramFeed } from '../worldmonitor/intelligence/v1/list-telegram-feed';
 import { createIntelligenceServiceRoutes, type IntelligenceServiceHandler } from '../../src/generated/server/worldmonitor/intelligence/v1/service_server';
 import restHandler from '../../api/telegram-feed.js';
@@ -78,6 +78,7 @@ function endpointKeys() {return commands.map(c=>String(c[3])).filter(k=>k.starts
 
 test('RPC has the narrow 60/minute endpoint policy',()=>{
   expect(ENDPOINT_RATE_POLICIES[PATH]).toEqual({limit:60,window:'60 s'});
+  expect(FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED).toHaveProperty(PATH);
 });
 test('rotating sessions share the RPC IP cap like the first-party route',async()=>{
   for(let i=0;i<60;i++) expect((await request()).status).toBe(200);

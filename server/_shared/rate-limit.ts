@@ -548,6 +548,9 @@ export const FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED: Record<string, RateLimit
   '/api/intelligence/v1/classify-event': {
     reason: 'AI classification performs expensive provider-backed analysis.',
   },
+  '/api/intelligence/v1/list-telegram-feed': {
+    reason: 'Full Telegram message extraction must retain the endpoint cap during Redis outages.',
+  },
   '/api/intelligence/v1/deduct-situation': {
     reason: 'LLM-backed situational deduction can drive provider spend on cache misses.',
   },
