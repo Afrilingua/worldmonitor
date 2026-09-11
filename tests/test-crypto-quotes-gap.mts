@@ -452,13 +452,17 @@ describe('crypto quote provider boundary', () => {
       configureRemoteRedis();
       process.env.WS_RELAY_URL = 'https://relay.example.test';
       const { calls, writes } = stubFetch({ seed: SEED, redisFailure });
-      console.warn = () => {};
+      const warnings: unknown[][] = [];
+      console.warn = (...args) => { warnings.push(args); };
       console.error = () => {};
       const out = await listCryptoQuotes(ctx(), { ids: ['bitcoin', `outage-${redisFailure}`] });
       assert.equal(out.provider, 'degraded');
       assert.deepEqual(out.quotes.map(quote => quote.symbol), redisFailure === 'seed' ? [] : ['BTC']);
       assert.ok(calls.every(url => !url.includes('coingecko') && !url.includes('coinpaprika') && !url.includes('/crypto-quotes')));
       assert.equal(writes.length, 0);
+      if (redisFailure === 'seed') {
+        assert.ok(warnings.some(args => args[0] === '[redis] getCachedJson failed:'));
+      }
     });
   }
 

@@ -33,7 +33,7 @@ import {
   parseStringArray,
   UPSTREAM_TIMEOUT_MS,
 } from './_shared';
-import { cachedFetchJson, readCachedJson } from '../../../_shared/redis';
+import { cachedFetchJson, logCacheReadError, readCachedJson } from '../../../_shared/redis';
 import { sha256Hex } from '../../../_shared/hash';
 import { getRelayBaseUrl, getRelayHeaders } from '../../../_shared/relay';
 import { markNoCacheResponse, setResponseHeader } from '../../../_shared/response-headers';
@@ -187,6 +187,7 @@ export async function listCryptoQuotes(
 
   // A cache outage must not turn every requested coin into provider work.
   const seedRead = await readCachedJson(SEED_CACHE_KEY, true);
+  if (seedRead.status === 'error') logCacheReadError(SEED_CACHE_KEY, seedRead.error);
   const seedData = seedRead.status === 'hit' ? seedRead.value as { quotes?: SeedQuote[] } | null : null;
   const seedQuotes = Array.isArray(seedData?.quotes) ? seedData.quotes : [];
   const seedUnavailable = seedRead.status === 'error'
