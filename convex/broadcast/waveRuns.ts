@@ -102,8 +102,8 @@ const REGISTRATIONS_PAGE_SIZE = 1000;
  *
  *  Below this threshold, pickWaveAction treats the run as terminal —
  *  marks `failed/pool-too-small`, deactivates the ramp, and clears the
- *  lease. The waitlist is effectively drained; operator must extend the
- *  curve OR restart the ramp manually if more contacts are wanted. */
+ *  lease. Resume only when at least 100 eligible contacts are available
+ *  and the requested count is at least 100. Direct calls use this guard too. */
 const MIN_USABLE_POOL_SIZE = 100;
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -650,7 +650,7 @@ export const _markPickFailed = internalMutation({
 
     // Terminal-completion substatuses: clear the lease AND deactivate the
     // ramp. Both 'empty-pool' (zero picked) and 'pool-too-small' (picked
-    // below MIN_USABLE_POOL_SIZE) mean the waitlist is drained — without
+    // below MIN_USABLE_POOL_SIZE) cannot produce a usable wave — without
     // deactivating, the next cron tick would re-fire pickWaveAction and
     // hit the same condition repeatedly. For 'pool-too-small' specifically,
     // the alternative — let the wave proceed with say 50 contacts — would
@@ -697,7 +697,7 @@ export const pickWaveAction = internalAction({
     if (!apiKey) {
       throw new Error("[pickWaveAction] RESEND_API_KEY not set");
     }
-    if (!Number.isFinite(args.requestedCount) || args.requestedCount <= 0) {
+    if (!Number.isInteger(args.requestedCount) || args.requestedCount <= 0) {
       throw new Error(
         `[pickWaveAction] requestedCount must be a positive integer; got ${args.requestedCount}`,
       );
@@ -832,11 +832,9 @@ export const pickWaveAction = internalAction({
       // Pool-too-small guard. picked.length < MIN_USABLE_POOL_SIZE means
       // the wave's delivered count will never reach the kill-gate threshold,
       // so the next cron tick would get stuck on `awaiting-prior-stats`
-      // forever. Treat as terminal completion: deactivate the ramp + clear
-      // the lease, surface for operator triage. Operator can re-activate
-      // and extend `rampCurve` if more sends are wanted, OR run a final
-      // wave manually via direct `pickWaveAction` call (which bypasses this
-      // guard since the operator is taking deliberate action).
+      // forever. Deactivate the ramp and clear the lease. Resume only when
+      // both the eligible pool and requested count meet the minimum;
+      // direct operator calls enforce the same guard.
       if (picked.length < MIN_USABLE_POOL_SIZE) {
         await ctx.runMutation(internal.broadcast.waveRuns._markPickFailed, {
           runId: args.runId,
@@ -844,7 +842,8 @@ export const pickWaveAction = internalAction({
           error:
             `picked ${picked.length} contacts (< MIN_USABLE_POOL_SIZE=${MIN_USABLE_POOL_SIZE}); ` +
             `ramp deactivated to avoid stranding the next cron tick on awaiting-prior-stats. ` +
-            `Operator: extend rampCurve + resumeRamp if more sends desired, or run a final wave manually.`,
+            `Operator: resume only with at least ${MIN_USABLE_POOL_SIZE} eligible contacts and ` +
+            `requestedCount >= ${MIN_USABLE_POOL_SIZE} (set the ramp tier accordingly). Direct calls use the same minimum.`,
         });
         return { ok: false, reason: "pool-too-small" };
       }
