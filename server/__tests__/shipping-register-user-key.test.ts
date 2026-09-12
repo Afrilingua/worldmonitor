@@ -48,6 +48,7 @@ import { createShippingV2ServiceRoutes } from '../../src/generated/server/worldm
 import statusHandler from '../../api/v2/shipping/webhooks/[subscriberId]';
 import actionHandler from '../../api/v2/shipping/webhooks/[subscriberId]/[action]';
 import { registerWebhook } from '../worldmonitor/shipping/v2/register-webhook';
+import { checkFailClosedScopedIpRateLimit } from '../_shared/rate-limit';
 const registerHandler = vi.fn(registerWebhook);
 const routes = createShippingV2ServiceRoutes({ listWebhooks: vi.fn(), registerWebhook: registerHandler, routeIntelligence: vi.fn() }, serverOptions);
 const gateway = createDomainGateway(routes);
@@ -58,6 +59,7 @@ const request = (key?: string, extra: Record<string, string> = {}, body = payloa
 const context = { waitUntil: () => {} };
 beforeEach(() => {
   apiAccess = true; records.clear(); vi.clearAllMocks();
+  vi.mocked(checkFailClosedScopedIpRateLimit).mockResolvedValue(null);
   validateUserApiKey.mockReset().mockImplementation(async (key: string) => key === keyA ? { userId: 'owner-a' } : key === keyB ? { userId: 'owner-b' } : null);
   vi.stubEnv('WORLDMONITOR_VALID_KEYS', 'enterprise-test');
 });
@@ -160,6 +162,16 @@ test('gateway registrations support owner-only status, rotation and reactivation
 });
 
 for (const action of ['', 'rotate-secret', 'reactivate']) {
+  test.each([429, 503])(`management ${action || 'status'} stops before key lookup when pre-auth limiter returns %s`, async (status) => {
+    vi.mocked(checkFailClosedScopedIpRateLimit).mockResolvedValue(new Response('limited', { status }));
+    expect((await manage('wh_test', action, invalidKey)).status).toBe(status);
+    expect(checkFailClosedScopedIpRateLimit).toHaveBeenCalledWith(
+      expect.any(Request), 'user-api-key:pre-auth-validation', 600, '60 s', expect.any(Object),
+    );
+    expect(validateUserApiKey).not.toHaveBeenCalled();
+    expect(getCachedJson).not.toHaveBeenCalled();
+    expect(setCachedJson).not.toHaveBeenCalled();
+  });
   test(`management ${action || 'status'} rejects invalid, missing and unentitled keys before storage`, async () => {
     for (const key of [invalidKey, undefined]) {
       const denied = await manage('wh_test', action, key, { 'x-user-id': 'owner-a' });

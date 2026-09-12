@@ -15,6 +15,7 @@ import { getHeaderApiKey, USER_API_KEY_GATEWAY_VALIDATION_ERROR, validateApiKey 
 import { getCorsHeaders } from '../../../../_cors.js';
 import { renderBillingVerificationDenial } from '../../../../../server/_shared/entitlement-check';
 import { validateUserApiKey } from '../../../../../server/_shared/user-api-key';
+import { checkFailClosedScopedIpRateLimit } from '../../../../../server/_shared/rate-limit';
 import { resolvePremiumCallerIdentity } from '../../../../../server/_shared/premium-check';
 import { getCachedJson, setCachedJson } from '../../../../../server/_shared/redis';
 import {
@@ -41,6 +42,10 @@ export default async function handler(req: Request): Promise<Response> {
 
   const apiKeyResult = await validateApiKey(req, { forceKey: true });
   if (apiKeyResult.error === USER_API_KEY_GATEWAY_VALIDATION_ERROR) {
+    const validationGuard = await checkFailClosedScopedIpRateLimit(
+      req, 'user-api-key:pre-auth-validation', 600, '60 s', cors,
+    );
+    if (validationGuard) return validationGuard;
     const credential = getHeaderApiKey(req);
     let userKey;
     try {
