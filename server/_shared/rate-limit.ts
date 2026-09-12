@@ -424,6 +424,7 @@ export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
   // when that read fails, so the fail-closed 503 is a second line, not the
   // only thing standing between a Redis outage and a CoinGecko fan-out. (#6308)
   '/api/market/v1/list-stablecoin-markets': { limit: 60, window: '60 s' },
+  '/api/market/v1/list-crypto-quotes': { limit: 60, window: '60 s' },
   '/api/economic/v1/list-world-bank-indicators': { limit: 30, window: '60 s' },
   // #6305: list-market-quotes stopped being a pure seed read. The fixed seed
   // still answers the default universe with no upstream call, but a symbol the
@@ -603,6 +604,9 @@ export const FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED: Record<string, RateLimit
   },
   '/api/market/v1/get-country-stock-index': {
     reason: 'Per-country stock-index lookups proxy Yahoo Finance on cache miss.',
+  },
+  '/api/market/v1/list-crypto-quotes': {
+    reason: 'Caller-named coin IDs absent from the seed snapshot fan out to CoinGecko on cache miss.',
   },
   '/api/market/v1/list-stablecoin-markets': {
     reason: 'Caller-named coin IDs absent from the seed snapshot fan out to CoinGecko on cache miss with unbounded ID cardinality.',
