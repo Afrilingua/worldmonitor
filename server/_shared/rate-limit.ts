@@ -316,6 +316,9 @@ interface EndpointRatePolicy {
 // using checkEndpointRateLimit / hasEndpointRatePolicy below — the export is
 // for tooling, not new runtime callers.
 export const ENDPOINT_RATE_POLICIES: Record<string, EndpointRatePolicy> = {
+  // Interactive fare searches use one provider request on a cache miss.
+  // 30/min leaves headroom under the provider's 300-600/min shared quota.
+  '/api/aviation/v1/search-flight-prices': { limit: 30, window: '60 s' },
   // LLM article summarization is Pro-gated, but still needs a scoped,
   // fail-closed budget so Redis degradation cannot silently lift the
   // per-endpoint spend control.
@@ -563,6 +566,9 @@ interface RateLimitPolicyDecision {
 // defence. scripts/enforce-rate-limit-policies.mjs fails if any route listed
 // here can drift back to the gateway's availability-first global fallback.
 export const FAIL_CLOSED_ENDPOINT_RATE_POLICY_REQUIRED: Record<string, RateLimitPolicyDecision> = {
+  '/api/aviation/v1/search-flight-prices': {
+    reason: 'Caller-selected fare searches consume Travelpayouts request quota on cache misses.',
+  },
   '/api/news/v1/summarize-article': {
     reason: 'LLM-backed summarization can drive provider spend on cache misses.',
   },
