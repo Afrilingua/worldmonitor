@@ -106,6 +106,7 @@ describe('Organization JSON-LD NAP alignment', () => {
     const [org] = organizationBlocks(read('pro-test/welcome.html'));
     for (const edge of [
       'https://www.crunchbase.com/organization/world-monitor',
+      'https://www.wikidata.org/wiki/Q141437464',
       'https://rubygems.org/gems/worldmonitor',
       'https://pypi.org/project/worldmonitor-sdk/',
       'https://pkg.go.dev/github.com/koala73/worldmonitor/sdk/go',
