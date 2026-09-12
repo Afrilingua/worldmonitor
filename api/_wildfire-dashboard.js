@@ -138,6 +138,8 @@ export function compactWildfireDashboardPayload(value, limit = WILDFIRE_DASHBOAR
   const needsByteCap = Number.isFinite(options.maxBytes) && typeof options.measureBytes === 'function';
   if (!needsCountCap && !needsDashboardFilter && !needsByteCap) return value;
 
+  // A bootstrap payload may already be capped by the producer.
+  const totalCount = Math.max(numeric(value.pagination?.totalCount), value.fireDetections.length);
   let fireDetections = (needsCountCap || needsDashboardFilter)
     ? limitFireDetectionsForDashboard(value.fireDetections, limit)
     : value.fireDetections;
@@ -145,13 +147,13 @@ export function compactWildfireDashboardPayload(value, limit = WILDFIRE_DASHBOAR
     fireDetections = trimFireDetectionsToByteBudget(fireDetections, {
       maxBytes: options.maxBytes,
       measureBytes: (candidate) => options.measureBytes({ ...value, ...candidate }),
-      totalCount: value.fireDetections.length,
+      totalCount,
     });
   }
   if (fireDetections === value.fireDetections) return value;
   return {
     ...value,
     fireDetections,
-    pagination: { nextCursor: '', totalCount: value.fireDetections.length },
+    pagination: { nextCursor: '', totalCount },
   };
 }
