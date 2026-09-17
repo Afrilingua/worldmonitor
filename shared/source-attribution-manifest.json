@@ -51,7 +51,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -155,7 +155,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -169,7 +169,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -353,7 +353,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -367,7 +367,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -1733,7 +1733,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -1843,7 +1843,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -1956,10 +1956,10 @@
           "path": "server/worldmonitor/news/v1/_feeds.ts"
         },
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/config/feeds.ts"
         },
         {
-          "path": "src/config/feeds.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -2105,7 +2105,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -2133,7 +2133,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -2201,7 +2201,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -2736,7 +2736,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -2767,7 +2767,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -3236,7 +3236,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -3250,7 +3250,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -3710,7 +3710,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5076,7 +5076,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5406,7 +5406,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5593,7 +5593,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5621,7 +5621,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5635,7 +5635,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5649,7 +5649,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5663,7 +5663,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5677,7 +5677,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5691,7 +5691,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5705,7 +5705,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5736,7 +5736,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -5759,7 +5759,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -6296,7 +6296,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -6310,7 +6310,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -6536,7 +6536,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -6609,7 +6609,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -6875,7 +6875,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -7030,7 +7030,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -7522,7 +7522,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -7664,7 +7664,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -7839,7 +7839,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -7853,7 +7853,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -7867,7 +7867,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -7926,7 +7926,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -8702,7 +8702,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -8716,7 +8716,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -8747,7 +8747,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -8804,7 +8804,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -9557,7 +9557,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -9879,7 +9879,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
@@ -14656,7 +14656,7 @@
       "status": "excluded",
       "references": [
         {
-          "path": "src/components/LiveNewsPanel.ts"
+          "path": "src/services/live-channels.ts"
         }
       ]
     },
