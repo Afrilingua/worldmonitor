@@ -75,12 +75,17 @@
 // the discovery branch and the transport 405 return ahead of
 // applyAnonDiscoveryLimit (the replay-shaped GET stops at auth). Step 0 adds
 // one challenged initialize (stops before a limiter) and one limiter-counted
-// keyless tools/list per host. The variant probes (6) add one limiter-counted
+// keyless tools/list per host, plus two keyless `get_sources` calls per host
+// for the structuredContent probe: those count against the free tool's own
+// 10/min/IP ceiling, not the discovery bucket (4 per run, both hosts sharing
+// the runner IP; a 429 there is reported as a skip). The variant probes (6) add one limiter-counted
 // ping plus four GET/HEADs per variant host; redirect, stream-open, and
 // unauthenticated replay all stop before a limiter.
 //
 // Usage: node scripts/mcp-live-smoke.mjs
 //   MCP_SMOKE_HOSTS=https://a,https://b  overrides the default host list.
+
+import { isDeepStrictEqual } from 'node:util';
 
 import {
   collectRequiredCapabilityFailures,
@@ -274,11 +279,64 @@ async function probeStatelessKeylessList(host) {
   }
 }
 
+// 0c. Every tool advertises an `outputSchema`, so a strict MCP client (the
+//     official SDK, Grok Bot's host) throws -32600 on any `tools/call` result
+//     that carries no `structuredContent`, before the model sees it (#8328).
+//     `get_sources` is the one tool callable without a key, so it stands in for
+//     the shared dispatch path: a plain call must return the payload as an
+//     object equal to the text, and a projection must come back wrapped as
+//     `{ projection }`, because the field has to be a JSON object.
+async function probeStructuredContent(host) {
+  for (const [label, args, matches] of [
+    ['plain', {}, (sc, parsed) => isDeepStrictEqual(sc, parsed)],
+    ['projection', { jmespath: 'view' }, (sc, parsed) => isDeepStrictEqual(sc, { projection: parsed })],
+  ]) {
+    const check = `tools/call get_sources on ${TRANSPORT_PATH} returns structuredContent (${label})`;
+    checks += 1;
+    const id = nextId++;
+    try {
+      const { res, text, ms } = await timedFetch(`${host}${TRANSPORT_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'get_sources', arguments: args } }),
+      });
+      if (res.status === 429) {
+        // The free tool has its own 10/min/IP ceiling, and a shared CI egress
+        // IP can legitimately hit it. That is not a missing-field regression.
+        ok(host, check, `skipped: the anonymous get_sources ceiling answered 429 in ${ms}ms`);
+        continue;
+      }
+      let body;
+      try { body = JSON.parse(text); } catch { body = null; }
+      const result = body?.result;
+      if (res.status !== 200 || !result) {
+        fail(host, check, `expected HTTP 200 with a result, got ${res.status}`);
+        continue;
+      }
+      const sc = result.structuredContent;
+      if (sc === null || typeof sc !== 'object' || Array.isArray(sc)) {
+        fail(host, check, 'result has no structuredContent object — every strict MCP client rejects the call with -32600 "has an output schema but did not return structured content"');
+        continue;
+      }
+      let parsed;
+      try { parsed = JSON.parse(result.content?.[0]?.text); } catch { parsed = undefined; }
+      if (parsed === undefined || !matches(sc, parsed)) {
+        fail(host, check, 'structuredContent does not correspond to content[0].text');
+        continue;
+      }
+      ok(host, check, `${ms}ms`);
+    } catch (err) {
+      fail(host, check, `HANG/transport error inside the ${TIMEOUT_MS}ms budget: ${err?.name ?? err}`);
+    }
+  }
+}
+
 async function walkHost(host) {
   console.log(`\n── ${host} ──`);
 
   await probeConnectChallenge(host);
   await probeStatelessKeylessList(host);
+  await probeStructuredContent(host);
 
   // 1. Connect sequence (anonymous, on the discovery alias).
   const init = await rpc(host, 'initialize', {

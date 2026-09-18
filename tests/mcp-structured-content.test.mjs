@@ -15,11 +15,18 @@
 import { strict as assert } from 'node:assert';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
-import { validate } from './helpers/json-schema-mini.mjs';
+import Ajv2020 from 'ajv/dist/2020.js';
+
 import { HMAC_SECRET, callBody, makeProDeps, proReq } from './helpers/mcp-pro-deps.mjs';
 
 const originalFetch = globalThis.fetch;
 const originalEnv = { ...process.env };
+
+// Full JSON Schema validation, as the SDK does it (same options as
+// tests/mcp-output-schema-coverage.test.mjs).
+const ajv = new Ajv2020({
+  allErrors: true, allowUnionTypes: true, strict: true, strictRequired: false, validateFormats: false,
+});
 
 /** What the SDK client does on a tools/call result. Returns an error string, or null when accepted. */
 function strictClientVerdict(publicTool, result) {
@@ -29,12 +36,10 @@ function strictClientVerdict(publicTool, result) {
   }
   const sc = result.structuredContent;
   if (typeof sc !== 'object' || Array.isArray(sc)) return 'structuredContent is not a JSON object';
-  const schema = publicTool.outputSchema;
-  if (schema.type !== 'object') return 'advertised outputSchema root is not type:object';
-  const branches = Array.isArray(schema.anyOf) ? schema.anyOf : [schema];
-  const failures = branches.map((branch) => validate(branch, sc));
-  if (failures.some((errors) => errors.length === 0)) return null;
-  return `structuredContent matches no advertised branch (-32602): ${JSON.stringify(failures).slice(0, 300)}`;
+  const validate = ajv.compile(publicTool.outputSchema);
+  if (validate(sc)) return null;
+  const detail = (validate.errors ?? []).slice(0, 4).map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ');
+  return `structuredContent does not match the advertised outputSchema (-32602): ${detail}`;
 }
 
 describe('tools/call returns structuredContent a strict client accepts (#8328)', () => {
