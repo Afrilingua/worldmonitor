@@ -2,6 +2,7 @@
 
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { getDefaultAutoSelectFamily, getDefaultAutoSelectFamilyAttemptTimeout, isIP } from 'node:net';
 
 import {
   loadEnvFile,
@@ -64,6 +65,13 @@ const SOURCE_TRANSPORT_CODES = new Set([
   'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE',
   'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET',
 ]);
+const SOURCE_DIAGNOSTIC_CODES = new Set([
+  ...SOURCE_TRANSPORT_CODES, 'ENETUNREACH', 'EHOSTUNREACH',
+  'CERT_HAS_EXPIRED', 'ERR_TLS_CERT_ALTNAME_INVALID', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+]);
+const SOURCE_ERROR_NAMES = new Set(['Error', 'TypeError', 'AggregateError', 'AbortError', 'TimeoutError', 'SyntaxError']);
+const SOURCE_ERROR_SYSCALLS = new Set(['connect', 'getaddrinfo', 'read', 'write']);
 
 const GDACS_TO_CATEGORY = {
   EQ: 'earthquakes',
@@ -129,6 +137,37 @@ function selectSourceSnapshot(result, previous, now, validateRecords) {
     && validateRecords(previous.records) ? previous : null;
 }
 
+function sourceFailureDetails(error) {
+  const errors = [];
+  const seen = new Set();
+  let truncated = false;
+  const queue = [{ error, parent: null, relation: 'root' }];
+  while (queue.length && errors.length < 8) {
+    const { error: item, parent, relation } = queue.shift();
+    if (!item || typeof item !== 'object' || seen.has(item)) continue;
+    seen.add(item);
+    const index = errors.length;
+    errors.push({
+      parent, relation,
+      name: SOURCE_ERROR_NAMES.has(item.name) ? item.name : 'OtherError',
+      code: SOURCE_DIAGNOSTIC_CODES.has(item.code) ? item.code : undefined,
+      syscall: SOURCE_ERROR_SYSCALLS.has(item.syscall) ? item.syscall : undefined,
+      family: isIP(typeof item.address === 'string' ? item.address : '') || undefined,
+    });
+    if (item.cause) queue.push({ error: item.cause, parent: index, relation: 'cause' });
+    if (Array.isArray(item.errors)) {
+      if (item.errors.length > 8) truncated = true;
+      for (const child of item.errors.slice(0, 8)) queue.push({ error: child, parent: index, relation: 'member' });
+    }
+  }
+  return {
+    node: process.versions.node, undici: process.versions.undici,
+    defaultAutoSelectFamily: getDefaultAutoSelectFamily(),
+    defaultAddressAttemptTimeoutMs: getDefaultAutoSelectFamilyAttemptTimeout(),
+    errors, truncated: truncated || queue.length > 0,
+  };
+}
+
 async function fetchEventSourceJson(source, url, fetchFn) {
   const started = performance.now();
   const deadline = started + SOURCE_REQUEST_BUDGET_MS;
@@ -137,6 +176,7 @@ async function fetchEventSourceJson(source, url, fetchFn) {
     const remaining = Math.floor(deadline - performance.now());
     if (remaining <= 0) throw Object.assign(new Error(`${source} request budget exhausted`), { nonRetryable: true });
     attempt++;
+    const attemptStarted = performance.now();
     let stage = 'request';
     try {
       const res = await fetchFn(url, {
@@ -159,7 +199,16 @@ async function fetchEventSourceJson(source, url, fetchFn) {
       if (timeout) kind = 'TIMEOUT';
       if (cause instanceof SyntaxError) kind = 'INVALID_JSON';
       if (stage === 'http') kind = `HTTP_${cause.status}`;
-      const error = Object.assign(new Error(`${source} ${stage} ${kind} attempt=${attempt} elapsedMs=${Math.round(performance.now() - started)}`), {
+      const finished = performance.now();
+      let details = '';
+      if (transport && stage !== 'http') {
+        try {
+          details = ` details=${JSON.stringify(sourceFailureDetails(cause))}`;
+        } catch {
+          details = ' details={"unavailable":true}';
+        }
+      }
+      const error = Object.assign(new Error(`${source} ${stage} ${kind} attempt=${attempt} elapsedMs=${Math.round(finished - started)} attemptElapsedMs=${Math.round(finished - attemptStarted)}${details}`), {
         nonRetryable: stage === 'http' ? cause.nonRetryable : !transport,
         retryAfterMs: cause.retryAfterMs,
       });

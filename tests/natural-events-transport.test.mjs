@@ -215,3 +215,85 @@ test('an errored response body cannot turn a permanent HTTP status into a retry'
   assert.equal(transport.calls.get('eonet'), 1);
   assert.deepEqual(naturalEventsAfterPublish(result).freshnessMetaPatch.failedSources, ['eonet']);
 });
+
+test('connection diagnostics preserve aggregate members and families without addresses', async t => {
+  const logs = [];
+  t.mock.method(console, 'warn', (...args) => logs.push(args.join(' ')));
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+  const aggregate = new AggregateError([
+    Object.assign(new Error('private IPv4 details'), { code: 'ETIMEDOUT', syscall: 'connect', address: '127.0.0.1' }),
+    Object.assign(new Error('private IPv6 details'), { code: 'ENETUNREACH', syscall: 'connect', address: '::1' }),
+  ]);
+  aggregate.code = 'ETIMEDOUT';
+  const transport = fixture(source => {
+    if (source === 'eonet') throw new TypeError('fetch failed with secret URL', { cause: aggregate });
+  });
+  const result = await run(transport);
+  const output = logs.join('\n');
+  assert.match(output, /"code":"ETIMEDOUT","syscall":"connect","family":4/);
+  assert.match(output, /"code":"ENETUNREACH","syscall":"connect","family":6/);
+  assert.match(output, /attemptElapsedMs=\d+/);
+  assert.match(output, /"node":"\d+\.\d+\.\d+"/);
+  assert.doesNotMatch(output, /127\.0\.0\.1|::1|private|secret URL/);
+  assert.deepEqual(naturalEventsAfterPublish(result).freshnessMetaPatch.failedSources, ['eonet']);
+  assert.equal(transport.calls.get('eonet'), 2);
+  for (const [source, count] of transport.calls) if (source !== 'eonet') assert.equal(count, 1, source);
+});
+
+test('connection diagnostics bound cyclic and wide errors and omit unknown sensitive fields', async t => {
+  const logs = [];
+  t.mock.method(console, 'warn', (...args) => logs.push(args.join(' ')));
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+  const error = new TypeError('secret message');
+  error.cause = error;
+  error.errors = Array.from({ length: 30 }, () => ({
+    name: 'secret name', code: 'secret code', syscall: 'secret syscall',
+    address: 'secret hostname', stack: 'secret stack',
+  }));
+  const transport = fixture(source => { if (source === 'eonet') throw error; });
+  await run(transport);
+  const line = logs.find(item => item.includes(' details='));
+  const details = JSON.parse(line.split(' details=')[1]);
+  assert.equal(details.errors.length, 8);
+  assert.equal(details.truncated, true);
+  assert.doesNotMatch(logs.join('\n'), /secret/);
+  assert.ok(line.length < 2000, `diagnostic length ${line.length}`);
+  assert.equal(transport.calls.get('eonet'), 2);
+});
+
+test('throwing diagnostic getters preserve bounded failures and the retry limit', async t => {
+  const logs = [];
+  t.mock.method(console, 'warn', (...args) => logs.push(args.join(' ')));
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+  const error = new TypeError('private fetch details');
+  Object.defineProperty(error, 'errors', { get() { throw new Error('secret getter failure'); } });
+  const transport = fixture(source => { if (source === 'eonet') throw error; });
+  const result = await run(transport);
+  const output = logs.join('\n');
+  assert.match(output, /eonet request FETCH_FAILED attempt=2 elapsedMs=\d+ attemptElapsedMs=\d+/);
+  assert.match(output, /details=\{"unavailable":true\}/);
+  assert.doesNotMatch(output, /secret|private/);
+  assert.equal(transport.calls.get('eonet'), 2);
+  for (const [source, count] of transport.calls) if (source !== 'eonet') assert.equal(count, 1, source);
+  assert.deepEqual(naturalEventsAfterPublish(result).freshnessMetaPatch.failedSources, ['eonet']);
+});
+
+test('failure timing separates each request duration from total elapsed time', async t => {
+  let clock = 0;
+  const logs = [];
+  t.mock.method(performance, 'now', () => clock);
+  t.mock.method(console, 'warn', (...args) => logs.push(args.join(' ')));
+  t.mock.method(console, 'log', (...args) => logs.push(args.join(' ')));
+  t.mock.method(globalThis, 'setTimeout', (callback) => {
+    clock += 500;
+    queueMicrotask(callback);
+  });
+  const transport = fixture(source => {
+    if (source !== 'eonet') return;
+    clock += 250;
+    throw new TypeError('fetch failed', { cause: { code: 'ETIMEDOUT' } });
+  });
+  await run(transport);
+  assert.match(logs.join('\n'), /attempt=1 elapsedMs=250 attemptElapsedMs=250/);
+  assert.match(logs.join('\n'), /attempt=2 elapsedMs=1000 attemptElapsedMs=250/);
+});
