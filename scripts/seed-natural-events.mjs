@@ -3,6 +3,7 @@
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { getDefaultAutoSelectFamily, getDefaultAutoSelectFamilyAttemptTimeout, isIP } from 'node:net';
+import { Agent } from 'undici';
 
 import {
   loadEnvFile,
@@ -168,20 +169,36 @@ function sourceFailureDetails(error) {
   };
 }
 
+function isDualFamilyConnectFailure(error) {
+  try {
+    const aggregate = error?.cause;
+    if (!(error instanceof TypeError) || !(aggregate instanceof AggregateError)
+      || aggregate.code !== 'ETIMEDOUT' || aggregate.errors.length !== 2) return false;
+    const [ipv4, ipv6] = aggregate.errors;
+    return ipv4.code === 'ETIMEDOUT' && ipv4.syscall === 'connect' && isIP(ipv4.address) === 4
+      && ipv6.code === 'ENETUNREACH' && ipv6.syscall === 'connect' && isIP(ipv6.address) === 6;
+  } catch {
+    return false;
+  }
+}
+
 async function fetchEventSourceJson(source, url, fetchFn) {
   const started = performance.now();
   const deadline = started + SOURCE_REQUEST_BUDGET_MS;
   let attempt = 0;
+  let ipv4Retry = false;
   return withRetry(async () => {
     const remaining = Math.floor(deadline - performance.now());
     if (remaining <= 0) throw Object.assign(new Error(`${source} request budget exhausted`), { nonRetryable: true });
     attempt++;
     const attemptStarted = performance.now();
+    const dispatcher = ipv4Retry ? new Agent({ connect: { family: 4, timeout: SOURCE_REQUEST_TIMEOUT_MS } }) : undefined;
     let stage = 'request';
     try {
       const res = await fetchFn(url, {
         headers: { Accept: 'application/json', 'User-Agent': CHROME_UA },
         signal: AbortSignal.timeout(Math.min(SOURCE_REQUEST_TIMEOUT_MS, remaining)),
+        ...(dispatcher ? { dispatcher } : {}),
       });
       if (!res.ok) {
         stage = 'http';
@@ -192,6 +209,7 @@ async function fetchEventSourceJson(source, url, fetchFn) {
       stage = 'body';
       return await res.json();
     } catch (cause) {
+      if (source === 'eonet' && stage === 'request' && attempt === 1 && isDualFamilyConnectFailure(cause)) ipv4Retry = true;
       const code = [cause?.code, cause?.cause?.code].find(value => SOURCE_TRANSPORT_CODES.has(value));
       const timeout = cause?.name === 'TimeoutError' || cause?.name === 'AbortError';
       const transport = timeout || code || cause instanceof TypeError;
@@ -214,6 +232,8 @@ async function fetchEventSourceJson(source, url, fetchFn) {
       });
       if (deadline - performance.now() <= Math.max(500, error.retryAfterMs || 0)) error.nonRetryable = true;
       throw error;
+    } finally {
+      await dispatcher?.destroy();
     }
   }, 1, 500);
 }
