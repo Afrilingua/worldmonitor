@@ -48,7 +48,7 @@ WorldMonitor 位于 `/.well-known/mcp/server-card.json` 的静态服务器卡片
 - 请求 `2025-06-18` 的客户端会得到 `2025-06-18`；固定使用 `2025-03-26` 的客户端继续得到 `2025-03-26`。
 - 设置 `MCP_PROTOCOL_FLOOR_2025_06_18=off` 会将服务器固定回仅支持 `2025-03-26` 的旧版底线；此后请求 `2025-06-18` 的客户端会收到安全默认值 `2025-03-26`。
 
-无论协商出的协议版本如何，工具的 `outputSchema` 元数据都会在 `tools/list` 中发出。较旧的 `2025-03-26` 客户端应忽略未知字段，而较新的客户端可以立即使用该 schema。
+无论协商出的协议版本如何，工具的 `outputSchema` 元数据都会在 `tools/list` 中发出。较旧的 `2025-03-26` 客户端应忽略未知字段，而较新的客户端可以立即使用该 schema。每次成功的 `tools/call` 还会以 `structuredContent` 返回载荷；一旦发布了 schema，严格的客户端就要求如此。投影与软信封的表示方式见[工具参考](/zh/mcp-tools-reference)。
 
 ### Streamable HTTP 响应
 

@@ -79,7 +79,31 @@ As of v1.6.0, every tool's `tools/list` entry declares a spec-defined [MCP 2025-
 
 Schemas are emitted **unconditionally** on every `tools/list`, regardless of the negotiated `protocolVersion`. Clients on the older `2025-03-26` floor still receive them and (per spec) are expected to ignore unknown fields rather than fail.
 
-Worked example — the `outputSchema` for `get_country_risk`:
+**`structuredContent` and the shape of the advertised schema (v1.21.0).** Every successful `tools/call` returns the payload twice: as JSON text in `result.content[0].text`, and as an object in `result.structuredContent`. Strict MCP clients require this: once a tool advertises an `outputSchema`, the official SDK rejects a result with no `structuredContent` (`-32600`) and validates the one it gets against the schema (`-32602`). Four kinds of response are not a tool's documented shape, so the advertised schema names them:
+
+```json
+{
+  "type": "object",
+  "anyOf": [
+    { "…": "the tool's documented shape — the schema shown below" },
+    { "required": ["projection"] },
+    { "required": ["data", "_attribution"] },
+    { "required": ["_budget_exceeded"] },
+    { "required": ["_jmespath_error"] }
+  ]
+}
+```
+
+| Response | `content[0].text` | `structuredContent` |
+|---|---|---|
+| Normal call | the payload | the same payload |
+| `jmespath` projection, or a cache tool's `summary: true` | the reshaped value (any JSON value) | `{ "projection": <that value> }`, because the field must be an object |
+| Projection on a licence-bearing tool | `{ "data": …, "_attribution": … }` | the same object |
+| `_budget_exceeded` or `_jmespath_error` | the envelope | the same envelope |
+
+The text is byte-identical to what earlier versions returned, so a client that reads only `content[0].text` sees no change. To read a tool's documented shape programmatically, take `outputSchema.anyOf[0]`.
+
+Worked example — the `outputSchema` documented shape (its `anyOf[0]`) for `get_country_risk`:
 
 ```json
 {

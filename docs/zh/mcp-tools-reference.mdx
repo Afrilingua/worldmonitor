@@ -79,7 +79,31 @@ MCP 覆盖是有意精选的。某些 OpenAPI 操作仅限 REST，因为它们�
 
 Schemas 在每次 `tools/list` 时**无条件**输出，无论协商的 `protocolVersion` 如何。处于较早 `2025-03-26` 基线的客户端仍会收到它们，并且（根据规范）应忽略未知字段而不是报错。
 
-示例 — `get_country_risk` 的 `outputSchema`：
+**`structuredContent` 与所发布 schema 的形状（v1.21.0）。** 每次成功的 `tools/call` 都会把载荷返回两次：`result.content[0].text` 中的 JSON 文本，以及 `result.structuredContent` 中的对象。严格的 MCP 客户端要求如此：一旦工具发布了 `outputSchema`，官方 SDK 会拒绝不带 `structuredContent` 的结果（`-32600`），并用该 schema 校验收到的内容（`-32602`）。有四类响应不是工具的文档化形状，因此所发布的 schema 把它们一并列出：
+
+```json
+{
+  "type": "object",
+  "anyOf": [
+    { "…": "工具的文档化形状 —— 即下方展示的 schema" },
+    { "required": ["projection"] },
+    { "required": ["data", "_attribution"] },
+    { "required": ["_budget_exceeded"] },
+    { "required": ["_jmespath_error"] }
+  ]
+}
+```
+
+| 响应 | `content[0].text` | `structuredContent` |
+|---|---|---|
+| 普通调用 | 载荷 | 同一载荷 |
+| `jmespath` 投影，或缓存工具的 `summary: true` | 重塑后的值（任意 JSON 值） | `{ "projection": <该值> }`，因为该字段必须是对象 |
+| 带许可要求的工具上的投影 | `{ "data": …, "_attribution": … }` | 同一对象 |
+| `_budget_exceeded` 或 `_jmespath_error` | 信封 | 同一信封 |
+
+文本与早期版本返回的内容逐字节一致，因此只读取 `content[0].text` 的客户端不会看到任何变化。要以编程方式读取工具的文档化形状，请取 `outputSchema.anyOf[0]`。
+
+示例 — `get_country_risk` 的 `outputSchema` 文档化形状（即其 `anyOf[0]`）：
 
 ```json
 {

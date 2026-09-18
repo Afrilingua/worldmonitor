@@ -177,6 +177,14 @@ describe('api/mcp.ts — per-tool output contract (envelope-shape, all registry 
         errors, [],
         `${name}: response fails outputSchema:\n  ${errors.join('\n  ')}`,
       );
+
+      // A strict client reads `structuredContent`, not the text, and rejects
+      // the call when it is missing (#8328). For an unprojected call it is the
+      // same document the text serializes, so the validation above covers it.
+      assert.deepEqual(
+        body.result.structuredContent, parsed,
+        `${name}: structuredContent must be the document content[0].text serializes`,
+      );
     });
   }
 });

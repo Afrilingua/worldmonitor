@@ -13,6 +13,7 @@ import {
 } from './helpers/mcp-pro-deps.mjs';
 import { buildOfficialChinaMacroFixture } from './helpers/china-macro-fixture.mjs';
 import { TOOL_REGISTRY } from '../api/mcp/registry/index.ts';
+import { documentedOutputSchema } from './helpers/mcp-output-schema.mjs';
 
 const originalFetch = globalThis.fetch;
 const originalEnv = { ...process.env };
@@ -1411,7 +1412,7 @@ describe('api/mcp.ts — PRO MCP Server', () => {
     assert.match(economic.description, /no proxies/i);
     assert.match(economic.description, /launchReady/i);
     assert.doesNotMatch(economic.description, /NBS\/SAFE live/i);
-    const chinaSchema = economic.outputSchema.properties.data.properties['china-macro'];
+    const chinaSchema = documentedOutputSchema(economic).properties.data.properties['china-macro'];
     assert.ok(chinaSchema.properties.indicators);
     assert.ok(!chinaSchema.properties.observations);
     const indicatorSchema = chinaSchema.properties.indicators.items.properties;

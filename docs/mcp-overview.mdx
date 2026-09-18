@@ -48,7 +48,7 @@ WorldMonitor's static server card at `/.well-known/mcp/server-card.json` adverti
 - Clients requesting `2025-06-18` receive `2025-06-18`; clients pinned to `2025-03-26` continue receiving `2025-03-26`.
 - Setting `MCP_PROTOCOL_FLOOR_2025_06_18=off` pins the server back to the legacy `2025-03-26`-only floor; a client that then requests `2025-06-18` receives the safe default `2025-03-26`.
 
-Tool `outputSchema` metadata is emitted on `tools/list` regardless of the negotiated protocol version. Older `2025-03-26` clients should ignore unknown fields, while newer clients can use the schema immediately.
+Tool `outputSchema` metadata is emitted on `tools/list` regardless of the negotiated protocol version. Older `2025-03-26` clients should ignore unknown fields, while newer clients can use the schema immediately. Every successful `tools/call` also returns the payload as `structuredContent`, which strict clients require once a schema is advertised; the [tools reference](/mcp-tools-reference) describes how projections and soft envelopes are represented.
 
 ### Streamable HTTP responses
 
