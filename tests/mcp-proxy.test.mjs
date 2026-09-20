@@ -1918,6 +1918,9 @@ describe('api/mcp-proxy — observability', () => {
     assert.equal(rows[0].reason, 'auth_401');
     assert.equal(rows[0].event_type, 'request');
     assert.equal(rows[0].domain, 'mcp', 'joins with the /mcp surface');
+    assert.equal(rows[0].res_bytes, null, 'proxied size is unknown — never a fake zero (#8403)');
+    assert.equal(rows[0].rpc_method, null, 'proxy is not the JSON-RPC MCP transport');
+    assert.equal(rows[0].tool_name, null);
   });
 
   it('labels a disallowed origin as origin_403, not a generic failure', async () => {

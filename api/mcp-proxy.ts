@@ -169,10 +169,11 @@ function emitProxyUsage(req, status: number, durationMs: number, ctx, callerIden
       durationMs,
       reqBytes: deriveReqBytes(req),
       // Not tracked: the proxy streams upstream bodies through bounded readers
-      // and jsonResponse sets no content-length, so there is no byte count to
-      // report without buffering a second time. Size questions belong to
-      // MAX_MCP_PROXY_RESPONSE_BYTES, not to this row.
-      resBytes: 0,
+      // and jsonResponse Content-Length reflects only the local denial/error
+      // envelopes — never the proxied upstream size. Size questions belong to
+      // MAX_MCP_PROXY_RESPONSE_BYTES, not to this row. null (not 0) so unknown
+      // is not confused with an empty body (#8403).
+      resBytes: null,
       customerId: usageIdentity.customer_id,
       principalId: usageIdentity.principal_id,
       authKind: usageIdentity.auth_kind,
