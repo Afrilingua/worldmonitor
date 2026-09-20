@@ -241,7 +241,6 @@ export async function fetchServiceStatuses(): Promise<ServiceStatusResponse> {
   }, emptyStatusFallback, { shouldCache: (r) => r.statuses.length > 0 });
 
   const services = resp.statuses.map(toServiceResult);
-
   return {
     success: statusBreaker.getDataState().mode !== 'unavailable',
     timestamp: new Date().toISOString(),
