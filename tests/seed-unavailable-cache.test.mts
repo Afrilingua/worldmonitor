@@ -206,7 +206,11 @@ for (const [path, key, payload, field] of requiredCases) {
 }
 it('cyber proto default page size returns the default page, not one threat', async () => {
   mode = 'hit';
-  cache.set('cyber:threats:v2', { threats: Array.from({ length: 3 }, (_, i) => ({ id: String(i) })) });
+  cache.set('cyber:threats:v2', { threats: Array.from({ length: 3 }, (_, i) => ({
+    id: String(i), indicator: `192.0.2.${i + 1}`, type: 'CYBER_THREAT_TYPE_C2_SERVER',
+    source: 'CYBER_THREAT_SOURCE_FEODO', indicatorType: 'CYBER_THREAT_INDICATOR_TYPE_IP',
+    severity: 'CRITICALITY_LEVEL_HIGH', tags: [], firstSeenAt: 0, lastSeenAt: 0,
+  })) });
   const response = await request('cyber/v1/list-cyber-threats');
   assert.equal(response.status, 200);
   assert.equal((await response.json()).threats.length, 3);
