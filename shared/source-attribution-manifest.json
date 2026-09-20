@@ -9773,6 +9773,9 @@
       "references": [
         {
           "path": "scripts/audit-sentry-resolve-pins.mjs"
+        },
+        {
+          "path": "scripts/sync-sentry-convex-probe-filters.mjs"
         }
       ]
     },
