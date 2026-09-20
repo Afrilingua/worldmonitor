@@ -37,7 +37,7 @@ Two event types in dataset `wm_api_usage`:
 | `auth_kind`        | `clerk_jwt` \| `user_api_key` \| `enterprise_api_key` \| `widget_key` \| `anon` | |
 | `tier`             | `0` free / `1` pro / `2` api / `3` enterprise | `0` if unknown                          |
 | `cache_tier`       | `fast` \| `medium` \| `slow` \| `slow-browser` \| `static` \| `daily` \| `no-store` | only on 200/304 |
-| `ip`                 | `"203.0.113.7"`                         | Cloudflare client IP only when the edge-proof header is valid; otherwise Vercel's peer IP |
+| `ip`                 | `"203.0.113.7"`                         | Cloudflare client IP only when the edge-proof header is valid; otherwise Vercel's peer IP. IP-scoped endpoint budgets reject unproven `cf-connecting-ip` with 403 (`X-RateLimit-Mode: edge-proof`) rather than sharing a PoP bucket — see `scripts/cloudflare-edge-proof-rule.mjs` for the Transform Rule expression (#8402). |
 | `country`            | `"US"`                                  | Cloudflare client country only when edge transit is proven; otherwise Vercel connection country |
 | `ip_city`, `ip_region` | `"Johannesburg"`, `"WC"`            | Vercel connection/edge geography, not verified client location |
 | `execution_region`   | `"iad1"`                                | Vercel execution region                      |

@@ -14,7 +14,7 @@ import {
 } from './mcp/bounded-body';
 import { MAX_JSON_RPC_BODY_BYTES, MAX_MCP_PROXY_RESPONSE_BYTES } from './mcp/body-limits';
 import { McpProxyJsonDepthError, parseMcpProxyJson } from './mcp/bounded-json';
-import { ENDPOINT_RATE_POLICIES, checkScopedRateLimit, getClientIp } from '../server/_shared/rate-limit';
+import { ENDPOINT_RATE_POLICIES, checkScopedRateLimit, checkIpScopedEdgeProof, getClientIp } from '../server/_shared/rate-limit';
 import { captureSilentError } from './_sentry-edge.js';
 import {
   buildRequestEvent,
@@ -938,6 +938,11 @@ export default async function handler(req, ctx) {
   }
 
   const started = Date.now();
+  const proofDenied = checkIpScopedEdgeProof(req, cors);
+  if (proofDenied) {
+    emitProxyUsage(req, proofDenied.status, Date.now() - startedAt, ctx);
+    return proofDenied;
+  }
   const ip = getClientIp(req);
   const meta: ProxyMeta = { targetHost: '', targetPath: '', headerNames: [] };
 
