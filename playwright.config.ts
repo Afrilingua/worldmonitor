@@ -91,7 +91,24 @@ export default defineConfig({
     timezoneId: 'UTC',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    // `retain-on-failure` records EVERY test and deletes the video when it
+    // passes, so a green shard pays for video it then throws away: 34 ffmpeg
+    // processes for 28 passing tests on shard 2, 54 for 76 on shard 1
+    // (runs 35579482854 and 35563542710). One ffmpeg per context, spawned and
+    // killed alongside the browser.
+    //
+    // `on-first-retry` records only the retry attempt. CI runs with
+    // retries: 1, so a deterministic failure still gets video, because its
+    // retry fails too and is recorded.
+    //
+    // The real cost is flaky tests. `preserveVideo` in playwright/lib/index.js
+    // keys on the PER-ATTEMPT status (`testInfo.status !== expectedStatus`), so
+    // `retain-on-failure` keeps the failed first attempt even when the retry
+    // passes; `on-first-retry` records the retry regardless of its outcome. So
+    // for a flake we trade a video of the failure for a video of the pass.
+    // Accepted because the browser crashes in #8447 kill the recording anyway
+    // and are diagnosed from the pw:browser log, which this does not touch.
+    video: 'on-first-retry',
   },
   projects: [
     {
