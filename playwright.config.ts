@@ -63,19 +63,21 @@ export default defineConfig({
   expect: {
     timeout: 30000,
   },
-  // One retry in CI, none locally (#5685). Playwright can throw from its own
-  // event dispatch — `Object with guid response@<id> was not bound in the
-  // connection` — when the client receives a `response` event referencing an
-  // object it cannot resolve. That fires BEFORE any listener body runs, so no
-  // defensive code in a spec can prevent it: variant-live-smoke's capture
-  // helper already try/catches every accessor it touches and the throw still
-  // escaped, reddening a required gate 2.3s into a boot test whose own
-  // assertions had not yet run.
+  // One retry in CI, none locally (#5685). The retry was added for `Object
+  // with guid response@<id> was not bound in the connection`, described then as
+  // Playwright throwing from its own event dispatch. That diagnosis was wrong
+  // (#8447). The message is what the client prints when the connection dies
+  // with responses in flight, and the cause is the browser process exiting with
+  // SIGTRAP mid-navigation. Six main runs separate cleanly: 0 crashes green,
+  // 1 crash reported `flaky` because the retry absorbed it, 2 crashes red
+  // because the crash recurred on the retry.
   //
-  // A retry cannot hide a deterministic failure — that fails both attempts.
-  // When the second attempt passes, Playwright reports the test as `flaky`
-  // rather than silently green, so a genuine product race still surfaces.
-  // Local runs stay at 0 so a flake is felt immediately while iterating.
+  // So this retry is load-bearing in the worst way. It converts most browser
+  // crashes into a passing run, which is why the browser-loss diagnostics this
+  // job has collected since #5685 went unread for months. Leave it at 1 while
+  // the crash is being diagnosed and let the SIGTRAP check in test.yml do the
+  // reporting, then revisit. Local runs stay at 0 so a flake is felt
+  // immediately while iterating.
   retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {
@@ -104,6 +106,17 @@ export default defineConfig({
         ...(requireWebMcp && !webMcpChromeExecutablePath ? { channel: webMcpChromeChannel } : {}),
         launchOptions: {
           ...(webMcpChromeExecutablePath ? { executablePath: webMcpChromeExecutablePath } : {}),
+          // Do NOT drop `--disable-breakpad` to chase the SIGTRAP crashes in
+          // #8447. CI runs chromium_headless_shell, and that bundle ships no
+          // `chrome_crashpad_handler` binary, so enabling breakpad aborts the
+          // browser at launch rather than producing a minidump:
+          //   FATAL:third_party/crashpad/.../spawn_subprocess.cc:237
+          //   posix_spawn .../chrome_crashpad_handler
+          // Every test then fails in single-digit milliseconds with
+          // `browserType.launch: Target page, context or browser has been
+          // closed` (run 35570837267). Only the full `chromium-<rev>` build
+          // carries the handler, so minidumps need a different browser, not a
+          // different flag.
           args: [
             '--use-angle=swiftshader',
             '--use-gl=swiftshader',
