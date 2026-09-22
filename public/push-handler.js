@@ -156,7 +156,45 @@ self.addEventListener('notificationclick', (event) => {
   const { url: target, crossOrigin } = classifyClickTarget(
     event.notification.data && event.notification.data.url,
   );
+  const tag = (event.notification.data && event.notification.data.tag)
+    || (typeof event.notification.tag === 'string' ? event.notification.tag : '');
+  // The blocked notice itself carries tag 'suppressed:*': bypass the check
+  // so its click can never re-enter the suppression path.
+  if (typeof tag === 'string' && tag.startsWith('suppressed:')) {
+    event.waitUntil((async () => {
+      try {
+        if (clients.openWindow) await clients.openWindow('/');
+      } catch {
+        // Swallow — nothing to do beyond failing silently.
+      }
+    })());
+    return;
+  }
   event.waitUntil((async () => {
+    // Operator revoke path (#8401): an already-delivered push payload
+    // carries its URL on-device. When the operator blocks that URL after
+    // delivery, the click must not navigate to it — show the blocked
+    // notice instead. Fail-open: when the check file is absent (old SW)
+    // or the endpoint is unreachable, navigate as before.
+    try {
+      const suppression = self.wmLinkSuppression;
+      if (suppression && typeof suppression.checkLinkSuppressed === 'function') {
+        const blocked = await suppression.checkLinkSuppressed(target);
+        if (blocked) {
+          if (typeof self.wmShowBlockedNotice === 'function') {
+            try {
+              await self.wmShowBlockedNotice(tag);
+            } catch {
+              // The blocked decision is terminal even when the replacement
+              // notice cannot be shown. Never fall through to the blocked URL.
+            }
+          }
+          return;
+        }
+      }
+    } catch {
+      // Suppression-check failure must never strand the click.
+    }
     try {
       // An off-origin article always gets a fresh tab. Never hand it the
       // dashboard's — that tab is a trusted surface the user came back to.
