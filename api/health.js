@@ -530,6 +530,14 @@ const STANDALONE_KEYS = {
   usCpiMonthly:          'seed-meta:economic:us-cpi',
   usTreasuryParYield:    'seed-meta:economic:us-treasury-par-yield',
   usInterestRates:       'seed-meta:economic:us-interest-rates',
+  // #8538. One probe per worldwide CPI source. The canonical keys are 115 KB –
+  // 1 MB and the read path pipelines five of them, so health reads the
+  // seed-meta keys instead of paying for the full payloads.
+  worldCpiImf:           'seed-meta:economic:world-cpi-imf',
+  worldCpiEurostat:      'seed-meta:economic:world-cpi-eurostat',
+  worldCpiOecd:          'seed-meta:economic:world-cpi-oecd',
+  worldCpiEstat:         'seed-meta:economic:world-cpi-estat',
+  worldCpiAbs:           'seed-meta:economic:world-cpi-abs',
   // Meta-only probes for the yield-curve bundle. Every market's history is
   // sharded per year; the canonical payloads are too large to probe directly.
   yieldCurveJp:          'seed-meta:economic:yield-curve-jp',
@@ -1431,6 +1439,65 @@ const SEED_META = {
       activationKey: 'seed-activated:economic:us-interest-rates',
     },
   },
+  // #8538. Worldwide CPI sources. Each is a macro-bundle tail section on a
+  // daily interval, so 72h covers one missed tick; content age is the tighter
+  // clock and is declared per seeder (IMF 120d, OECD 180d, Eurostat 365d,
+  // e-Stat 120d, ABS 400d) because their publication lags differ structurally.
+  worldCpiImf: {
+    key: 'seed-meta:economic:world-cpi-imf',
+    maxStaleMin: 4320,
+    activationKey: 'seed-activated:economic:world-cpi-imf',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8538,
+      activationKey: 'seed-activated:economic:world-cpi-imf',
+    },
+  },
+  worldCpiEurostat: {
+    key: 'seed-meta:economic:world-cpi-eurostat',
+    maxStaleMin: 4320,
+    activationKey: 'seed-activated:economic:world-cpi-eurostat',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8538,
+      activationKey: 'seed-activated:economic:world-cpi-eurostat',
+    },
+  },
+  worldCpiOecd: {
+    key: 'seed-meta:economic:world-cpi-oecd',
+    maxStaleMin: 4320,
+    activationKey: 'seed-activated:economic:world-cpi-oecd',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8538,
+      activationKey: 'seed-activated:economic:world-cpi-oecd',
+    },
+  },
+  worldCpiEstat: {
+    key: 'seed-meta:economic:world-cpi-estat',
+    maxStaleMin: 4320,
+    activationKey: 'seed-activated:economic:world-cpi-estat',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8538,
+      activationKey: 'seed-activated:economic:world-cpi-estat',
+    },
+  },
+  worldCpiAbs: {
+    key: 'seed-meta:economic:world-cpi-abs',
+    maxStaleMin: 4320,
+    activationKey: 'seed-activated:economic:world-cpi-abs',
+    cutover: {
+      mode: 'activation-marker',
+      fromKey: null,
+      issue: 8538,
+      activationKey: 'seed-activated:economic:world-cpi-abs',
+    },
+  },
   yieldCurveJp: {
     key: 'seed-meta:economic:yield-curve-jp',
     maxStaleMin: 4320, // daily business-day source; 72h covers the Fri→Mon gap. Curve content age is separate.
@@ -1840,6 +1907,13 @@ const ON_DEMAND_KEYS = new Set([
   'usTreasuryParYield',
   // #8485. Same deploy-before-first-tick bridge for the US rate basket.
   'usInterestRates',
+  // #8538. Same bridge for the five worldwide CPI sources: the reader ships
+  // with the world CPI endpoint before the macro-bundle tail sections run.
+  'worldCpiImf',
+  'worldCpiEurostat',
+  'worldCpiOecd',
+  'worldCpiEstat',
+  'worldCpiAbs',
   // Scheduled Toronto CAD producer deployment bridges. Each seeder writes a
   // permanent marker after its first successful canonical publish; health is
   // strict from that point onward.
@@ -1947,6 +2021,11 @@ const ACTIVATION_MARKERS = {
   usCpiMonthly: SEED_META.usCpiMonthly.activationKey,
   usTreasuryParYield: SEED_META.usTreasuryParYield.activationKey,
   usInterestRates: SEED_META.usInterestRates.activationKey,
+  worldCpiImf: SEED_META.worldCpiImf.activationKey,
+  worldCpiEurostat: SEED_META.worldCpiEurostat.activationKey,
+  worldCpiOecd: SEED_META.worldCpiOecd.activationKey,
+  worldCpiEstat: SEED_META.worldCpiEstat.activationKey,
+  worldCpiAbs: SEED_META.worldCpiAbs.activationKey,
   torontoTfs: SEED_META.torontoTfs.activationKey,
   torontoTps: SEED_META.torontoTps.activationKey,
   predictionCountryMarkets: SEED_META.predictionCountryMarkets.activationKey,
