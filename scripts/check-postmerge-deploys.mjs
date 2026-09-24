@@ -163,6 +163,14 @@ const GH_CALL_TIMEOUT_MS = 30_000;
 // second, so 3 workflows x 2 reads x 3 attempts costs seconds, not minutes.
 // The deployed-baseline read adds nothing here: it is a local `git rev-parse`
 // of the tag the deploy workflow writes, not a GitHub call.
+// Independent samples of a workflow's run listing per tick. See readNewestRun
+// for the stale-index-snapshot failure this defends against. Three is chosen
+// against the measured ~1-in-30 stale rate: a false alarm now needs every
+// sample to draw the stale shard. Three reads x 3 workflows x up to 3 retry
+// attempts stays far inside both `timeout-minutes: 10` and the GITHUB_TOKEN
+// hourly budget at one tick per 10 minutes.
+export const RUN_LISTING_SAMPLES = 3;
+
 export const GH_READ_RETRY_ATTEMPTS = 2;
 export const GH_READ_RETRY_BASE_MS = 500;
 export const GH_READ_RETRY_MAX_MS = 4_000;
@@ -289,12 +297,13 @@ function parseTimestamp(value) {
 }
 
 /**
- * Resolve the newest run of one workflow on main, including queued or active
- * work, or a structured verdict when there is none.
+ * Read the run listing for one workflow on main once, newest run first.
  *
- * `gh` is injected rather than imported so the I/O path is testable.
+ * Throws (never returns a partial answer) when the payload or any timestamp in
+ * it is unreadable, so a malformed listing is a read failure rather than a
+ * quietly shorter history.
  */
-export function readNewestRun({ gh, repository, workflowFile, now, noRunWindowMs = DEFAULT_NO_RUN_WINDOW_MS }) {
+function readRunListingOnce({ gh, repository, workflowFile }) {
   const query = [
     'branch=main',
     'per_page=100',
@@ -316,7 +325,7 @@ export function readNewestRun({ gh, repository, workflowFile, now, noRunWindowMs
   // The API returns newest-first, but nothing forces that: sort defensively so
   // the newest run cannot depend on an undocumented ordering. The validation
   // above makes any unreadable timestamp a read failure instead of hiding it.
-  const ordered = [...runs].sort((left, right) => {
+  return [...runs].sort((left, right) => {
     const leftMs = parseTimestamp(left?.created_at);
     const rightMs = parseTimestamp(right?.created_at);
     if (leftMs === null && rightMs === null) return 0;
@@ -324,8 +333,45 @@ export function readNewestRun({ gh, repository, workflowFile, now, noRunWindowMs
     if (rightMs === null) return -1;
     return rightMs - leftMs;
   });
+}
 
-  const newest = ordered[0];
+/**
+ * Resolve the newest run of one workflow on main, including queued or active
+ * work, or a structured verdict when there is none.
+ *
+ * `gh` is injected rather than imported so the I/O path is testable.
+ *
+ * The listing is sampled RUN_LISTING_SAMPLES times and the newest run seen
+ * across every sample wins. One read is not enough: GitHub intermittently
+ * answers this URL with a STALE INDEX SNAPSHOT — HTTP 200, a smaller
+ * `total_count`, and a newest run from weeks ago — interleaved with correct
+ * answers to the identical request. Measured from a runner on 2026-09-24,
+ * 1 read in 30 of convex-deploy.yml came back pinned at run 34136482776
+ * (2026-09-07, total_count 1366 against a true 3168); that is what made this
+ * monitor report NO_RUN_IN_WINDOW on a workflow that had deployed minutes
+ * earlier, on 21 of 120 consecutive ticks. Nothing in the response
+ * distinguishes the two, and `createRetryingGh` cannot help because the stale
+ * answer is a success. Taking the maximum is safe in the direction that
+ * matters: a stale sample is an older snapshot of the same history, never a
+ * run that does not exist, so the maximum can only ever be a real run — and
+ * an alarm now needs EVERY sample to agree the workflow stopped deploying.
+ */
+export function readNewestRun({
+  gh,
+  repository,
+  workflowFile,
+  now,
+  noRunWindowMs = DEFAULT_NO_RUN_WINDOW_MS,
+  samples = RUN_LISTING_SAMPLES,
+}) {
+  let newest = null;
+  for (let sample = 0; sample < samples; sample += 1) {
+    const candidate = readRunListingOnce({ gh, repository, workflowFile })[0];
+    if (!candidate) continue;
+    if (newest === null || parseTimestamp(candidate.created_at) > parseTimestamp(newest.created_at)) {
+      newest = candidate;
+    }
+  }
   if (!newest) {
     return {
       found: false,

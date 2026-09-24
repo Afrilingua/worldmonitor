@@ -335,6 +335,63 @@ describe('post-merge deploy monitor', () => {
     assert.match(verdict.detail, /trigger path/i);
   });
 
+  // A stale GitHub index shard answers the run listing with an OLD snapshot:
+  // a smaller `total_count` and a newest run from weeks ago, served with HTTP
+  // 200 alongside fresh answers to the identical URL. Observed on
+  // convex-deploy.yml on 2026-09-24 — 1 read in 30 from a runner returned
+  // total_count 1366 (true: 3168) with run 34136482776 (2026-09-07) as the
+  // newest, which is what made this monitor cry NO_RUN_IN_WINDOW on a
+  // workflow that had deployed minutes earlier. One read cannot tell the two
+  // apart, so the listing is sampled several times and the newest run seen
+  // across every sample wins: a stale sample is a strict subset of a fresh
+  // one, so the maximum can never invent a run it did not see.
+  it('outvotes a stale run-listing snapshot instead of alarming on it', () => {
+    const fresh = [
+      { id: 900, created_at: new Date(NOW - 30 * 60 * 1000).toISOString(), conclusion: 'success', run_attempt: 1, head_sha: 'd'.repeat(40), event: 'push', display_title: 'push' },
+    ];
+    const stale = [
+      { id: 100, created_at: new Date(NOW - 17 * 24 * HOUR).toISOString(), conclusion: 'success', run_attempt: 1, head_sha: 'e'.repeat(40), event: 'push', display_title: 'push' },
+    ];
+
+    for (const stalePositions of [[0], [1], [2], [0, 1], [1, 2], [0, 2]]) {
+      let read = -1;
+      const newest = readNewestRun({
+        gh: (args) => {
+          read += 1;
+          assert.match(args.join(' '), /workflows\/convex-deploy\.yml\/runs/);
+          return JSON.stringify({ workflow_runs: stalePositions.includes(read) ? stale : fresh });
+        },
+        repository: 'koala73/worldmonitor',
+        workflowFile: 'convex-deploy.yml',
+        now: NOW,
+        noRunWindowMs: 7 * 24 * HOUR,
+      });
+      assert.equal(newest.verdict, 'RUN_FOUND', `stale reads at ${stalePositions} must not resolve to a window alarm`);
+      assert.equal(newest.runId, 900, `stale reads at ${stalePositions} must not win over a fresh one`);
+    }
+  });
+
+  it('still alarms when every sample of the run listing agrees the newest run is old', () => {
+    let reads = 0;
+    const newest = readNewestRun({
+      gh: () => {
+        reads += 1;
+        return JSON.stringify({
+          workflow_runs: [
+            { id: 100, created_at: new Date(NOW - 17 * 24 * HOUR).toISOString(), conclusion: 'success', run_attempt: 1, head_sha: 'e'.repeat(40), event: 'push', display_title: 'push' },
+          ],
+        });
+      },
+      repository: 'koala73/worldmonitor',
+      workflowFile: 'convex-deploy.yml',
+      now: NOW,
+      noRunWindowMs: 7 * 24 * HOUR,
+    });
+    assert.equal(newest.verdict, 'NO_RUN_IN_WINDOW');
+    assert.equal(newest.runId, 100);
+    assert.ok(reads > 1, 'a window alarm must rest on more than one read of the listing');
+  });
+
   it('reads the newest run and the attempts-scoped jobs', () => {
     const newest = readNewestRun({
       gh: ghRuns('convex-deploy.yml', [
