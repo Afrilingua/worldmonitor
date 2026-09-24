@@ -2196,6 +2196,49 @@ describe('crawlable corpus generator', () => {
     }
   });
 
+  it('names tracker and reference sources in reader terms, keeping repo paths as provenance attributes', async () => {
+    const outDir = mkdtempSync(join(tmpdir(), 'wm-source-lines-'));
+    try {
+      await buildCorpus({ rootDir: repoRoot, outDir, baseUrl: 'https://www.worldmonitor.app' });
+      const visibleText = (html) => html
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, ' ')
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ');
+      for (const [page, expected] of [
+        ['chokepoints/index.html', /Sources: World Monitor weekly pulse snapshot and World Monitor chokepoint registry/],
+        ['chokepoints/index.html', /Baseline source: U\.S\. EIA World Oil Transit Chokepoints \(2023\)/],
+        ['crises/index.html', /Scope source:\s+World Monitor crisis registry/],
+        ['chokepoints/strait-of-hormuz/index.html', /World Monitor chokepoint registry and trade-route reference/],
+        ['crises/red-sea-security/index.html', /World Monitor weekly pulse snapshot/],
+        ['tools/signal-convergence/index.html', /World Monitor weekly pulse snapshot/],
+      ]) {
+        const html = read(outDir, page);
+        const text = visibleText(html);
+        assert.doesNotMatch(text, /docs\/snapshots\/|src\/config\/|crawlable-live-pulse|shared\/[\w-]+\.json|scripts\/[\w-]+\.mjs/, `${page} shows a repository path to readers`);
+        assert.match(text, expected, `${page} names its source in reader terms`);
+        assert.match(html, /data-snapshot-source="(?:docs\/snapshots\/|src\/config\/|shared\/|scripts\/)[^"]+"/, `${page} keeps the repo path as provenance`);
+      }
+      const repoPath = /docs\/[\w./-]+|CHANGELOG\.md/;
+      for (const [page, expected, provenance] of [
+        ['accuracy/index.html', /Source: World Monitor forecast scorecard snapshot/, /data-snapshot-source="docs\/snapshots\/[^"]+"/],
+        ['research/strait-of-hormuz-transit-report-2026-07/index.html', /Snapshot: World Monitor chokepoint transit snapshot, retrieved \d{4}-\d{2}-\d{2}\./, /data-snapshot-source="docs\/snapshots\/[^"]+"/],
+        ['tools/signal-convergence/index.html', /Cited from the\s+Geographic Convergence Detection methodology/, /data-snapshot-source="docs\/geographic-convergence\.mdx"/],
+        ['reference/changelog/index.html', /Source: World Monitor release notes/, /data-snapshot-source="CHANGELOG\.md"/],
+      ]) {
+        const html = read(outDir, page);
+        // Release notes legitimately name repository files, so judge only the
+        // page's own framing: the lede and every source line.
+        const framing = [...html.matchAll(/<p class="(?:lede|source)"[^>]*>[\s\S]*?<\/p>/g)]
+          .map((match) => visibleText(match[0])).join(' ');
+        assert.doesNotMatch(framing, repoPath, `${page} shows a repository path to readers`);
+        assert.match(framing, expected, `${page} names its source in reader terms`);
+        assert.match(html, provenance, `${page} keeps the repo path as provenance`);
+      }
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
   it('builds a non-trivial static corpus with canonical raw HTML pages', async () => {
     const outDir = mkdtempSync(join(tmpdir(), 'wm-crawlable-corpus-'));
     try {
