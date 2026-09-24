@@ -158,19 +158,35 @@ const INDETERMINATE_RUN_CONCLUSIONS = new Set([
 
 const GH_CALL_TIMEOUT_MS = 30_000;
 
-// Retries AFTER the first attempt, so the worst case is 3 calls. Sized against
-// the workflow's `timeout-minutes: 10`: a transport failure returns in about a
-// second, so 3 workflows x 2 reads x 3 attempts costs seconds, not minutes.
-// The deployed-baseline read adds nothing here: it is a local `git rev-parse`
-// of the tag the deploy workflow writes, not a GitHub call.
 // Independent samples of a workflow's run listing per tick. See readNewestRun
-// for the stale-index-snapshot failure this defends against. Three is chosen
-// against the measured ~1-in-30 stale rate: a false alarm now needs every
-// sample to draw the stale shard. Three reads x 3 workflows x up to 3 retry
-// attempts stays far inside both `timeout-minutes: 10` and the GITHUB_TOKEN
-// hourly budget at one tick per 10 minutes.
+// for the stale-index-snapshot failure this defends against, and for why the
+// defence is `total_count` comparison plus a quorum rather than three votes:
+// production's own rate (21 alarms in 120 ticks, ~17%) is 5x the rate the
+// tight CI loop showed, so outvoting alone would still leave roughly one false
+// alarm a day. Three samples is what makes the discard-and-quorum rule work
+// while staying inside the budgets below.
 export const RUN_LISTING_SAMPLES = 3;
 
+// Non-stale samples that must agree before this monitor will say a workflow
+// stopped deploying. Below it, the tick is UNKNOWN (a warning on a green job),
+// never an alarm — a missing deploy persists, so the next tick still catches a
+// real one, while a stale shard's lie does not survive to it.
+export const RUN_LISTING_ALARM_QUORUM = 2;
+
+// Wall-clock one workflow's sampling may spend before it settles for the
+// samples already in hand. A slow but ANSWERING 5xx is retryable, so three
+// samples x three attempts x ~20s across three workflows would reach ~12
+// minutes against the job's `timeout-minutes: 10` — and a killed job is a red
+// monitor, the exact false alarm sampling exists to remove. Checked between
+// samples, so it never truncates a read in flight.
+export const RUN_LISTING_SAMPLE_BUDGET_MS = 90_000;
+
+// Retries AFTER the first attempt, so the worst case is 3 calls. Sized against
+// the workflow's `timeout-minutes: 10`: a transport failure returns in about a
+// second, so 3 workflows x 4 reads x 3 attempts costs seconds, not minutes,
+// and RUN_LISTING_SAMPLE_BUDGET_MS bounds the slow-5xx tail. The deployed-
+// baseline read adds nothing here: it is a local `git rev-parse` of the tag
+// the deploy workflow writes, not a GitHub call.
 export const GH_READ_RETRY_ATTEMPTS = 2;
 export const GH_READ_RETRY_BASE_MS = 500;
 export const GH_READ_RETRY_MAX_MS = 4_000;
@@ -240,6 +256,10 @@ export function isGithubRecordUnreadability(error) {
   if (error.code === 'ENOENT') return false;
   const message = error.message;
   if (error.timedOut === true) return true;
+  // "I could not corroborate this" is a statement about the READ, not a
+  // GitHub answer about the deploy, so it warns like any other unreadability
+  // rather than claiming a production deploy stopped happening.
+  if (error.githubRecordUncorroborated === true) return true;
   const status = message.match(/\(HTTP (\d{3})\)/);
   if (status) {
     const code = Number(status[1]);
@@ -297,7 +317,15 @@ function parseTimestamp(value) {
 }
 
 /**
- * Read the run listing for one workflow on main once, newest run first.
+ * Read the run listing for one workflow on main once.
+ *
+ * Returns `{ runs, totalCount }` — runs newest-first, and the listing's own
+ * `total_count`. `totalCount` is not decoration: a stale index snapshot
+ * under-reports it (1366 against a true 3168 in the incident that motivated
+ * the sampling below), which makes it the one field that tells a stale answer
+ * from a fresh one by comparison rather than by guessing. `null` when the
+ * payload omits it or it is not an integer, which the caller treats as
+ * "cannot judge this sample" rather than as zero.
  *
  * Throws (never returns a partial answer) when the payload or any timestamp in
  * it is unreadable, so a malformed listing is a read failure rather than a
@@ -325,7 +353,7 @@ function readRunListingOnce({ gh, repository, workflowFile }) {
   // The API returns newest-first, but nothing forces that: sort defensively so
   // the newest run cannot depend on an undocumented ordering. The validation
   // above makes any unreadable timestamp a read failure instead of hiding it.
-  return [...runs].sort((left, right) => {
+  const ordered = [...runs].sort((left, right) => {
     const leftMs = parseTimestamp(left?.created_at);
     const rightMs = parseTimestamp(right?.created_at);
     if (leftMs === null && rightMs === null) return 0;
@@ -333,6 +361,48 @@ function readRunListingOnce({ gh, repository, workflowFile }) {
     if (rightMs === null) return -1;
     return rightMs - leftMs;
   });
+  return {
+    runs: ordered,
+    totalCount: Number.isInteger(payload?.total_count) ? payload.total_count : null,
+  };
+}
+
+/**
+ * Does `candidate` describe a later state of this workflow than `incumbent`?
+ *
+ * `created_at` alone is NOT a total order over sampled records, and the gap is
+ * the dangerous kind. A re-run keeps the run id AND the original `created_at`
+ * and only bumps `run_attempt` — which is precisely why `readRunJobs` is
+ * attempts-scoped. Reducing on a bare `created_at > created_at` therefore lets
+ * the FIRST sample win every tie, so a sample holding attempt 1 (success)
+ * outranks a later sample holding attempt 2 (failure), and the monitor then
+ * reads attempt 1's green jobs and reports DEPLOYED for a deploy that failed.
+ * The same tie decides a run that merely advanced (queued -> failure) between
+ * two samples, which needs no re-run at all.
+ *
+ * So the order falls through: creation time, then run id (ids are monotonic,
+ * which settles two DIFFERENT runs created in the same second), then attempt,
+ * then a settled record over a still-active one (a run only ever moves active
+ * -> completed within an attempt). Ties beyond that are the same observation.
+ */
+function supersedes(candidate, incumbent) {
+  const candidateMs = parseTimestamp(candidate?.created_at);
+  const incumbentMs = parseTimestamp(incumbent?.created_at);
+  if (candidateMs !== incumbentMs) return candidateMs > incumbentMs;
+
+  if (candidate?.id !== incumbent?.id) {
+    return Number(candidate?.id ?? 0) > Number(incumbent?.id ?? 0);
+  }
+
+  const candidateAttempt = Number(candidate?.run_attempt ?? 1);
+  const incumbentAttempt = Number(incumbent?.run_attempt ?? 1);
+  if (candidateAttempt !== incumbentAttempt) return candidateAttempt > incumbentAttempt;
+
+  const candidateActive = ACTIVE_RUN_STATUSES.has(candidate?.status);
+  const incumbentActive = ACTIVE_RUN_STATUSES.has(incumbent?.status);
+  if (candidateActive !== incumbentActive) return incumbentActive;
+
+  return false;
 }
 
 /**
@@ -341,20 +411,45 @@ function readRunListingOnce({ gh, repository, workflowFile }) {
  *
  * `gh` is injected rather than imported so the I/O path is testable.
  *
- * The listing is sampled RUN_LISTING_SAMPLES times and the newest run seen
- * across every sample wins. One read is not enough: GitHub intermittently
- * answers this URL with a STALE INDEX SNAPSHOT — HTTP 200, a smaller
- * `total_count`, and a newest run from weeks ago — interleaved with correct
- * answers to the identical request. Measured from a runner on 2026-09-24,
- * 1 read in 30 of convex-deploy.yml came back pinned at run 34136482776
- * (2026-09-07, total_count 1366 against a true 3168); that is what made this
- * monitor report NO_RUN_IN_WINDOW on a workflow that had deployed minutes
- * earlier, on 21 of 120 consecutive ticks. Nothing in the response
- * distinguishes the two, and `createRetryingGh` cannot help because the stale
- * answer is a success. Taking the maximum is safe in the direction that
- * matters: a stale sample is an older snapshot of the same history, never a
- * run that does not exist, so the maximum can only ever be a real run — and
- * an alarm now needs EVERY sample to agree the workflow stopped deploying.
+ * WHY THIS READS THE LISTING MORE THAN ONCE
+ *
+ * GitHub intermittently answers this URL with a STALE INDEX SNAPSHOT — HTTP
+ * 200, a smaller `total_count`, and a newest run from weeks ago — interleaved
+ * with correct answers to the identical request. Measured from a runner on
+ * 2026-09-24, 1 read in 30 of convex-deploy.yml came back pinned at run
+ * 34136482776 (2026-09-07, total_count 1366 against a true 3168); that is what
+ * made this monitor report NO_RUN_IN_WINDOW on a workflow that had deployed
+ * minutes earlier, on 21 of 120 consecutive ticks. `createRetryingGh` cannot
+ * help: it classifies by whether GitHub answered, and a stale snapshot IS an
+ * answer — a successful one.
+ *
+ * The defence is comparison, in two layers, because outvoting alone is weaker
+ * than it looks. The per-tick failure rate observed in production (21 of 120)
+ * is ~17%, not the ~3% the tight CI loop showed, so three purely statistical
+ * samples would still leave roughly one false alarm a day. Hence:
+ *
+ *   1. PROVEN stale samples are DISCARDED, not outvoted. `total_count` is
+ *      monotonic for a workflow whose runs are not being deleted, so a sample
+ *      reporting fewer total runs than another sample of the same listing is
+ *      demonstrably an older view. That turns the common case from a vote into
+ *      a decision. A sample that omits `total_count` is kept (fail open — the
+ *      reduction below still protects it).
+ *   2. Whatever survives is reduced with `supersedes`, a total order. Taking
+ *      the later record is safe in the direction that matters: a stale sample
+ *      is an older snapshot of the same history, never a run that does not
+ *      exist, so the winner can only ever be a real run.
+ *
+ * An alarm additionally needs RUN_LISTING_ALARM_QUORUM non-stale samples to
+ * agree. The two verdicts a stale or truncated listing can manufacture —
+ * "no runs at all" and "the newest run predates the window" — are exactly the
+ * two this monitor shouts about, so neither may rest on a single read. Failing
+ * that quorum is UNKNOWN (a warning on a green job), never a claim that a
+ * deploy failed: the same direction-of-failure rule this file opens with.
+ *
+ * Pinned by 'outvotes a stale run-listing snapshot instead of alarming on it',
+ * 'discards a sample that total_count proves stale', 'keeps a sample that
+ * answered when a sibling sample throws', and 'prefers the later attempt of a
+ * re-run when two samples share a created_at'.
  */
 export function readNewestRun({
   gh,
@@ -363,16 +458,82 @@ export function readNewestRun({
   now,
   noRunWindowMs = DEFAULT_NO_RUN_WINDOW_MS,
   samples = RUN_LISTING_SAMPLES,
+  alarmQuorum = RUN_LISTING_ALARM_QUORUM,
+  sampleBudgetMs = RUN_LISTING_SAMPLE_BUDGET_MS,
+  clock = () => Date.now(),
 }) {
-  let newest = null;
+  const startedAt = clock();
+  const answered = [];
+  let failure = null;
   for (let sample = 0; sample < samples; sample += 1) {
-    const candidate = readRunListingOnce({ gh, repository, workflowFile })[0];
-    if (!candidate) continue;
-    if (newest === null || parseTimestamp(candidate.created_at) > parseTimestamp(newest.created_at)) {
-      newest = candidate;
+    try {
+      answered.push(readRunListingOnce({ gh, repository, workflowFile }));
+    } catch (error) {
+      // A sample that answered is a real observation; a sibling that failed
+      // must not invalidate it. Only a listing NOTHING could read is a read
+      // failure, and that is rethrown below exactly as it was before sampling.
+      failure ??= error;
     }
+    // Checked BETWEEN samples so a read in flight is never truncated, and
+    // deliberately NOT conditional on having an answer: the expensive case is
+    // a slow-but-ANSWERING 5xx, which is the retryable path, so the samples
+    // that cost the most are exactly the ones that return nothing. Three
+    // workflows of those would outrun the job's own `timeout-minutes: 10`, and
+    // a killed job is a red monitor — the false alarm this exists to stop.
+    // Running out of budget with nothing in hand falls through to the throw
+    // below, which is UNKNOWN, not an alarm.
+    if (clock() - startedAt >= sampleBudgetMs) break;
   }
+  if (answered.length === 0) {
+    throw failure ?? new Error(`the run listing for ${workflowFile} produced no samples`);
+  }
+
+  // Layer 1: drop the samples a sibling PROVES are an older view. This does
+  // not change which run wins — an older view's newest run loses the ordering
+  // anyway — it changes who is allowed to VOTE. Without it a stale sample pads
+  // the quorum below, so an alarm that only one sample really saw reads as
+  // corroborated. Two sibling comparisons prove staleness:
+  //   - a narrower `total_count` (monotonic while runs are not being deleted);
+  //   - an empty listing while a sibling sample has runs (a run cannot
+  //     un-happen, so the empty view is the truncated one).
+  // A sample that omits `total_count` is kept: unprovable is not disproved.
+  const widestTotal = answered.reduce(
+    (widest, sample) => (
+      Number.isInteger(sample.totalCount) && (widest === null || sample.totalCount > widest)
+        ? sample.totalCount
+        : widest
+    ),
+    null,
+  );
+  const anySampleHasRuns = answered.some((sample) => sample.runs.length > 0);
+  const corroborating = answered.filter((sample) => {
+    if (widestTotal !== null && Number.isInteger(sample.totalCount) && sample.totalCount < widestTotal) {
+      return false;
+    }
+    return !(anySampleHasRuns && sample.runs.length === 0);
+  });
+
+  // Layer 2: reduce the survivors on the total order.
+  let newest = null;
+  for (const sample of corroborating) {
+    const candidate = sample.runs[0];
+    if (!candidate) continue;
+    if (newest === null || supersedes(candidate, newest)) newest = candidate;
+  }
+
+  // An alarm-shaped conclusion that only one sample supports is not a verdict.
+  const alarmIsCorroborated = corroborating.length >= alarmQuorum;
+  const uncorroborated = () => {
+    const error = markGithubReadFailure(new Error(
+      `the run listing for ${workflowFile} could not be corroborated: `
+      + `${corroborating.length} of ${samples} sample(s) agreed, ${alarmQuorum} required before reporting that it stopped deploying`,
+    ));
+    error.githubRecordUncorroborated = true;
+    return error;
+  };
+
   if (!newest) {
+    if (!alarmIsCorroborated) throw uncorroborated();
     return {
       found: false,
       verdict: 'NO_RUN',
@@ -384,6 +545,7 @@ export function readNewestRun({
     ? newest.status
     : (newest.conclusion ?? null);
   if (now - createdMs > noRunWindowMs) {
+    if (!alarmIsCorroborated) throw uncorroborated();
     return {
       found: true,
       verdict: 'NO_RUN_IN_WINDOW',
