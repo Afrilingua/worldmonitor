@@ -18,6 +18,7 @@ import {
   MONITORED_WORKFLOWS,
   RUN_LISTING_SAMPLES,
   checkPostmergeDeploys,
+  createDeadlineGh,
   createRetryingGh,
   diffTouchesPaths,
   readDeployedBaselineSha,
@@ -483,7 +484,7 @@ describe('post-merge deploy monitor', () => {
     const payloads = [
       JSON.stringify({ total_count: 1366, workflow_runs: [stale] }),
       JSON.stringify({ total_count: 3168, workflow_runs: [fresh] }),
-      JSON.stringify({ total_count: 1366, workflow_runs: [stale] }),
+      JSON.stringify({ total_count: 3168, workflow_runs: [fresh] }),
     ];
     let read = -1;
     const newest = readNewestRun({
@@ -602,12 +603,69 @@ describe('post-merge deploy monitor', () => {
     assert.equal(newest.verdict, 'NO_RUN');
   });
 
+  // A listing that says thousands of runs exist and then carries none is not
+  // evidence of absence, however many samples repeat it — it is the truncated
+  // shape agreeing with itself. Without this, the defence against the stale
+  // snapshot invents the loudest false alarm in the file.
+  it('refuses to read NO_RUN out of listings that contradict themselves', () => {
+    assert.throws(
+      () => readNewestRun({
+        gh: () => JSON.stringify({ total_count: 3168, workflow_runs: [] }),
+        repository: 'koala73/worldmonitor',
+        workflowFile: 'convex-deploy.yml',
+        now: NOW,
+      }),
+      /could not be corroborated/,
+      'a payload claiming 3168 runs cannot prove the workflow never ran',
+    );
+  });
+
+  // The false-green half. A lone stale sample whose newest run still falls
+  // INSIDE the window used to resolve RUN_FOUND with no corroboration at all,
+  // and a superseded green attempt then grades as DEPLOYED.
+  it('refuses to speak for a workflow on one uncorroborated in-window sample', () => {
+    const staleInWindow = { id: 100, created_at: new Date(NOW - 10 * 24 * HOUR).toISOString(), status: 'completed', conclusion: 'success', run_attempt: 1, head_sha: 'e'.repeat(40), event: 'push', display_title: 'push' };
+    let read = -1;
+    assert.throws(
+      () => readNewestRun({
+        gh: () => {
+          read += 1;
+          if (read === 0) return JSON.stringify({ total_count: 1366, workflow_runs: [staleInWindow] });
+          throw Object.assign(new Error('gh api ... failed (1): tls handshake timeout'), { githubReadSource: 'github-api' });
+        },
+        repository: 'koala73/worldmonitor',
+        workflowFile: 'deploy-worker.yml',
+        now: NOW,
+        noRunWindowMs: 14 * 24 * HOUR,
+      }),
+      /could not be corroborated/,
+      'a green verdict needs the same corroboration as an alarm',
+    );
+  });
+
+  it('spends no gh read once the monitor wall-clock budget is gone', () => {
+    let calls = 0;
+    const gh = createDeadlineGh({
+      gh: () => { calls += 1; return '{}'; },
+      deadlineAt: 1_000,
+      clock: () => 1_000,
+    });
+    assert.throws(() => gh(['api', 'repos/x/actions/workflows/y/runs']), /wall-clock budget/);
+    assert.equal(calls, 0, 'the read must not be issued at all');
+
+    // It is a timeout, so it is never retried and it warns instead of alarming.
+    let thrown;
+    try { gh(['api', 'repos/x/actions/workflows/y/runs']); } catch (error) { thrown = error; }
+    assert.equal(isRetryableGhFailure(thrown), false, 'retrying is what spent the budget');
+    assert.equal(isGithubRecordUnreadability(thrown), true, 'a spent budget is unreadability, not a failed deploy');
+  });
+
   it('skips a sample whose listing is empty without treating it as no run', () => {
     const fresh = { id: 900, created_at: new Date(NOW - HOUR).toISOString(), conclusion: 'success', run_attempt: 1, head_sha: 'd'.repeat(40), event: 'push', display_title: 'push' };
     const payloads = [
       JSON.stringify({ total_count: 3168, workflow_runs: [] }),
       JSON.stringify({ total_count: 3168, workflow_runs: [fresh] }),
-      JSON.stringify({ total_count: 3168, workflow_runs: [] }),
+      JSON.stringify({ total_count: 3168, workflow_runs: [fresh] }),
     ];
     let read = -1;
     const newest = readNewestRun({

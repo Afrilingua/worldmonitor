@@ -187,6 +187,19 @@ export const RUN_LISTING_SAMPLE_BUDGET_MS = 90_000;
 // and RUN_LISTING_SAMPLE_BUDGET_MS bounds the slow-5xx tail. The deployed-
 // baseline read adds nothing here: it is a local `git rev-parse` of the tag
 // the deploy workflow writes, not a GitHub call.
+// The whole walk's wall-clock ceiling, against the workflow's
+// `timeout-minutes: 10`. Per-read budgets cannot bound this on their own: one
+// retryable 5xx costs 3 attempts x GH_CALL_TIMEOUT_MS plus backoff (~91.5s),
+// RUN_LISTING_SAMPLE_BUDGET_MS is only checked BETWEEN samples so a read
+// already in flight overshoots it, and readRunJobs is a further unbudgeted
+// read. Three workflows of that reach ~819s and the runner kills the job —
+// which reports as a RED monitor with no verdict for any workflow, the exact
+// false alarm this file exists to remove. The deadline is checked before every
+// gh ATTEMPT (it wraps the callee of createRetryingGh, not its caller), so the
+// overshoot is one in-flight call rather than a whole retry ladder, and every
+// workflow after it is reached still gets its own UNKNOWN rather than nothing.
+export const MONITOR_WALL_BUDGET_MS = 8 * 60 * 1000;
+
 export const GH_READ_RETRY_ATTEMPTS = 2;
 export const GH_READ_RETRY_BASE_MS = 500;
 export const GH_READ_RETRY_MAX_MS = 4_000;
@@ -289,6 +302,28 @@ export function createRetryingGh({ gh, sleep = sleepSync, attempts = GH_READ_RET
         sleep(Math.min(GH_READ_RETRY_BASE_MS * (2 ** attempt), GH_READ_RETRY_MAX_MS));
       }
     }
+  };
+}
+
+/**
+ * Refuse a gh read once the monitor's wall-clock budget is spent.
+ *
+ * Marked `timedOut` on purpose rather than with a bespoke flag: running out of
+ * time IS a timeout, and the two behaviours that classification already buys
+ * are exactly the ones wanted here — never retried (retrying is what spent the
+ * budget) and classified as unreadability, so the job warns rather than
+ * claiming a deploy failed.
+ */
+export function createDeadlineGh({ gh, deadlineAt, clock = () => Date.now() }) {
+  return (args) => {
+    if (clock() >= deadlineAt) {
+      const error = markGithubReadFailure(new Error(
+        `the monitor's ${MONITOR_WALL_BUDGET_MS / 1000}s wall-clock budget was spent before this read could run`,
+      ));
+      error.timedOut = true;
+      throw error;
+    }
+    return gh(args);
   };
 }
 
@@ -510,8 +545,32 @@ export function readNewestRun({
     if (widestTotal !== null && Number.isInteger(sample.totalCount) && sample.totalCount < widestTotal) {
       return false;
     }
+    // A listing that reports runs exist and then carries none contradicts
+    // itself, so it needs no sibling to convict it. Without this, three
+    // samples of the truncated shape agree with each other, clear the quorum,
+    // and produce NO_RUN — "this workflow has never run" asserted from three
+    // payloads each claiming thousands of runs exist. That is the loudest
+    // false alarm this file can raise, invented by the defence against it.
+    if (Number.isInteger(sample.totalCount) && sample.totalCount > 0 && sample.runs.length === 0) {
+      return false;
+    }
     return !(anySampleHasRuns && sample.runs.length === 0);
   });
+
+  // No verdict of ANY shape may rest on fewer than the quorum. Gating only the
+  // alarm-shaped ones was the asymmetry: a lone stale sample whose newest run
+  // still falls INSIDE the window resolves RUN_FOUND, checkPostmergeDeploys
+  // reads that run's jobs, and a superseded green attempt reports DEPLOYED.
+  // False green is the half of this failure nobody notices, so it earns the
+  // same corroboration as the half that pages.
+  if (corroborating.length < alarmQuorum) {
+    const error = markGithubReadFailure(new Error(
+      `the run listing for ${workflowFile} could not be corroborated: `
+      + `${corroborating.length} of ${samples} sample(s) agreed, ${alarmQuorum} required before this monitor will speak for it`,
+    ));
+    error.githubRecordUncorroborated = true;
+    throw error;
+  }
 
   // Layer 2: reduce the survivors on the total order.
   let newest = null;
@@ -521,19 +580,7 @@ export function readNewestRun({
     if (newest === null || supersedes(candidate, newest)) newest = candidate;
   }
 
-  // An alarm-shaped conclusion that only one sample supports is not a verdict.
-  const alarmIsCorroborated = corroborating.length >= alarmQuorum;
-  const uncorroborated = () => {
-    const error = markGithubReadFailure(new Error(
-      `the run listing for ${workflowFile} could not be corroborated: `
-      + `${corroborating.length} of ${samples} sample(s) agreed, ${alarmQuorum} required before reporting that it stopped deploying`,
-    ));
-    error.githubRecordUncorroborated = true;
-    return error;
-  };
-
   if (!newest) {
-    if (!alarmIsCorroborated) throw uncorroborated();
     return {
       found: false,
       verdict: 'NO_RUN',
@@ -545,7 +592,6 @@ export function readNewestRun({
     ? newest.status
     : (newest.conclusion ?? null);
   if (now - createdMs > noRunWindowMs) {
-    if (!alarmIsCorroborated) throw uncorroborated();
     return {
       found: true,
       verdict: 'NO_RUN_IN_WINDOW',
@@ -1035,7 +1081,11 @@ async function main() {
   const results = checkPostmergeDeploys({
     repository,
     // Reads retry; a transient TLS or DNS failure must not become a verdict.
-    gh: createRetryingGh({ gh: runGh }),
+    // The deadline sits INSIDE the retry wrapper so it is consulted before
+    // every attempt, not once per read.
+    gh: createRetryingGh({
+      gh: createDeadlineGh({ gh: runGh, deadlineAt: Date.now() + MONITOR_WALL_BUDGET_MS }),
+    }),
     git: (args) => {
       const result = spawnSync('git', args, {
         encoding: 'utf8',
