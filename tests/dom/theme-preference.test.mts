@@ -77,7 +77,7 @@ describe('Desktop window theme', () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
   it.each(['live-channels.html', 'settings.html'])('%s pre-paints the system theme for Auto and first visits, and keeps explicit choices', (page) => {
-    const prepaint = readFileSync(resolve(root, page), 'utf8').match(/<script>([\s\S]*?)<\/script>/)![1]!;
+    const prepaint = readFileSync(resolve(root, page), 'utf8').match(/<script>([\s\S]*?)<\/script>/gi)![1]!;
     const runPrepaint = (): string | undefined => {
       delete document.documentElement.dataset.theme;
       new Function(prepaint)();
