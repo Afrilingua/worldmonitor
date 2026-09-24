@@ -198,6 +198,20 @@ The dashboard mode where the map becomes a resizable column beside the panel gri
 
 The drop zone under the map, available only in the split layout, where a user can dock panels out of the main grid. Its membership is remembered separately from the main panel order, and zone reconciliation moves the remembered panels in or out when the layout mode changes — which is why the zone's CSS visibility and the reconciliation logic must agree on the same threshold: hiding the container while reconciliation still moves panels into it makes those panels vanish. See also: Split Layout.
 
+## Frontend Bundle Freshness
+
+### Stale Bundle
+
+A loaded tab whose frontend code predates the version now deployed, detected by comparing a build hash baked into the running bundle against the hash published alongside each deploy.
+
+Staleness is a correctness problem rather than a cosmetic one: a tab held across a change to a request or response shape can retry forever against a server its code no longer understands, so the standing response is to force a reload as soon as a mismatch is seen. The mismatch is treated as settled once observed — a deploy is not un-deployed, save for a rollback to the exact running version, whose only cost is one redundant reload. Because trunk moves many times a day, a tab open for tens of minutes is usually stale, which makes the reload common rather than exceptional. See also: Modal-Open Guard.
+
+### Modal-Open Guard
+
+The precondition the bundle-freshness and service-worker automatic reloads consult, which holds the reload back while a dialog the user is working in is on screen. Both defer rather than cancel, so the reload lands on a later trigger once the dialog closes. Chunk-load error recovery (`vite:preloadError`) does not consult this guard.
+
+Three rules are easy to get wrong. The test is whether a candidate is actually *rendered*, not whether it is present, because several overlays mount once and stay in the document for the whole session; presence alone would hold reloads off forever. The preferred rendering test uses `checkVisibility()`: a candidate without an associated box or beneath an ancestor with `content-visibility: hidden` reads as hidden, while opacity or `visibility` alone does not make it hidden. Persistent overlays use `display: none` when closed; this also works with the `getClientRects()` fallback in older browsers. And the set of things that count is defined by dialog semantics rather than by whether a surface holds unsaved work, so a transient popover can defer a reload too. The guard exists because the reload's trigger is the user returning to the app, which is also how someone returns holding an emailed verification code; reloading then destroys the flow they left to complete. See also: Stale Bundle.
+
 ## Payments Provider Calls
 
 ### Retry Ownership

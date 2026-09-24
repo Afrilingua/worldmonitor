@@ -12,13 +12,35 @@
 // /build-hash.txt is intentionally NOT under /api/* so installWebApiRedirect
 // does NOT rewrite it to the canonical API host — it stays same-origin with
 // the bundle, which is the correct comparison target.
+//
+// The reload never fires under an open modal (#8577). Returning to the app is
+// this module's main trigger, and it is also how a user gets back from their
+// mail app with a Clerk email verification code, so an unguarded reload wiped
+// the sign-up they were halfway through. A mismatch found under a modal is
+// remembered in `pendingReload` and the module stops fetching; every later
+// trigger retries the reload against the live DOM until one lands. What counts
+// as open is `isModalOpen`, shared with the service-worker updater.
+
+import { enqueueSentryCall } from '@/bootstrap/sentry-defer';
+import { isModalOpen, type ModalDocumentLike } from '@/utils/open-modal';
 
 interface EventTargetLike {
   addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
   removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
 }
 
-interface DocumentLike {
+/**
+ * The document surface this module needs: the visibility trigger AND the modal
+ * probe. Extending the shared `ModalDocumentLike` rather than redeclaring it
+ * keeps one definition of the modal contract, so a fake cannot model a document
+ * that answers `visibilitychange` but not the modal probe.
+ *
+ * `querySelectorAll` is required rather than optional on purpose, but note the
+ * enforcement is weaker than it looks: `tsconfig.json` includes only `src`, and
+ * `tsconfig.contract-tests.json` does not list this module's suite, so no job
+ * typechecks the fake. A fake that omits it fails loudly at runtime instead.
+ */
+interface DocumentLike extends ModalDocumentLike {
   addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
   removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => void;
   visibilityState?: string;
@@ -39,6 +61,13 @@ interface StaleBundleCheckOptions {
   reload?: () => void;
   /** Override clock (for tests). Default: Date.now. */
   now?: () => number;
+  /**
+   * Called once per deferral episode when an open modal holds off a reload.
+   * Default reports to Sentry. A wedged tab (an overlay that never closes)
+   * would otherwise keep a stale bundle with no signal anywhere but the
+   * user's own console, which is the failure mode this suppression risks.
+   */
+  reportDeferral?: (currentHash: string, deployedHash: string) => void;
   /**
    * Minimum interval between checks. Multiple events within this window
    * collapse to one fetch.
@@ -98,6 +127,14 @@ export function installStaleBundleCheck(options: StaleBundleCheckOptions = {}): 
   const setIntervalImpl = options.setInterval ?? ((cb: () => void, ms: number) => globalThis.setInterval(cb, ms));
   const reload = options.reload ?? (() => window.location.reload());
   const now = options.now ?? Date.now;
+  const reportDeferral = options.reportDeferral ?? ((current: string, deployed: string) => {
+    enqueueSentryCall((Sentry) => {
+      Sentry.captureMessage('[stale-bundle] reload deferred, modal open', {
+        level: 'warning',
+        tags: { surface: 'stale-bundle', current_hash: current, deployed_hash: deployed },
+      });
+    });
+  });
   const minIntervalMs = options.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
   const periodicIntervalMs = options.periodicIntervalMs ?? DEFAULT_PERIODIC_INTERVAL_MS;
 
@@ -110,31 +147,76 @@ export function installStaleBundleCheck(options: StaleBundleCheckOptions = {}): 
 
   let lastCheckedAt = 0;
   let inflight = false;
+  /**
+   * The deployed hash a reload is owed to. Null while the bundle is believed
+   * current. Non-null makes `lastCheckedAt` and `inflight` unreachable, because
+   * `check()` returns before consulting them.
+   */
+  let pendingReload: string | null = null;
+
+  /**
+   * Reload now, or remember the debt and return while a modal is on screen.
+   *
+   * The probe belongs here, at the irreversible action, and not at the top of
+   * `check()`: reading the DOM when the hash answer arrives rather than when the
+   * trigger fired is what catches a modal that mounts mid-fetch. A guard before
+   * the fetch would let that one through — the original bug wearing a guard.
+   *
+   * No document at all means there is no modal to protect, so it reloads. PR
+   * #3466's safety property wins that tie.
+   */
+  const reloadOrDefer = (deployedHash: string): void => {
+    if (documentTarget && isModalOpen(documentTarget)) {
+      if (pendingReload === null) {
+        // eslint-disable-next-line no-console
+        console.warn('[stale-bundle] reload deferred, modal open:', currentHash, '→', deployedHash);
+        reportDeferral(currentHash, deployedHash);
+      }
+      pendingReload = deployedHash;
+      return;
+    }
+    pendingReload = null;
+    // eslint-disable-next-line no-console
+    console.warn('[stale-bundle] reload:', currentHash, '→', deployedHash);
+    reload();
+  };
 
   const check = async (): Promise<void> => {
+    // Treat a mismatch as terminal: retry the reload against the live DOM
+    // instead of re-asking the network, bypassing the dedupe window (that
+    // window rate-limits fetches, and this path makes none).
+    //
+    // One case makes the premise false: a rollback to exactly `currentHash`
+    // while a reload is pending. The cost is a single redundant reload onto
+    // the bundle already running, so re-verifying every trigger would buy
+    // nothing but requests.
+    if (pendingReload !== null) {
+      reloadOrDefer(pendingReload);
+      return;
+    }
+
     const t = now();
     if (t - lastCheckedAt < minIntervalMs) return;
     if (inflight) return;
     lastCheckedAt = t;
     inflight = true;
+    let deployedHash: string | null = null;
     try {
       // Cache-bust to defeat any intermediate proxy that might serve a
       // stale build-hash.txt (the file itself is emitted with the deploy).
       const res = await fetchImpl(`/build-hash.txt?t=${t}`, { cache: 'no-store' });
-      if (!res.ok) return;
-      const deployedHash = (await res.text()).trim();
-      if (!deployedHash || deployedHash === 'dev') return;
-      if (deployedHash !== currentHash) {
-        // eslint-disable-next-line no-console
-        console.warn('[stale-bundle] reload:', currentHash, '→', deployedHash);
-        reload();
-      }
+      if (res.ok) deployedHash = (await res.text()).trim();
     } catch {
-      // Offline, network error, or non-OK response — silently skip.
-      // The next trigger will retry.
+      // Offline, or a network error from fetch/res.text() — silently skip.
+      // A non-OK response never throws; it leaves `deployedHash` null and
+      // exits below. Either way the next trigger retries.
     } finally {
       inflight = false;
     }
+    // Decided outside the catch, so a throw from the modal probe surfaces to
+    // Sentry instead of being misfiled as an offline blip.
+    if (!deployedHash || deployedHash === 'dev') return;
+    if (deployedHash !== currentHash) reloadOrDefer(deployedHash);
   };
 
   const focusHandler: EventListener = () => {
