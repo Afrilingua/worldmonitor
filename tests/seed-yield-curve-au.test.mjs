@@ -47,7 +47,7 @@ it('reports denial evidence without disclosing response text, headers, or redire
   assert.ok(message.length < 600);
 });
 
-it('caps the sampled body and cancels the remainder without waiting for cancellation', async () => {
+it('caps the sampled body and cancels the remainder without waiting for cancellation', { timeout: 2000 }, async () => {
   let cancelled = false;
   const stream = new ReadableStream({
     start(controller) { controller.enqueue(new TextEncoder().encode('captcha ' + 'x'.repeat(100_000))); },
@@ -56,8 +56,14 @@ it('caps the sampled body and cancels the remainder without waiting for cancella
   const { diagnostic } = await rejectedResponse(new Response(stream, { status: 403 }));
   assert.equal(cancelled, true);
   assert.equal(diagnostic.sampledBytes, 2048);
-  assert.equal(diagnostic.bodyState, 'truncated');
+  assert.equal(diagnostic.bodyState, 'limit');
   assert.equal(diagnostic.bodyMarker, 'challenge_marker');
+});
+
+it('does not claim bytes were discarded when the body exactly fills the sample', async () => {
+  const { diagnostic } = await rejectedResponse(new Response('x'.repeat(2048), { status: 403 }));
+  assert.equal(diagnostic.sampledBytes, 2048);
+  assert.equal(diagnostic.bodyState, 'limit');
 });
 
 it('bounds a stalled error body and does not replace the HTTP failure with a timeout', { timeout: 2000 }, async () => {
