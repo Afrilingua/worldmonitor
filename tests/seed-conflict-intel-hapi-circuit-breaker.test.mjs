@@ -570,6 +570,9 @@ test('HDX transfer diagnostics reject arbitrary header and error text', async (t
 for (const [retryAfter, expectedSeconds, expectedDate] of [
   ['120', 120, null],
   ['Sun, 26 Jul 2026 15:30:00 GMT', null, '2026-07-26T15:30:00.000Z'],
+  ['Sunday, 26-Jul-26 15:30:00 GMT', null, '2026-07-26T15:30:00.000Z'],
+  ['Sun Jul 26 15:30:00 2026', null, '2026-07-26T15:30:00.000Z'],
+  ['Sun Jul  5 15:30:00 2026', null, '2026-07-05T15:30:00.000Z'],
   ['secret https://private.invalid', null, null],
 ]) {
   test(`HAPI rejection diagnoses Retry-After ${expectedSeconds ?? expectedDate ?? 'invalid'} without changing cooldown`, async (t) => {

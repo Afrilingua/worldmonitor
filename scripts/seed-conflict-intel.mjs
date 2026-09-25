@@ -811,9 +811,10 @@ async function fetchHapiRows({
     if (!resp.ok) {
       const retryAfter = resp.headers.get('retry-after');
       const seconds = retryAfter !== null && /^\d+$/.test(retryAfter) ? Number(retryAfter) : NaN;
-      const retryDate = retryAfter !== null
-        && /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(retryAfter)
-        ? Date.parse(retryAfter) : NaN;
+      // HTTP dates are UTC, including the legacy asctime form with no zone.
+      // Only the normalized timestamp is logged; never expose the raw header.
+      const retryDate = retryAfter !== null && Number.isNaN(seconds)
+        ? Date.parse(retryAfter.endsWith(' GMT') ? retryAfter : `${retryAfter} GMT`) : NaN;
       console.warn(`  HAPI API rejection ${JSON.stringify({
         status: resp.status,
         country: /^[A-Z]{2}$/.test(countryCode ?? '') ? countryCode : 'global',
