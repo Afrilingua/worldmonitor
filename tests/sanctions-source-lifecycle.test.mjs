@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { mergeSanctionEntries, SEMA_SOURCE, sanctionsListContentMeta } from '../scripts/_sema-sanctions.mjs';
 import { __testing__ as health } from '../api/health.js';
+import { readSeedSnapshot, verifySeedKey, runSeed, writeExtraKeyWithMeta } from '../scripts/_seed-utils.mjs';
 
 const source = readFileSync('scripts/seed-sanctions-pressure.mjs', 'utf8');
 const pure = source.replace(/^import\s.*$/gm, '').replace(/loadEnvFile\([^)]+\);/, '').split('async function fetchSource')[0];
@@ -19,7 +20,7 @@ const row = (source, i) => ({
 });
 const canadian = Array.from({ length: 80 }, (_, i) => row(SEMA_SOURCE, i + 1));
 
-async function publish({ successes = ['SDN', 'CONSOLIDATED', SEMA_SOURCE], stored = null, preview = [], clock = now, writeError = false, readError = false, semaRecords = canadian } = {}) {
+async function publish({ successes = ['SDN', 'CONSOLIDATED', SEMA_SOURCE], stored = null, preview = [], clock = now, writeError = false, readError = false, semaRecords = canadian, io = {} } = {}) {
   const writes = [];
   let options;
   const context = vm.createContext({
@@ -27,13 +28,11 @@ async function publish({ successes = ['SDN', 'CONSOLIDATED', SEMA_SOURCE], store
     Date: class extends Date { static now() { return clock; } },
     SEMA_SOURCE, mergeSanctionEntries, sanctionsListContentMeta,
     SANCTIONS_SOURCE_VERSION: 'test', SANCTIONS_MAX_CONTENT_AGE_MIN: 43200,
-    verifySeedKey: async key => {
-      if (key === 'sanctions:source-snapshots:v1') {
-        if (readError) throw new Error('synthetic cache read failure');
-        return stored;
-      }
-      return key === 'sanctions:pressure:v1' ? { entries: preview } : null;
+    readSeedSnapshot: async () => {
+      if (readError) throw new Error('synthetic cache read failure');
+      return stored;
     },
+    verifySeedKey: async key => key === 'sanctions:pressure:v1' ? { entries: preview } : null,
     fetchSource: async ({ label }) => {
       if (!successes.includes(label)) throw new Error('synthetic source timeout');
       return { entries: [row(label, 1)], datasetDate: now - 86400000 };
@@ -46,6 +45,7 @@ async function publish({ successes = ['SDN', 'CONSOLIDATED', SEMA_SOURCE], store
       writes.push(normalize(args));
     },
     runSeed: (_d, _r, _k, _f, opts) => { options = opts; },
+    ...io,
   });
   vm.runInContext(`${pure}\n${tail}`, context);
   const data = await context.fetchSanctionsPressure();
@@ -183,5 +183,103 @@ describe('sanctions source lifecycle', () => {
       assert.equal(writes.find(([key]) => key === 'sanctions:entities:v1')[3], count);
       assert.deepEqual(writes.find(([key]) => key === 'sanctions:country-counts:v1')[1], {});
     }
+  });
+});
+
+async function withLocalRedis(run) {
+  const original = { fetch: globalThis.fetch, exit: process.exit, log: console.log, warn: console.warn };
+  const listeners = new Set(process.rawListeners('SIGTERM'));
+  const env = Object.fromEntries(['UPSTASH_REDIS_REST_URL', 'UPSTASH_REDIS_REST_TOKEN', 'WM_SEED_RETRY_DELAY_MS'].map(key => [key, process.env[key]]));
+  const store = new Map();
+  const logs = [];
+  process.env.UPSTASH_REDIS_REST_URL = 'https://sanctions-redis.test';
+  process.env.UPSTASH_REDIS_REST_TOKEN = 'fixture-token';
+  process.env.WM_SEED_RETRY_DELAY_MS = '0';
+  console.log = (...args) => logs.push(args.join(' '));
+  console.warn = (...args) => logs.push(args.join(' '));
+  process.exit = code => { throw Object.assign(new Error('fixture exit'), { exitCode: code }); };
+  function command([op, key, value]) {
+    if (op === 'SET') { store.set(key, value); return 'OK'; }
+    if (op === 'GET') return store.get(key) ?? null;
+    if (op === 'DEL') return Number(store.delete(key));
+    if (op === 'EXPIRE' || op === 'EVAL') return 1;
+    throw new Error(`unexpected fixture command ${op}`);
+  }
+  globalThis.fetch = async (url, init = {}) => {
+    assert.equal(new URL(url).hostname, 'sanctions-redis.test', 'no real network allowed');
+    const match = String(url).match(/\/get\/([^/?#]+)$/);
+    if (match) return Response.json({ result: store.get(decodeURIComponent(match[1])) ?? null });
+    const body = JSON.parse(init.body);
+    return Response.json(Array.isArray(body[0]) ? body.map(c => ({ result: command(c) })) : { result: command(body) });
+  };
+  try { return await run({ store, logs }); }
+  finally {
+    globalThis.fetch = original.fetch;
+    process.exit = original.exit;
+    console.log = original.log;
+    console.warn = original.warn;
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    for (const listener of process.rawListeners('SIGTERM')) if (!listeners.has(listener)) process.removeListener('SIGTERM', listener);
+  }
+}
+
+it('uses the real strict Redis reader to distinguish missing snapshots from HTTP errors', async () => {
+  await withLocalRedis(async () => {
+    const firstRun = await publish({ io: { readSeedSnapshot } });
+    assert.equal(firstRun.data.totalCount, 82);
+    for (const status of [401, 503]) {
+      globalThis.fetch = async () => new Response('fixture read failure', { status });
+      assert.equal(await verifySeedKey('sanctions:source-snapshots:v1'), null, 'legacy helper degrades HTTP failures');
+      await assert.rejects(publish({ io: { readSeedSnapshot } }), new RegExp(`HTTP ${status}`));
+    }
+    for (const body of [{ error: 'ERR fixture read error' }, {}, { result: '' }]) {
+      globalThis.fetch = async () => Response.json(body);
+      await assert.rejects(publish({ io: { readSeedSnapshot } }), /Redis snapshot read/);
+    }
+  });
+});
+
+it('publishes all-source expiry through real runSeed with empty companions and persisted error metadata', async () => {
+  await withLocalRedis(async ({ store, logs }) => {
+    const stored = await save(await publish());
+    const { data, options } = await publish({ successes: [], stored, clock: now + 720 * 60000, io: { writeExtraKeyWithMeta } });
+    await assert.rejects(runSeed('sanctions', 'pressure', 'sanctions:pressure:v1', async () => data, options), error => error.exitCode === 0);
+    const canonical = JSON.parse(store.get('sanctions:pressure:v1'));
+    assert.equal(canonical.data.totalCount, 0);
+    assert.deepEqual(canonical.data.entries, []);
+    assert.equal(canonical._seed.state, 'OK_ZERO', 'envelope state describes successful empty publication, not source health');
+    assert.deepEqual(JSON.parse(store.get('sanctions:entities:v1')), []);
+    assert.deepEqual(JSON.parse(store.get('sanctions:country-counts:v1')), {});
+    const meta = JSON.parse(store.get('seed-meta:sanctions:pressure'));
+    assert.equal(meta.sourceState, 'error');
+    assert.equal(meta.errorCode, 'SEMA_INGEST_FAILED');
+    assert.deepEqual(meta.failedSources, ['SDN', 'CONSOLIDATED', SEMA_SOURCE]);
+    assert.equal(meta.recordCount, 0);
+    assert.ok(logs.some(line => line.includes('DEGRADED')));
+    const key = health.BOOTSTRAP_KEYS.sanctionsPressure;
+    const verdict = health.classifyKey('sanctionsPressure', key, { allowOnDemand: false }, {
+      now: Date.now(), containmentEvidenceByName: new Map(), keyStrens: new Map([[key, store.get(key).length]]), keyErrors: new Map(),
+      keyMetaValues: new Map([[health.SEED_META.sanctionsPressure.key, JSON.stringify(meta)]]), keyMetaErrors: new Map(),
+    });
+    assert.equal(verdict.status, 'SEED_ERROR');
+  });
+});
+
+it('fails without claiming completed freshness if a companion write fails after canonical publication', async () => {
+  await withLocalRedis(async ({ store, logs }) => {
+    const oldMeta = JSON.stringify({ fetchedAt: now, sourceState: 'error', recordCount: 82 });
+    store.set('seed-meta:sanctions:pressure', oldMeta);
+    const { data, options } = await publish({ successes: [], io: {
+      writeExtraKeyWithMeta: async (...args) => {
+        if (args[0] === 'sanctions:country-counts:v1') throw new Error('fixture companion write failure');
+        return writeExtraKeyWithMeta(...args);
+      },
+    } });
+    await assert.rejects(runSeed('sanctions', 'pressure', 'sanctions:pressure:v1', async () => data, options), /fixture companion write failure/);
+    assert.equal(JSON.parse(store.get('sanctions:pressure:v1')).data.totalCount, 0);
+    assert.equal(store.get('seed-meta:sanctions:pressure'), oldMeta, 'a partial publication must not claim completed freshness');
+    assert.ok(!logs.some(line => line.includes('DEGRADED')));
   });
 });

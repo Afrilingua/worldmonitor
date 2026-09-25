@@ -48,8 +48,8 @@ async function partialPublication({ sources = ['CONSOLIDATED'], cached = [], sna
     console: { log() {}, warn() {} },
     SEMA_SOURCE, Buffer, gzipSync, gunzipSync,
     mergeSanctionEntries,
-    verifySeedKey: async (key) => key === 'sanctions:pressure:v1' ? { entries: cached }
-      : key === 'sanctions:source-snapshots:v1' ? snapshots : null,
+    verifySeedKey: async (key) => key === 'sanctions:pressure:v1' ? { entries: cached } : null,
+    readSeedSnapshot: async () => snapshots,
     ingestSemaEntries: semaJson === undefined
       ? async () => ({ records: [], publishedAtMs: 0, error: 'SEMA_INVALID_RECORD' })
       : () => ingestSemaEntries({ fetchFn: async () => new Response(JSON.stringify(semaJson)) }),
