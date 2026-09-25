@@ -504,10 +504,10 @@ describe('sanctions frontend normalization parity', () => {
 
 it('renders zero-record sanctions data as unavailable', async () => {
   const unavailable = JSON.parse(readFileSync('src/locales/en.json', 'utf8')).components.sanctionsPressure.unavailable;
+  globalThis[FRONTEND_STATE_KEY] = { unavailable };
   const stubs = new Map([
     ['./Panel', 'export class Panel { showLoading() {} setCount() {} setSafeContent(value) { this.rendered = value; } }'],
-    ['@/services/i18n', `export function t(key) { return key === 'components.sanctionsPressure.unavailable' ? ${JSON.stringify(unavailable)} : key; }`],
-    ['@/utils/sanitize', 'export const escapeHtml = value => value; export const unsafeRawHtml = value => value;'],
+    ['@/services/i18n', `export function t(key) { return key === 'components.sanctionsPressure.unavailable' ? globalThis.${FRONTEND_STATE_KEY}.unavailable : key; }`],
   ]);
   const result = await build({
     entryPoints: [resolve(root, 'src/components/SanctionsPressurePanel.ts')],
@@ -520,6 +520,6 @@ it('renders zero-record sanctions data as unavailable', async () => {
   const { SanctionsPressurePanel } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
   const panel = new SanctionsPressurePanel();
   panel.setData({ totalCount: 0, entries: [], countries: [], programs: [] });
-  assert.equal(panel.rendered, `<div class="economic-empty">${unavailable}</div>`);
+  assert.equal(String(panel.rendered), `<div class="economic-empty">${unavailable}</div>`);
   assert.match(unavailable, /unavailable/i);
 });
