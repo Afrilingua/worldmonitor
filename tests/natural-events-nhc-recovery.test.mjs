@@ -342,6 +342,31 @@ test('valid identity and earlier wind rejection do not emit identity diagnostics
   assert.equal(logs.some(line => line.startsWith('[NHC identity] ')), false);
 });
 
+test('uses tau including zero before fcstprd for current and future NHC positions', async () => {
+  const point = (tau, fcstprd, lat) => ({
+    ...currentStormPoint,
+    geometry: { type: 'Point', coordinates: [-60, lat] },
+    properties: { ...currentStormPoint.properties, tau, fcstprd },
+  });
+  const payload = await runNhc({
+    previous: null,
+    nhc: async (_input, id) => Response.json(collection(id === 6 ? [
+      point(24, 0, 24),
+      point(null, 36, 26),
+      point(0, 120, 20),
+      point(undefined, 12, 22),
+    ] : [])),
+  });
+  const storm = payload.events.find(event => event.sourceName === 'NHC');
+  assert.equal(storm.lat, 20);
+  assert.deepEqual(storm.forecastTrack.map(({ hour, lat }) => ({ hour, lat })), [
+    { hour: 12, lat: 22 },
+    { hour: 24, lat: 24 },
+    { hour: 36, lat: 26 },
+  ]);
+  assert.equal(payload._nhcSnapshot.errorCode, null);
+});
+
 test('accepts time-first advisory dates across NHC time zones', async () => {
   for (const [advdate, expectedDate] of [
     ['800 AM PDT Mon Sep 07 2026', '2026-09-07T15:00:00.000Z'],
