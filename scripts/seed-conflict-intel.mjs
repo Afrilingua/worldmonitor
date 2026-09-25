@@ -809,6 +809,19 @@ async function fetchHapiRows({
       },
     );
     if (!resp.ok) {
+      const retryAfter = resp.headers.get('retry-after');
+      const seconds = retryAfter !== null && /^\d+$/.test(retryAfter) ? Number(retryAfter) : NaN;
+      const retryDate = retryAfter !== null
+        && /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(retryAfter)
+        ? Date.parse(retryAfter) : NaN;
+      console.warn(`  HAPI API rejection ${JSON.stringify({
+        status: resp.status,
+        country: /^[A-Z]{2}$/.test(countryCode ?? '') ? countryCode : 'global',
+        adminLevel: ['0', '1', '2'].includes(adminLevel) ? adminLevel : null,
+        offset,
+        retryAfterSeconds: Number.isSafeInteger(seconds) && seconds >= 0 ? seconds : null,
+        retryAfterAt: Number.isFinite(retryDate) ? new Date(retryDate).toISOString() : null,
+      })}`);
       throw await hapiResponseError(resp);
     }
 
