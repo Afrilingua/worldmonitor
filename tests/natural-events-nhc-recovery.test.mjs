@@ -374,6 +374,32 @@ test('accepts time-first advisory dates across NHC time zones', async () => {
   }
 });
 
+test('publishes Gonzalo from an NHC CVT advisory without retaining the previous storm', async () => {
+  const now = Date.parse('2026-09-25T07:02:25.376Z');
+  const point = {
+    ...currentStormPoint,
+    geometry: { type: 'Point', coordinates: [-22.3, 13.7] },
+    properties: {
+      ...currentStormPoint.properties,
+      stormname: 'Tropical Storm Gonzalo', stormnum: 7, advisnum: '1A',
+      advdate: '500 AM CVT Fri Sep 25 2026', maxwind: 40, tau: 0, fcstprd: 120,
+    },
+  };
+  const payload = await runNhc({
+    now,
+    previous: { ...previousNhcSnapshot, fetchedAt: now - MIN, lastAttemptAt: now - MIN, retainedUntil: now + MIN },
+    nhc: async (_input, id) => Response.json(collection(id === 32 ? [point] : [])),
+  });
+  const storms = payload.events.filter(event => event.sourceName === 'NHC');
+  assert.deepEqual(storms.map(event => event.id), ['nhc-AL07-1A']);
+  assert.equal(storms[0].date, Date.parse('2026-09-25T06:00:00.000Z'));
+  assert.equal(payload._nhcSnapshot.fetchedAt, now);
+  assert.equal(payload._nhcSnapshot.retainedUntil, now + 540 * MIN);
+  assert.equal(payload._nhcSnapshot.consecutiveFailures, 0);
+  assert.equal(payload._nhcSnapshot.errorCode, null);
+  assert.equal(verdict(payload, now).status, 'OK');
+});
+
 test('rejects malformed time-first NHC advisory dates', async () => {
   for (const advdate of [
     '1299 AM PDT Mon Sep 07 2026',

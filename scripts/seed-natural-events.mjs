@@ -45,6 +45,7 @@ const NHC_CONE_GEOMETRY_TYPES = new Set(['Polygon', 'MultiPolygon']);
 const NHC_ADVISORY_TIMEZONE_OFFSETS_MIN = {
   UTC: 0,
   GMT: 0,
+  CVT: -1 * 60,
   AST: -4 * 60,
   ADT: -3 * 60,
   EST: -5 * 60,
