@@ -485,6 +485,15 @@ describe('Search Console collector on live data', () => {
     assert.match(renderGscMarkdown(snapshot), /## URLs outside every family \(28d\)[\s\S]*\/download/);
   });
 
+  it('lists every unmapped URL by name, not only the top few', async () => {
+    const legacy = Array.from({ length: 25 }, (_, index) => pageRow(`https://www.worldmonitor.app/legacy-${index}`, index + 1));
+    const snapshot = await collectFrom(memoryTransport({ pageRows: legacy }));
+    const [window] = snapshot.performance.windows;
+    assert.equal(window.unmapped.urls, 25);
+    assert.equal(window.unmapped.topUrls.length, 25);
+    assert.match(renderGscMarkdown(snapshot), /legacy-0 \| 1 \|/);
+  });
+
   it('queries Search Analytics before spending any inspection quota', async () => {
     let inspections = 0;
     await assert.rejects(
@@ -558,6 +567,28 @@ describe('Search Console collector on live data', () => {
     const [exported] = toScorecardSearchExport(snapshot).windows;
     assert.equal(exported.indexedPages, null);
     assert.equal(exported.pageFamilyRows.find((row) => row.pageFamily === 'crises').indexedPages, null);
+  });
+
+  it('keeps crawled-and-declined apart from discovered-but-not-crawled', async () => {
+    const withState = (coverageState) => ({
+      inspectionResult: { indexStatusResult: { verdict: 'NEUTRAL', coverageState } },
+    });
+    const states = {
+      'https://www.worldmonitor.app/countries/chad/': withState('Crawled - currently not indexed'),
+      'https://www.worldmonitor.app/crises/sudan-conflict/': withState('Discovered - currently not indexed'),
+    };
+    const snapshot = await collectFrom(memoryTransport({
+      inspect: async (url) => states[url] ?? indexedResponse,
+    }));
+    const { htmlPages, byFamily } = snapshot.indexation;
+    assert.equal(htmlPages.crawledNotIndexed, 1, 'only the crawled URL was declined');
+    assert.equal(htmlPages.discoveredNotCrawled, 1);
+    assert.equal(htmlPages.actionable, 1, 'a URL Google never crawled is not a declined page');
+    assert.equal(byFamily.crises.crawledNotIndexed, 0);
+    assert.equal(byFamily.crises.discoveredNotCrawled, 1);
+    const markdown = renderGscMarkdown(snapshot);
+    assert.match(markdown, /HTML pages crawled and declined, serving no `noindex`: 1\n/);
+    assert.match(markdown, /HTML pages discovered but not yet crawled: 1\n/);
   });
 
   it('records a probe that fails instead of aborting the run', async () => {
