@@ -53,7 +53,7 @@ function runWorker(scenario) {
         return new Response('REF_AREA,FREQ,METHODOLOGY,MEASURE,UNIT_MEASURE,EXPENDITURE,ADJUSTMENT,TRANSFORMATION,TIME_PERIOD,OBS_VALUE,BASE_PER\\n'
           + selected.flatMap(country => periods.map(period => [country,frequency,'N','CPI','IX','_T','N','_Z',period,120,2015].join(','))).join('\\n'));
       }
-      assertRedis: if (parsed.hostname !== 'redis.test') throw new Error('Unexpected network host');
+      if (parsed.hostname !== 'redis.test') throw new Error('Unexpected network host');
       if (options.body) {
         const command = JSON.parse(options.body);
         if (Array.isArray(command[0])) return new Response(JSON.stringify(command.map(item => ({ result: redis(item) }))));
@@ -72,7 +72,7 @@ function runWorker(scenario) {
       WM_SEED_RETRY_DELAY_MS: '0',
       UPSTASH_REDIS_REST_URL: 'https://redis.test',
       UPSTASH_REDIS_REST_TOKEN: 'fake-token',
-      WM_SEED_COMPLETION_META_KEY: completionKey,
+      WM_BUNDLE_COMPLETION_META_KEY: completionKey,
     },
     encoding: 'utf8',
     timeout: 10000,
@@ -127,4 +127,42 @@ test('transient throttling recovers with the existing Retry-After backoff and so
   assert.equal(latest._seed.fetchedAt, canonical._seed.fetchedAt);
   assert.deepEqual(latest.data, canonical.data);
   assert.equal(Object.keys(canonical.data.countries).length, 49);
+  assert.equal(JSON.parse(run.store[completionKey]).fetchedAt, canonical._seed.fetchedAt);
 });
+
+function diagnostics(run) {
+  return run.logs.split('\n').filter(line => line.includes('OECD CPI request: '))
+    .map(line => JSON.parse(line.split('OECD CPI request: ')[1]));
+}
+
+test('HTTP diagnostics retain safe response identifiers without logging response bodies or arbitrary headers', () => {
+  const run = runWorker({ M: [500] });
+  const events = diagnostics(run);
+  assert.equal(events.length, 3);
+  assert.deepEqual(events.map(event => event.attempt), [1, 2, 3]);
+  for (const event of events) {
+    assert.equal(event.frequency, 'M');
+    assert.equal(event.countryCount, 49);
+    assert.equal(event.observations, 120);
+    assert.equal(event.stage, 'http');
+    assert.equal(event.status, 500);
+    assert.equal(event.contentType, 'text/plain');
+    assert.equal(event.cfRay, 'a4084cf5be192115-MRS');
+    assert.ok(event.elapsedMs >= 0);
+  }
+  assert.doesNotMatch(run.logs, /sensitive|secret-cookie-token/);
+  const unsafe = runWorker({ M: [500], unsafeHeaders: true });
+  assert.doesNotMatch(unsafe.logs, /secret/);
+  assert.ok(diagnostics(unsafe).every(event => event.cfRay === null && event.contentType === null));
+});
+
+for (const [failure, stage] of [['network', 'headers'], ['body', 'body']]) {
+  test(`${failure} failures keep the three-attempt limit and log their stage without exception text`, () => {
+    const run = runWorker({ M: [failure] });
+    assertRetained(run);
+    assert.equal(run.requests.length, 3);
+    assert.equal(diagnostics(run).length, 3);
+    assert.ok(diagnostics(run).every(event => event.stage === stage));
+    assert.doesNotMatch(run.logs, /sensitive/);
+  });
+}
