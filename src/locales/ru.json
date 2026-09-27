@@ -1087,6 +1087,11 @@
       "skipToEnd": "Skip to end"
     },
     "pizzint": {
+      "indexSource": "Индекс: World Monitor · данные заведений:",
+      "statusNormal": "НОРМА",
+      "statusNoData": "НЕТ ДАННЫХ",
+      "statusNoBaseline": "НЕТ БАЗОВОГО УРОВНЯ",
+      "vsUsual": "относительно нормы",
       "title": "Индекс пиццерий Пентагона",
       "defcon": "DEFCON {{level}}",
       "updated": "Обновлено {{timeAgo}}",

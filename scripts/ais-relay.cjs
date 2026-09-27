@@ -8081,10 +8081,44 @@ const PIZZINT_BESTTIME_VENUES = [
   { venueId: 'ven_636b324a746c7a45666534526b347432794e41455465374a496843', name: 'Nighthawk Brewery & Pizza', lat: 38.8631637, lng: -77.0624806 },
   { venueId: 'ven_67314d44325f7774795356526b3474336d515f6e6962724a496843', name: 'Pizzato Pizza', lat: 38.8806865, lng: -77.089827 },
 ];
-// Live busyness this many points above the venue's forecast for the hour is a
-// spike. PizzINT publishes no threshold of its own.
-const PIZZINT_BESTTIME_SPIKE_DELTA = 25;
 let pizzintSeedInFlight = false;
+
+// World Monitor index, identical for both providers; provider DEFCON is ignored.
+// A candidate needs >=150% of hourly usual AND >=25 busyness points of excess.
+// Require 20 elapsed minutes of fresh, distinct observations with polling gaps
+// of 9–15 minutes. Missing/closed/stale readings or a provider change reset it.
+// Each sustained venue contributes min(25, excess percent / 5) index points.
+// Sum thresholds 25/50/70/85 map to DEFCON 4/3/2/1; otherwise DEFCON 5.
+// See docs/algorithms.mdx. This is a venue-activity index, not military readiness.
+function scorePizzintLocations(locations, previous, now) {
+  const gap = now - (previous?.updatedAt || 0);
+  const priorLocations = Array.isArray(previous?.locations) ? previous.locations : [];
+  let score = 0;
+  for (const location of locations) {
+    const live = location.currentPopularity;
+    const forecast = location.forecastPopularity;
+    location.hasBaseline = Number.isFinite(forecast) && forecast > 0;
+    location.noLiveSignal = !Number.isFinite(live) || live < 0
+      || (!location.isClosedNow && live === 0 && (forecast >= 20 || !(forecast > 0)));
+    const delta = location.hasBaseline ? Math.max(0, live - forecast) : 0;
+    const observedAt = Date.parse(location.recordedAt);
+    const candidate = !location.isClosedNow && !location.noLiveSignal
+      && location.dataFreshness === 'DATA_FRESHNESS_FRESH'
+      && Number.isFinite(observedAt) && observedAt <= now && now - observedAt <= 15 * 60_000
+      && location.percentageOfUsual >= 150 && delta >= 25;
+    const prior = priorLocations.find(l => l.placeId === location.placeId && l.dataSource === location.dataSource);
+    const continues = candidate && gap >= 9 * 60_000 && gap <= 15 * 60_000
+      && prior?.anomalyStartedAt > 0 && prior.anomalyStartedAt <= previous.updatedAt
+      && observedAt > Date.parse(prior.recordedAt);
+    // Internal cache fields survive relay restarts. Old payloads have no start
+    // time and start afresh.
+    location.anomalyStartedAt = candidate ? (continues ? prior.anomalyStartedAt : now) : 0;
+    location.isSpike = candidate && now - location.anomalyStartedAt >= 20 * 60_000;
+    location.spikeMagnitude = location.isSpike ? delta : 0;
+    if (location.isSpike) score += Math.min(25, (location.percentageOfUsual - 100) / 5);
+  }
+  return Math.min(100, score);
+}
 
 function pizzintLocationFromBestTime(venue, reply) {
   const analysis = reply?.analysis || {};
@@ -8094,15 +8128,13 @@ function pizzintLocationFromBestTime(venue, reply) {
   const forecast = analysis.venue_forecasted_busyness;
   const hasForecast = analysis.venue_forecast_busyness_available === true
     && typeof forecast === 'number' && Number.isFinite(forecast) && forecast > 0;
-  const delta = hasForecast ? live - forecast : 0;
   return {
     placeId: venue.venueId,
     name: venue.name,
     address: typeof info.venue_address === 'string' ? info.venue_address : '',
     currentPopularity: live,
     percentageOfUsual: hasForecast ? Math.round((live / forecast) * 100) : 0,
-    isSpike: delta >= PIZZINT_BESTTIME_SPIKE_DELTA,
-    spikeMagnitude: Math.max(0, delta),
+    forecastPopularity: hasForecast ? forecast : 0,
     dataSource: 'besttime',
     recordedAt: new Date(Date.now()).toISOString(),
     dataFreshness: 'DATA_FRESHNESS_FRESH',
@@ -8185,8 +8217,11 @@ async function seedPizzint() {
       address: d.address || '',
       currentPopularity: typeof d.current_popularity === 'number' ? d.current_popularity : 0,
       percentageOfUsual: typeof d.percentage_of_usual === 'number' ? d.percentage_of_usual : 0,
-      isSpike: !!d.is_spike,
-      spikeMagnitude: typeof d.spike_magnitude === 'number' ? d.spike_magnitude : 0,
+      // Recover the hourly baseline from PizzINT's published ratio. A zero
+      // ratio cannot identify a baseline; keep it unknown rather than invent one.
+      forecastPopularity: Number.isFinite(d.percentage_of_usual) && d.percentage_of_usual > 0
+        && Number.isFinite(d.current_popularity) && d.current_popularity > 0
+        ? d.current_popularity * 100 / d.percentage_of_usual : 0,
       dataSource: d.data_source || '',
       recordedAt: d.recorded_at || '',
       dataFreshness: d.data_freshness === 'fresh' ? 'DATA_FRESHNESS_FRESH' : 'DATA_FRESHNESS_STALE',
@@ -8195,15 +8230,18 @@ async function seedPizzint() {
       lng: d.lng ?? 0,
     }));
 
-    const openLocations = locations.filter((l) => !l.isClosedNow);
+    const previous = await envelopeRead(PIZZINT_REDIS_KEY);
+    const adjusted = scorePizzintLocations(locations, previous?.pizzint, Date.now());
+    if (locations.every(l => l.noLiveSignal)) {
+      console.warn('[PizzINT] No live signals; preserving last good observation');
+      return;
+    }
+    const openLocations = locations.filter((l) => !l.isClosedNow && !l.noLiveSignal);
     const activeSpikes = locations.filter((l) => l.isSpike).length;
     const avgPop = openLocations.length > 0
       ? openLocations.reduce((s, l) => s + l.currentPopularity, 0) / openLocations.length
       : 0;
 
-    let adjusted = avgPop;
-    if (activeSpikes > 0) adjusted += activeSpikes * 10;
-    adjusted = Math.min(100, adjusted);
     let defconLevel = 5;
     let defconLabel = 'Normal Activity';
     if (adjusted >= 85) { defconLevel = 1; defconLabel = 'Maximum Activity'; }

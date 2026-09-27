@@ -1078,6 +1078,11 @@
       "skipToEnd": "Skip to end"
     },
     "pizzint": {
+      "indexSource": "지수: World Monitor · 매장 데이터:",
+      "statusNormal": "정상",
+      "statusNoData": "데이터 없음",
+      "statusNoBaseline": "기준 없음",
+      "vsUsual": "평소 대비",
       "title": "펜타곤 피자 지수",
       "defcon": "DEFCON {{level}}",
       "updated": "{{timeAgo}} 업데이트",

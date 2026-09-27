@@ -1222,6 +1222,11 @@
       "skipToEnd": "Ugrás a végére"
     },
     "pizzint": {
+      "indexSource": "Index: World Monitor · helyadatok:",
+      "statusNormal": "NORMÁL",
+      "statusNoData": "NINCS ADAT",
+      "statusNoBaseline": "NINCS VISZONYÍTÁSI ALAP",
+      "vsUsual": "a szokásoshoz képest",
       "title": "Pentagon Pizza Index",
       "defcon": "DEFCON {{level}}",
       "updated": "Frissítve: {{timeAgo}}",

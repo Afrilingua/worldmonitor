@@ -1230,6 +1230,11 @@
       "skipToEnd": "Skip to end"
     },
     "pizzint": {
+      "indexSource": "Індекс: World Monitor · дані закладів:",
+      "statusNormal": "НОРМА",
+      "statusNoData": "НЕМАЄ ДАНИХ",
+      "statusNoBaseline": "НЕМАЄ БАЗОВОГО РІВНЯ",
+      "vsUsual": "відносно норми",
       "title": "Pentagon Pizza Index",
       "defcon": "DEFCON {{level}}",
       "updated": "Updated {{timeAgo}}",

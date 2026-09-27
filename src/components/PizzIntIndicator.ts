@@ -1,4 +1,4 @@
-import type { PizzIntStatus, GdeltTensionPair } from '@/types';
+import type { PizzIntLocation, PizzIntStatus, GdeltTensionPair } from '@/types';
 import { t } from '@/services/i18n';
 import { h, replaceChildren } from '@/utils/dom-utils';
 import tensionPairs from '../../shared/gdelt-tension-pairs.json';
@@ -37,7 +37,7 @@ export class PizzIntIndicator {
       ),
       h('div', { className: 'pizzint-footer' },
         h('span', { className: 'pizzint-source' },
-          t('components.pizzint.source'), ' ',
+          t('components.pizzint.indexSource'), ' ',
           h('a', { href: 'https://www.pizzint.watch', target: '_blank', rel: 'noopener' }, 'PizzINT'),
         ),
         h('span', { className: 'pizzint-updated' }),
@@ -52,7 +52,6 @@ export class PizzIntIndicator {
       },
         h('span', { className: 'pizzint-icon' }, '🍕'),
         h('span', { className: 'pizzint-defcon' }, '--'),
-        h('span', { className: 'pizzint-score' }, '--%'),
       ),
       panel,
     );
@@ -73,7 +72,6 @@ export class PizzIntIndicator {
     if (!this.status) return;
 
     const defconEl = this.element.querySelector('.pizzint-defcon') as HTMLElement;
-    const scoreEl = this.element.querySelector('.pizzint-score') as HTMLElement;
     const labelEl = this.element.querySelector('.pizzint-defcon-label') as HTMLElement;
     const locationsEl = this.element.querySelector('.pizzint-locations') as HTMLElement;
     const updatedEl = this.element.querySelector('.pizzint-updated') as HTMLElement;
@@ -81,7 +79,6 @@ export class PizzIntIndicator {
       defconEl.textContent = '--';
       defconEl.style.background = '';
       defconEl.style.color = '';
-      scoreEl.textContent = '--';
       labelEl.textContent = t('components.pizzint.pizzaUnavailable');
       labelEl.style.color = '';
       replaceChildren(locationsEl);
@@ -103,7 +100,6 @@ export class PizzIntIndicator {
     // blue #00aaff→8.2:1); white failed on levels 4–5 (4.22:1 / 2.56:1).
     defconEl.style.color = '#000';
 
-    scoreEl.textContent = `${this.status.aggregateActivity}%`;
     labelEl.textContent = this.getDefconLabel(this.status.defconLevel);
     labelEl.style.color = color;
 
@@ -144,22 +140,21 @@ export class PizzIntIndicator {
     );
   }
 
-  private getStatusClass(loc: { is_closed_now: boolean; is_spike: boolean; current_popularity: number }): string {
+  private getStatusClass(loc: PizzIntLocation): string {
     if (loc.is_closed_now) return 'closed';
+    if (loc.no_live_signal) return 'closed';
     if (loc.is_spike) return 'spike';
-    if (loc.current_popularity >= 70) return 'high';
-    if (loc.current_popularity >= 40) return 'elevated';
-    if (loc.current_popularity >= 15) return 'nominal';
-    return 'quiet';
+    return 'nominal';
   }
 
-  private getStatusLabel(loc: { is_closed_now: boolean; is_spike: boolean; current_popularity: number }): string {
+  private getStatusLabel(loc: PizzIntLocation): string {
     if (loc.is_closed_now) return t('components.pizzint.statusClosed');
-    if (loc.is_spike) return `${t('components.pizzint.statusSpike')} ${loc.current_popularity}%`;
-    if (loc.current_popularity >= 70) return `${t('components.pizzint.statusHigh')} ${loc.current_popularity}%`;
-    if (loc.current_popularity >= 40) return `${t('components.pizzint.statusElevated')} ${loc.current_popularity}%`;
-    if (loc.current_popularity >= 15) return `${t('components.pizzint.statusNominal')} ${loc.current_popularity}%`;
-    return `${t('components.pizzint.statusQuiet')} ${loc.current_popularity}%`;
+    if (loc.no_live_signal) return t('components.pizzint.statusNoData');
+    if (loc.percentage_of_usual === null) return t('components.pizzint.statusNoBaseline');
+    const deviation = Math.round(loc.percentage_of_usual - 100);
+    if (loc.is_spike) return `${t('components.pizzint.statusSpike')} +${deviation}%`;
+    if (Math.abs(deviation) <= 10) return t('components.pizzint.statusNormal');
+    return `${deviation > 0 ? '+' : '−'}${Math.abs(deviation)}% ${t('components.pizzint.vsUsual')}`;
   }
 
   private formatTimeAgo(date: Date): string {

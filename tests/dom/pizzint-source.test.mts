@@ -20,11 +20,26 @@ it('switches source attribution during fallback and restores it on recovery', ()
   };
   const source = () => indicator.getElement().querySelector<HTMLAnchorElement>('.pizzint-source a')!;
   indicator.updateStatus(status);
+  expect(indicator.getElement().querySelector('.pizzint-score')).toBeNull();
+  expect(indicator.getElement().querySelector('.pizzint-source')!.textContent).toContain('components.pizzint.indexSource');
   expect(source().textContent).toBe('BestTime');
   expect(source().href).toBe('https://besttime.app/');
   indicator.updateStatus({ ...status, locations: status.locations.map(loc => ({ ...loc, data_source: 'google' })) });
   expect(source().textContent).toBe('PizzINT');
   expect(source().href).toBe('https://www.pizzint.watch/');
+  const label = () => indicator.getElement().querySelector('.pizzint-location-status')!.textContent;
+  status.locations[0] = { ...status.locations[0]!, current_popularity: 100, percentage_of_usual: 100 };
+  indicator.updateStatus(status);
+  expect(label()).toBe('components.pizzint.statusNormal');
+  status.locations[0] = { ...status.locations[0]!, current_popularity: 70, percentage_of_usual: 156, is_spike: true };
+  indicator.updateStatus(status);
+  expect(label()).toBe('components.pizzint.statusSpike +56%');
+  status.locations[0] = { ...status.locations[0]!, current_popularity: 0, percentage_of_usual: null, is_spike: false, no_live_signal: true };
+  indicator.updateStatus(status);
+  expect(label()).toBe('components.pizzint.statusNoData');
+  status.locations[0] = { ...status.locations[0]!, percentage_of_usual: 0, no_live_signal: false };
+  indicator.updateStatus(status);
+  expect(label()).toBe('−100% components.pizzint.vsUsual');
 });
 
 it('shows World Monitor tensions and missing-data states when pizza is unavailable', () => {

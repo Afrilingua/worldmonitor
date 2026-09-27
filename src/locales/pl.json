@@ -1276,6 +1276,11 @@
       "info": "INFO"
     },
     "pizzint": {
+      "indexSource": "Indeks: World Monitor · dane lokali:",
+      "statusNormal": "NORMALNIE",
+      "statusNoData": "BRAK DANYCH",
+      "statusNoBaseline": "BRAK POZIOMU ODNIESIENIA",
+      "vsUsual": "względem normy",
       "title": "Indeks pizzy Pentagonu",
       "tensionsTitle": "Napięcia geopolityczne",
       "tensionsSource": "Napięcia: World Monitor na podstawie zdarzeń GDELT",

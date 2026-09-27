@@ -1078,6 +1078,11 @@
       "skipToEnd": "Skip to end"
     },
     "pizzint": {
+      "indexSource": "指数: World Monitor · 店舗データ:",
+      "statusNormal": "通常",
+      "statusNoData": "データなし",
+      "statusNoBaseline": "基準なし",
+      "vsUsual": "通常比",
       "title": "ペンタゴンピザ指数",
       "defcon": "DEFCON {{level}}",
       "updated": "{{timeAgo}}に更新",

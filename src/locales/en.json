@@ -1222,6 +1222,11 @@
       "skipToEnd": "Skip to end"
     },
     "pizzint": {
+      "indexSource": "Index: World Monitor · venue data:",
+      "statusNormal": "NORMAL",
+      "statusNoData": "NO DATA",
+      "statusNoBaseline": "NO BASELINE",
+      "vsUsual": "vs usual",
       "title": "Pentagon Pizza Index",
       "defcon": "DEFCON {{level}}",
       "updated": "Updated {{timeAgo}}",

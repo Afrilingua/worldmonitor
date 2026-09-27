@@ -1081,6 +1081,11 @@
       "skipToEnd": "Skip to end"
     },
     "pizzint": {
+      "indexSource": "Endeks: World Monitor · mekân verileri:",
+      "statusNormal": "NORMAL",
+      "statusNoData": "VERİ YOK",
+      "statusNoBaseline": "REFERANS YOK",
+      "vsUsual": "olağana göre",
       "title": "Pentagon Pizza Endeksi",
       "defcon": "DEFCON {{level}}",
       "updated": "{{timeAgo}} guncellendi",

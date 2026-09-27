@@ -1222,6 +1222,11 @@
       "skipToEnd": "Ruka hadi mwisho"
     },
     "pizzint": {
+      "indexSource": "Faharasa: World Monitor · data za maeneo:",
+      "statusNormal": "KAWAIDA",
+      "statusNoData": "HAKUNA DATA",
+      "statusNoBaseline": "HAKUNA MSINGI",
+      "vsUsual": "dhidi ya kawaida",
       "title": "Pentagon Pizza Index",
       "defcon": "DEFCON {{level}}",
       "updated": "Ilisasishwa {{timeAgo}}",

@@ -1078,6 +1078,11 @@
       "skipToEnd": "Tới cuối"
     },
     "pizzint": {
+      "indexSource": "Chỉ số: World Monitor · dữ liệu địa điểm:",
+      "statusNormal": "BÌNH THƯỜNG",
+      "statusNoData": "KHÔNG CÓ DỮ LIỆU",
+      "statusNoBaseline": "KHÔNG CÓ MỐC CHUẨN",
+      "vsUsual": "so với thường lệ",
       "title": "Chỉ số Pizza Lầu Năm Góc",
       "defcon": "DEFCON {{level}}",
       "updated": "Cập nhật {{timeAgo}}",

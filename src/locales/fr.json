@@ -1035,6 +1035,11 @@
       "skipToEnd": "Skip to end"
     },
     "pizzint": {
+      "indexSource": "Indice : World Monitor · données des lieux :",
+      "statusNormal": "NORMAL",
+      "statusNoData": "AUCUNE DONNÉE",
+      "statusNoBaseline": "SANS RÉFÉRENCE",
+      "vsUsual": "par rapport à la normale",
       "title": "Index des pizzas du Pentagone",
       "defcon": "DEFCON {{level}}",
       "updated": "{{timeAgo}} mis à jour",
