@@ -293,3 +293,23 @@ test('ignores a BestTime error response even when its body looks like a live rea
   const { pizzint } = state.cache.get(payloadKey).data.data ?? state.cache.get(payloadKey).data;
   assert.deepEqual(pizzint.locations.map((l) => l.placeId), [ids[1]]);
 });
+
+// 2026-09-27: the public key was set as BESTTIME_API_KEY_PRIVATE. BestTime answered
+// every venue HTTP 400 "Invalid private API key", which logged as "no live readings".
+test('reports a rejected BestTime request instead of calling it no live readings', async () => {
+  const { state, seed } = harness();
+  state.source = emptyResponse;
+  state.env.BESTTIME_API_KEY_PRIVATE = BESTTIME_KEY;
+  await seed();
+  const ids = state.besttimeCalls.map(({ url }) => new URL(url).searchParams.get('venue_id'));
+  for (const id of ids) {
+    state.besttime.set(id, { ok: false, status: 400, json: async () => ({ status: 'Error', message: `Error: Invalid private API key ${BESTTIME_KEY}` }) });
+  }
+  state.warnings.length = 0;
+  await seed();
+  assert.deepEqual(state.warnings.at(-1), [
+    `[PizzINT] BestTime fallback: no live readings (0/${ids.length} venues; ${ids.length} rejected: HTTP 400 Error: Invalid private API key ***); preserving last good observation`,
+  ]);
+  assert.doesNotMatch(JSON.stringify(state.warnings), /pri_test_secret_value/);
+});
+

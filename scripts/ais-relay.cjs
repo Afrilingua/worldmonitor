@@ -8119,6 +8119,9 @@ function pizzintLocationFromBestTime(venue, reply) {
 // none. The private key travels only in the request URL, which is never logged.
 async function fetchPizzintBestTimeLocations(apiKey) {
   const locations = [];
+  // A rejected request (bad key, quota) must not read as "no live readings".
+  let rejected = 0;
+  let rejection = '';
   for (const venue of PIZZINT_BESTTIME_VENUES) {
     const url = `${PIZZINT_BESTTIME_LIVE_API}?api_key_private=${encodeURIComponent(apiKey)}&venue_id=${encodeURIComponent(venue.venueId)}`;
     try {
@@ -8127,16 +8130,25 @@ async function fetchPizzintBestTimeLocations(apiKey) {
         headers: { Accept: 'application/json', 'User-Agent': CHROME_UA },
         signal: AbortSignal.timeout(15_000),
       });
-      if (!resp.ok) continue;
+      if (!resp.ok) {
+        rejected++;
+        if (!rejection) {
+          const body = await resp.json().catch(() => null);
+          const message = typeof body?.message === 'string' ? body.message : '';
+          rejection = `HTTP ${Number(resp.status) || 0}${message ? ` ${message.split(apiKey).join('***').slice(0, 120)}` : ''}`;
+        }
+        continue;
+      }
       const location = pizzintLocationFromBestTime(venue, await resp.json());
       if (location) locations.push(location);
     } catch { /* one venue's failure never blocks the others */ }
   }
+  const rejectedNote = rejected ? `; ${rejected} rejected: ${rejection}` : '';
   if (locations.length === 0) {
-    console.warn(`[PizzINT] BestTime fallback: no live readings (0/${PIZZINT_BESTTIME_VENUES.length} venues); preserving last good observation`);
+    console.warn(`[PizzINT] BestTime fallback: no live readings (0/${PIZZINT_BESTTIME_VENUES.length} venues${rejectedNote}); preserving last good observation`);
     return null;
   }
-  console.log(`[PizzINT] BestTime fallback: ${locations.length}/${PIZZINT_BESTTIME_VENUES.length} venues live`);
+  console.log(`[PizzINT] BestTime fallback: ${locations.length}/${PIZZINT_BESTTIME_VENUES.length} venues live${rejectedNote}`);
   return locations;
 }
 
