@@ -1,6 +1,7 @@
 import type { PizzIntStatus, GdeltTensionPair } from '@/types';
 import { t } from '@/services/i18n';
 import { h, replaceChildren } from '@/utils/dom-utils';
+import tensionPairs from '../../shared/gdelt-tension-pairs.json';
 
 const DEFCON_COLORS: Record<number, string> = {
   1: '#ff0040',
@@ -32,6 +33,7 @@ export class PizzIntIndicator {
       h('div', { className: 'pizzint-tensions' },
         h('div', { className: 'pizzint-tensions-title' }, t('components.pizzint.tensionsTitle')),
         h('div', { className: 'pizzint-tensions-list' }),
+        h('div', { className: 'pizzint-tensions-source' }, t('components.pizzint.tensionsSource')),
       ),
       h('div', { className: 'pizzint-footer' },
         h('span', { className: 'pizzint-source' },
@@ -75,6 +77,17 @@ export class PizzIntIndicator {
     const labelEl = this.element.querySelector('.pizzint-defcon-label') as HTMLElement;
     const locationsEl = this.element.querySelector('.pizzint-locations') as HTMLElement;
     const updatedEl = this.element.querySelector('.pizzint-updated') as HTMLElement;
+    if (this.status.locationsMonitored === 0) {
+      defconEl.textContent = '--';
+      defconEl.style.background = '';
+      defconEl.style.color = '';
+      scoreEl.textContent = '--';
+      labelEl.textContent = t('components.pizzint.pizzaUnavailable');
+      labelEl.style.color = '';
+      replaceChildren(locationsEl);
+      updatedEl.textContent = '';
+      return;
+    }
 
     const sourceEl = this.element.querySelector<HTMLAnchorElement>('.pizzint-source a');
     if (sourceEl) {
@@ -112,7 +125,12 @@ export class PizzIntIndicator {
     if (!listEl) return;
 
     replaceChildren(listEl,
-      ...this.tensions.map(tp => {
+      ...tensionPairs.map(config => {
+        const tp = this.tensions.find(pair => pair.id === config.id);
+        if (!tp) return h('div', { className: 'pizzint-tension-row' },
+          h('span', { className: 'pizzint-tension-label' }, config.label),
+          h('span', { className: 'pizzint-tension-score' }, t('components.pizzint.insufficientData')),
+        );
         const trendIcon = tp.trend === 'rising' ? '↑' : tp.trend === 'falling' ? '↓' : '→';
         const changeText = tp.changePercent > 0 ? `+${tp.changePercent}%` : `${tp.changePercent}%`;
         return h('div', { className: 'pizzint-tension-row' },

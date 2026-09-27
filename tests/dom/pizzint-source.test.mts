@@ -26,3 +26,18 @@ it('switches source attribution during fallback and restores it on recovery', ()
   expect(source().textContent).toBe('PizzINT');
   expect(source().href).toBe('https://www.pizzint.watch/');
 });
+
+it('shows World Monitor tensions and missing-data states when pizza is unavailable', () => {
+  const indicator = new PizzIntIndicator();
+  indicator.updateStatus({ defconLevel: 5, defconLabel: '', aggregateActivity: 0,
+    activeSpikes: 0, locationsMonitored: 0, locationsOpen: 0, lastUpdate: new Date(),
+    dataFreshness: 'stale', locations: [] });
+  indicator.updateTensions([{ id: 'usa_russia', countries: ['US', 'RU'], label: 'US–Russia',
+    score: 50, trend: 'stable', changePercent: 0, region: 'global' }]);
+  const element = indicator.getElement();
+  expect(element.querySelector('.pizzint-defcon')?.textContent).toBe('--');
+  expect(element.querySelectorAll('.pizzint-tension-row')).toHaveLength(4);
+  expect(element.querySelector('.pizzint-tension-value')?.textContent).toBe('50.0');
+  expect(element.textContent).toContain('components.pizzint.insufficientData');
+  expect(element.textContent).toContain('components.pizzint.tensionsSource');
+});

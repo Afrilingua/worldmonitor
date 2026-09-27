@@ -8084,9 +8084,6 @@ const PIZZINT_BESTTIME_VENUES = [
 // Live busyness this many points above the venue's forecast for the hour is a
 // spike. PizzINT publishes no threshold of its own.
 const PIZZINT_BESTTIME_SPIKE_DELTA = 25;
-const GDELT_BATCH_API = 'https://www.pizzint.watch/api/gdelt/batch';
-const DEFAULT_GDELT_PAIRS = 'usa_russia,russia_ukraine,usa_china,china_taiwan,usa_iran,usa_venezuela';
-const GDELT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 let pizzintSeedInFlight = false;
 
 function pizzintLocationFromBestTime(venue, reply) {
@@ -8228,43 +8225,10 @@ async function seedPizzint() {
       locations,
     };
 
-    // Fetch GDELT tensions (non-fatal if unavailable)
-    let tensionPairs = [];
-    try {
-      // The endpoint requires a YYYYMMDD window and 400s without one.
-      const gdeltDate = (ms) => new Date(ms).toISOString().slice(0, 10).replace(/-/g, '');
-      const gdeltUrl = `${GDELT_BATCH_API}?pairs=${encodeURIComponent(DEFAULT_GDELT_PAIRS)}&method=gpr`
-        + `&dateStart=${gdeltDate(Date.now() - GDELT_WINDOW_MS)}&dateEnd=${gdeltDate(Date.now())}`;
-      const gdeltResp = await fetch(gdeltUrl, {
-        headers: { Accept: 'application/json', 'User-Agent': CHROME_UA },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!gdeltResp.ok) console.warn(`[PizzINT] GDELT tensions request rejected (HTTP ${Number(gdeltResp.status) || 0})`);
-      if (gdeltResp.ok) {
-        const gdeltRaw = await gdeltResp.json();
-        tensionPairs = Object.entries(gdeltRaw).map(([pairKey, dataPoints]) => {
-          const countries = pairKey.split('_');
-          const latest = dataPoints[dataPoints.length - 1];
-          const prev = dataPoints.length > 1 ? dataPoints[dataPoints.length - 2] : latest;
-          const change = prev && prev.v > 0 ? ((latest.v - prev.v) / prev.v) * 100 : 0;
-          const trend = change > 5 ? 'TREND_DIRECTION_RISING' : change < -5 ? 'TREND_DIRECTION_FALLING' : 'TREND_DIRECTION_STABLE';
-          return {
-            id: pairKey,
-            countries,
-            label: countries.map((c) => c.toUpperCase()).join(' - '),
-            score: latest?.v ?? 0,
-            trend,
-            changePercent: Math.round(change * 10) / 10,
-            region: 'global',
-          };
-        });
-      }
-    } catch { /* GDELT unavailable — non-fatal */ }
-
-    const payload = { pizzint, tensionPairs };
+    const payload = { pizzint, tensionPairs: [] };
     const ok1 = await envelopeWrite(PIZZINT_REDIS_KEY, payload, PIZZINT_SEED_TTL, { recordCount: locations.length, sourceVersion: fallback ? 'besttime-live' : 'pizzint' });
     const ok2 = ok1 && await upstashSet('seed-meta:intelligence:pizzint', { fetchedAt: Date.now(), recordCount: locations.length }, 604800);
-    console.log(`[PizzINT] Seeded ${locations.length} locations (open:${openLocations.length} spikes:${activeSpikes} defcon:${defconLevel} gdelt:${tensionPairs.length} redis:${ok1 && ok2 ? 'OK' : 'PARTIAL'}) in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    console.log(`[PizzINT] Seeded ${locations.length} locations (open:${openLocations.length} spikes:${activeSpikes} defcon:${defconLevel} redis:${ok1 && ok2 ? 'OK' : 'PARTIAL'}) in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   } catch (e) {
     console.warn('[PizzINT] Seed error:', e?.message || e);
   } finally {

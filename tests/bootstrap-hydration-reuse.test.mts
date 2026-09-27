@@ -49,6 +49,7 @@ type Harness = {
     dataFreshness: 'fresh' | 'stale';
     lastUpdate: Date;
   }>;
+  fetchGdeltTensions: () => Promise<Array<{ score: number }>>;
   fetchChokepointStatus: () => Promise<{
     chokepoints: Array<{ id: string }>;
     fetchedAt: string;
@@ -212,7 +213,7 @@ before(async () => {
         "export { fetchDiseaseOutbreaks } from './src/services/disease-outbreaks.ts';",
         "export { fetchImdCycloneMarine } from './src/services/imd-cyclone-marine.ts';",
         "export { fetchSanctionsPressure } from './src/services/sanctions-pressure.ts';",
-        "export { fetchPizzIntStatus } from './src/services/pizzint.ts';",
+        "export { fetchPizzIntStatus, fetchGdeltTensions } from './src/services/pizzint.ts';",
         "export { fetchChokepointStatus, refreshChokepointStatusAfterHydration } from './src/services/supply-chain/index.ts';",
         "export { fetchConsumerPriceOverview, fetchConsumerPriceCategories, fetchConsumerPriceMovers, fetchRetailerPriceSpreads } from './src/services/consumer-prices/index.ts';",
         "export { createHydrationHandoff } from './src/services/hydration-handoff.ts';",
@@ -732,6 +733,17 @@ describe('bootstrap hydration reuse (#7048)', () => {
     assert.equal(recovered.dataFreshness, 'fresh');
     assert.deepEqual(cached, recovered);
     assert.equal(rpcUrlCount(requests), 1, 'stale hydration must retry once and cache only the fresh result');
+  });
+
+  it('GDELT tensions: every refresh rechecks the server instead of serving a browser cache', async () => {
+    let score = 50;
+    const requests = bootstrapStub({}, () => ({ tensionPairs: [{ id: 'usa_russia',
+      countries: ['US', 'RU'], label: 'US–Russia', score,
+      trend: 'TREND_DIRECTION_STABLE', changePercent: 0, region: 'global' }] }));
+    assert.equal((await harness.fetchGdeltTensions())[0]?.score, 50);
+    score = 75;
+    assert.equal((await harness.fetchGdeltTensions())[0]?.score, 75);
+    assert.equal(rpcUrlCount(requests), 2);
   });
 
   it('chokepoints: degraded hydration renders promptly, refreshes once, and remains retryable', async () => {

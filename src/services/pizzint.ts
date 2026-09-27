@@ -22,11 +22,11 @@ const pizzintBreaker = createCircuitBreaker<PizzIntStatus>({
 });
 
 const gdeltBreaker = createCircuitBreaker<GdeltTensionPair[]>({
-  name: 'GDELT Tensions',
+  name: 'WM GDELT Dyad Tensions v1',
   maxFailures: 3,
   cooldownMs: 5 * 60 * 1000,
-  cacheTtlMs: 15 * 60 * 1000,
-  persistCache: true,
+  cacheTtlMs: 0,
+  persistCache: false,
 });
 
 // ---- Proto → legacy adapters ----
@@ -147,7 +147,7 @@ export async function fetchGdeltTensions(): Promise<GdeltTensionPair[]> {
   return gdeltBreaker.execute(async () => {
     const resp: GetPizzintStatusResponse = await getClient().getPizzintStatus({ includeGdelt: true });
     return resp.tensionPairs.map(toTensionPair);
-  }, []);
+  }, [], { shouldCache: () => false });
 }
 
 export function getPizzIntStatus(): string {

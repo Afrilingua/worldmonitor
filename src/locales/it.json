@@ -1312,6 +1312,9 @@
     "pizzint": {
       "title": "Indice Pizza del Pentagono",
       "tensionsTitle": "Tensioni geopolitiche",
+      "tensionsSource": "Tensioni: World Monitor dai dati sugli eventi GDELT",
+      "insufficientData": "Dati insufficienti",
+      "pizzaUnavailable": "Attività delle pizzerie non disponibile",
       "source": "Fonte:",
       "defcon": "DEFCON {{level}}",
       "updated": "Aggiornato {{timeAgo}}",

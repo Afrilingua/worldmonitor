@@ -139,29 +139,23 @@ test('a sustained empty source still expires the payload and fails the real heal
   assert.ok(['warn', 'crit'].includes(health.STATUS_COUNTS[expired.status]));
 });
 
-// The GDELT batch endpoint rejects a request without a window (400 "Missing
-// required query parameters: pairs, method, dateStart, dateEnd") and validates
-// "Invalid date format. Expected YYYYMMDD." — observed live 2026-09-26.
-test('requests GDELT tensions with the YYYYMMDD window the endpoint requires', async () => {
+// Tensions are published by the bulk materializer independently of pizza.
+test('does not request or publish PizzINT GDELT tensions', async () => {
   const { state, seed } = harness();
   state.gdelt = { ok: true, status: 200, json: async () => ({
     usa_iran: [{ t: '20260924', v: 2 }, { t: '20260925', v: 3 }],
   }) };
   await seed();
-  const gdeltUrl = new URL(state.urls.find((url) => url.includes('gdelt/batch')));
-  assert.equal(gdeltUrl.searchParams.get('method'), 'gpr');
-  assert.equal(gdeltUrl.searchParams.get('dateEnd'), '20260925');
-  assert.equal(gdeltUrl.searchParams.get('dateStart'), '20260826');
+  assert.equal(state.urls.some((url) => url.includes('gdelt/batch')), false);
   const payload = JSON.stringify(state.cache.get(payloadKey).data);
-  assert.match(payload, /"id":"usa_iran"/);
-  assert.match(payload, /"changePercent":50/);
+  assert.match(payload, /"tensionPairs":\[\]/);
 });
 
-test('reports a rejected GDELT request by status without logging its body', async () => {
+test('a broken PizzINT GDELT endpoint has no effect on pizza publication', async () => {
   const { state, seed } = harness();
   state.gdelt = { ok: false, status: 400, json: async () => ({ error: 'synthetic-secret' }) };
   await seed();
-  assert.deepEqual(state.warnings, [['[PizzINT] GDELT tensions request rejected (HTTP 400)']]);
+  assert.deepEqual(state.warnings, []);
   assert.ok(state.writes.includes(payloadKey), 'a GDELT failure never blocks the PizzINT publication');
 });
 
@@ -312,4 +306,3 @@ test('reports a rejected BestTime request instead of calling it no live readings
   ]);
   assert.doesNotMatch(JSON.stringify(state.warnings), /pri_test_secret_value/);
 });
-

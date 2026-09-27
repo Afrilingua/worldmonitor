@@ -772,6 +772,9 @@
     "pizzint": {
       "title": "Pentagon Pizza Index",
       "tensionsTitle": "Geopolitiska spänningar",
+      "tensionsSource": "Spänningar: World Monitor utifrån GDELT-händelser",
+      "insufficientData": "Otillräckliga data",
+      "pizzaUnavailable": "Pizzeriornas aktivitet är inte tillgänglig",
       "source": "Källa:",
       "defcon": "DEFCON {{level}}",
       "updated": "Uppdaterad {{timeAgo}}",
