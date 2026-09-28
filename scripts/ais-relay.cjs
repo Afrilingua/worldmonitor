@@ -89,6 +89,7 @@ const {
   summarizeServedCoverage,
 } = require('./_ingestion-coverage.cjs');
 const { maintainClosedMarketEquityKeys: maintainClosedMarketEquityKeysWithDeps } = require('./shared/closed-market-equity-maintenance.cjs');
+const { recordPizzintHistory } = require('./shared/pizzint-history.cjs');
 const { getUsEquitySession, isMultiMarketEquityTradingDay } = require('./shared/market-hours.cjs');
 const { mergeLastGoodQuotes, planYahooRefresh, resolveMergedQuotesAsOf } = require('./shared/market-quote-refresh.cjs');
 // ESM module loaded via require(esm) (Node >= 22.12; relay image is node:24).
@@ -717,6 +718,8 @@ function upstashEval(script, keys, args) {
       timeout: 5000,
     }, (resp) => {
       let data = '';
+      resp.on('error', () => resolve(null));
+      resp.on('aborted', () => resolve(null));
       resp.on('data', (chunk) => { data += chunk; });
       resp.on('end', () => {
         try { resolve(JSON.parse(data)?.result); } catch { resolve(null); }
@@ -8144,10 +8147,10 @@ function pizzintLocationFromBestTime(venue, reply) {
   };
 }
 
-// Returns locations for the venues with a live reading, or null when there is
-// none. The private key travels only in the request URL, which is never logged.
+// The private key travels only in the request URL, which is never logged.
 async function fetchPizzintBestTimeLocations(apiKey) {
   const locations = [];
+  const historyLocations = [];
   // A rejected request (bad key, quota) must not read as "no live readings".
   let rejected = 0;
   let rejection = '';
@@ -8168,23 +8171,39 @@ async function fetchPizzintBestTimeLocations(apiKey) {
         }
         continue;
       }
-      const location = pizzintLocationFromBestTime(venue, await resp.json());
-      if (location) locations.push(location);
+      const reply = await resp.json();
+      const location = pizzintLocationFromBestTime(venue, reply);
+      if (location) {
+        locations.push(location);
+        historyLocations.push(location);
+      } else {
+        historyLocations.push({
+          placeId: venue.venueId,
+          currentPopularity: null,
+          forecastPopularity: reply?.analysis?.venue_forecast_busyness_available === true && Number.isFinite(reply?.analysis?.venue_forecasted_busyness) ? reply.analysis.venue_forecasted_busyness : null,
+          dataSource: 'besttime',
+          recordedAt: '',
+          dataFreshness: 'DATA_FRESHNESS_FRESH',
+          isClosedNow: reply?.venue_info?.venue_open === 'Closed',
+          noLiveSignal: true,
+        });
+      }
     } catch { /* one venue's failure never blocks the others */ }
   }
   const rejectedNote = rejected ? `; ${rejected} rejected: ${rejection}` : '';
   if (locations.length === 0) {
     console.warn(`[PizzINT] BestTime fallback: no live readings (0/${PIZZINT_BESTTIME_VENUES.length} venues${rejectedNote}); preserving last good observation`);
-    return null;
+    return historyLocations.length ? { locations, historyLocations } : null;
   }
   console.log(`[PizzINT] BestTime fallback: ${locations.length}/${PIZZINT_BESTTIME_VENUES.length} venues live${rejectedNote}`);
-  return locations;
+  return { locations, historyLocations };
 }
 
 async function seedPizzint() {
   if (pizzintSeedInFlight) return;
   pizzintSeedInFlight = true;
   const t0 = Date.now();
+  let archive;
   try {
     let raw = null;
     try {
@@ -8211,7 +8230,7 @@ async function seedPizzint() {
     const fallback = besttimeKey ? await fetchPizzintBestTimeLocations(besttimeKey) : null;
     if (!raw && !fallback) return;
 
-    const locations = fallback || raw.data.map((d) => ({
+    const locations = fallback?.locations || raw.data.map((d) => ({
       placeId: d.place_id || '',
       name: d.name || '',
       address: d.address || '',
@@ -8232,6 +8251,24 @@ async function seedPizzint() {
 
     const previous = await envelopeRead(PIZZINT_REDIS_KEY);
     const adjusted = scorePizzintLocations(locations, previous?.pizzint, Date.now());
+    archive = recordPizzintHistory({
+      provider: fallback ? 'besttime' : 'pizzint',
+      locations: fallback?.historyLocations || locations,
+      capturedAt: new Date(Date.now()).toISOString(),
+    }, upstashEval).catch((e) => {
+      // A FIXED vocabulary, never the raw message: upstream error text can carry
+      // the request URL and its embedded credential, which is why the publication
+      // suite throws 'secret archive failure' and asserts it never reaches a log.
+      // The category still tells an operator whether the next poll can recover --
+      // bounds and validation repeat forever (a 25th upstream venue tripping
+      // MAX_LOCATIONS, say), write_rejected may be a one-off. Compared by name
+      // rather than instanceof so it survives a cross-realm error.
+      const category = e?.name === 'RangeError' ? 'bounds'
+        : e?.name === 'TypeError' ? 'validation'
+        : e?.message === 'history_write_failed' ? 'write_rejected' : 'unknown';
+      console.warn('[PizzINT] History archive failed:', category);
+    });
+    if (locations.length === 0) return;
     if (locations.every(l => l.noLiveSignal)) {
       console.warn('[PizzINT] No live signals; preserving last good observation');
       return;
@@ -8270,6 +8307,7 @@ async function seedPizzint() {
   } catch (e) {
     console.warn('[PizzINT] Seed error:', e?.message || e);
   } finally {
+    await archive;
     pizzintSeedInFlight = false;
   }
 }
