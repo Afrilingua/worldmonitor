@@ -1,6 +1,6 @@
 # PizzINT retained history
 
-The relay stores normalized venue observations separately from the 30-minute live seed. This archive supports an operator report. It does not change the public score, the API, or the browser.
+The relay stores normalized venue observations separately from the 45-minute live seed. This archive supports an operator report. It does not change the public score, the API, or the browser.
 
 `scripts/shared/pizzint-history.cjs` owns the record schema, validation, atomic write, decode rules, and evaluation. Each provider has one Redis hash per UTC capture date. A field identifies the venue and its UTC ten-minute slot. One Lua call writes a complete poll, keeps the newest capture in a slot, applies a fixed expiry at the UTC bucket end plus 90 days, and rejects a bucket above 4000 fields before it changes data. A poll has at most 24 venues.
 
@@ -62,6 +62,6 @@ Writer: `seedPizzint` in `scripts/ais-relay.cjs`. Reader: `scripts/evaluate-pizz
 
 Each bucket has a `seed-meta:<bucket-key>` entry written by the same Lua operation with the latest capture time and hash record count. It outlives its bucket by seven days so health reports a stale heartbeat rather than losing the heartbeat and the payload in the same instant.
 
-The same operation advances one provider-agnostic heartbeat at `seed-meta:intelligence:pizzint:history:v1` on a rolling seven-day TTL, whichever provider produced the write. That key is what `api/health.js` registers (`pizzintHistory`, `maxStaleMin` 30, matching the live sibling's 3x-interval budget): the daily buckets rotate by UTC date and split by provider, so watching one of those directly would read empty at every UTC midnight and stale whenever the BestTime fallback took over. The label is listed as on-demand, so an archive that has never run does not alarm, while one that has run and stopped reports `STALE_SEED`. Its clock never regresses.
+The same operation advances one provider-agnostic heartbeat at `seed-meta:intelligence:pizzint:history:v1` on a rolling seven-day TTL, whichever provider produced the write. That key is what `api/health.js` registers (`pizzintHistory`, `maxStaleMin` 45, matching the live sibling's 3x-interval budget): the daily buckets rotate by UTC date and split by provider, so watching one of those directly would read empty at every UTC midnight and stale whenever the BestTime fallback took over. The label is listed as on-demand, so an archive that has never run does not alarm, while one that has run and stopped reports `STALE_SEED`. Its clock never regresses.
 
 An archive failure logs `[PizzINT] History archive failed:` followed by one of `bounds`, `validation`, `write_rejected`, or `unknown`. The category is fixed vocabulary, never the upstream error text, which can carry the BestTime request URL and its key. `bounds` and `validation` repeat on every poll and need a code change; `write_rejected` can be a single failed round trip. Retries cannot regress the metadata clock, and a capacity refusal leaves both keys unchanged. The operator can inspect these entries independently of live-seed freshness.
