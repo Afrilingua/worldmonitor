@@ -2883,7 +2883,7 @@
       "tierTitle4": "Nivel 4: Agregadores y blogs",
       "tierTitleUndeclared": "Nivel no declarado: aún no revisado",
       "rosterSummary": "Publicado por {{publishers}}",
-      "rosterSummaryTier1": "Publicado por {{publishers}}, incluidos {{tier1}} de nivel 1",
+      "rosterSummaryTier1": "Publicado por {{publishers}} ({{tier1}} de nivel 1)",
       "rosterPublishers_one": "{{count}} medio",
       "rosterPublishers_many": "{{count}} medios",
       "rosterPublishers_other": "{{count}} medios"
