@@ -27,6 +27,13 @@ on:
         required: false
         type: string
 
+# Replace only requests that have not started. Active workflows still own their
+# SHA writer lock; scheduled invalidation and manual recovery must never be evicted.
+concurrency:
+  group: deploy-gate-events-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.run_id }}
+  queue: single
+  cancel-in-progress: false
+
 permissions:
   contents: read
   actions: read

@@ -1349,6 +1349,30 @@ describe('CI workflow coverage', () => {
     );
   });
 
+  it('coalesces completion events before any writer starts without evicting recovery runs (#8726)', () => {
+    const workflow = YAML.parse(deployGateWorkflow);
+    const admission = workflow.concurrency;
+    assert.ok(admission, 'completion bursts need workflow-level admission control');
+    assert.equal(admission.queue, 'single');
+    assert.equal(admission['cancel-in-progress'], false, 'never interrupt an active workflow');
+    assert.equal(admission.group, 'deploy-gate-events-${{ github.event_name == \'workflow_run\' && github.event.workflow_run.head_sha || github.run_id }}');
+
+    const group = (event: string, id: number, sha?: string) => admission.group.replace(
+      /\$\{\{(.*?)\}\}/g,
+      (_: string, expression: string) => String(runInNewContext(expression, {
+        github: { event_name: event, run_id: id, event: sha ? { workflow_run: { head_sha: sha } } : {} },
+      }, { timeout: 1000 })),
+    );
+    const sha = 'a'.repeat(40);
+    assert.equal(group('workflow_run', 1, sha), group('workflow_run', 2, sha));
+    assert.notEqual(group('workflow_run', 1, sha), group('workflow_run', 2, 'b'.repeat(40)));
+    assert.notEqual(group('workflow_run', 1, sha), `deploy-gate-${sha}`, 'admission must not acquire its own writer lock');
+    for (const event of ['schedule', 'workflow_dispatch']) {
+      assert.notEqual(group(event, 1), group(event, 2), `${event} runs must not replace each other`);
+      assert.notEqual(group(event, 1), group('workflow_run', 1, sha));
+    }
+  });
+
   it('serializes every deploy-gate writer by SHA behind the sweep phase barriers', () => {
     const workflow = YAML.parse(deployGateWorkflow) as {
       concurrency?: unknown;
@@ -1362,7 +1386,11 @@ describe('CI workflow coverage', () => {
     };
     const jobs = workflow.jobs ?? {};
 
-    assert.equal(workflow.concurrency, undefined, 'the controller must not hold a writer lock');
+    assert.match(
+      (workflow.concurrency as { group: string }).group,
+      /^deploy-gate-events-/,
+      'workflow admission must use a separate namespace from the SHA writer lock',
+    );
     assert.deepEqual(jobs.recover?.needs, ['discover', 'invalidate']);
     assert.equal(jobs.evaluate?.needs, 'recover');
     assert.deepEqual(jobs.gate?.needs, ['discover', 'invalidate', 'recover', 'evaluate']);
